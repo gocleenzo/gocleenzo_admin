@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 
@@ -8,7 +8,7 @@ type DaySchedule = {
   end: string     // "17:00"
   breaks: { from: string; to: string }[]
 }
-type WeekSchedule = Record<string, DaySchedule>  // "monday" → DaySchedule
+type WeekSchedule = Record<string, DaySchedule>  // "monday" â†’ DaySchedule
 
 type Worker = {
   id: string; full_name: string; phone: string; email: string
@@ -103,7 +103,7 @@ function elapsed(start: string, end?: string | null) {
   return Math.floor(((end ? new Date(end) : new Date()).getTime() - new Date(start).getTime()) / 1000)
 }
 
-// ── Work Hours Helpers ─────────────────────────────────────────
+// â”€â”€ Work Hours Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function secsToHrsLabel(s: number) {
   if (!s) return '0h'
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
@@ -128,7 +128,7 @@ function isoMonth(d: Date): string {
 }
 
 function weekLabel(w: string): string {
-  // "2024-W23" → "Jun W3"
+  // "2024-W23" â†’ "Jun W3"
   const [year, wNum] = w.split('-W')
   const jan1 = new Date(Number(year), 0, 1)
   const d = new Date(jan1.getTime() + (Number(wNum) - 1) * 7 * 86400000)
@@ -194,7 +194,7 @@ function buildWorkHours(completedBookings: any[]) {
   return { totalWorkSecs, todayWorkSecs, thisWeekWorkSecs, thisMonthWorkSecs, dailyHours, weeklyHours, monthlyHours }
 }
 
-// ── Work Hours Panel ────────────────────────────────────────────
+// â”€â”€ Work Hours Panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function WorkHoursPanel({ w }: { w: Worker }) {
   const [view, setView] = useState<'daily'|'weekly'|'monthly'>('weekly')
 
@@ -214,7 +214,7 @@ function WorkHoursPanel({ w }: { w: Worker }) {
   return (
     <div className="rounded-2xl border border-slate-200 overflow-hidden bg-white">
       <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-        <p className="text-xs font-black text-slate-700">⏱ Work Hours</p>
+        <p className="text-xs font-black text-slate-700">â± Work Hours</p>
         <span className="text-xs font-black text-cyan-700">{secsToHrsLabel(w.totalWorkSecs)} total</span>
       </div>
       <div className="p-4 space-y-4">
@@ -303,7 +303,7 @@ const JOB_STATUS: Record<string, { label: string; color: string; bg: string }> =
   cancelled:    { label: 'Cancelled',   color: '#DC2626', bg: '#FEE2E2' },
 }
 
-// ── Approval Tab (onboarding review) ────────────────────────────
+// â”€â”€ Approval Tab (onboarding review) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () => void }) {
   const [d, setD] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -331,7 +331,7 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
     } finally { setBusy(false) }
   }
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loadingâ€¦</div>
   if (!d) return <div className="p-8 text-center text-slate-400 text-sm">No response from server.</div>
   if (d.error) return (
     <div className="p-6">
@@ -376,27 +376,27 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
 
       {/* personal */}
       <ApSection title="Personal details">
-        <ApField label="Full name" value={p.full_name || '—'} />
-        <ApField label="Phone" value={p.phone || '—'} />
-        <ApField label="Email" value={p.email || '—'} />
-        <ApField label="Gender" value={p.gender || '—'} />
-        <ApField label="Date of birth" value={p.date_of_birth || '—'} />
-        <ApField label="Marital status" value={p.marital_status || '—'} />
-        <ApField label="Address" value={p.address || '—'} />
+        <ApField label="Full name" value={p.full_name || 'â€”'} />
+        <ApField label="Phone" value={p.phone || 'â€”'} />
+        <ApField label="Email" value={p.email || 'â€”'} />
+        <ApField label="Gender" value={p.gender || 'â€”'} />
+        <ApField label="Date of birth" value={p.date_of_birth || 'â€”'} />
+        <ApField label="Marital status" value={p.marital_status || 'â€”'} />
+        <ApField label="Address" value={p.address || 'â€”'} />
       </ApSection>
 
       {/* emergency */}
       <ApSection title="Emergency contact">
-        <ApField label="Name" value={p.emergency_name || '—'} />
-        <ApField label="Phone" value={p.emergency_phone || '—'} />
-        <ApField label="Relationship" value={p.emergency_relation || '—'} />
+        <ApField label="Name" value={p.emergency_name || 'â€”'} />
+        <ApField label="Phone" value={p.emergency_phone || 'â€”'} />
+        <ApField label="Relationship" value={p.emergency_relation || 'â€”'} />
       </ApSection>
 
       {/* work */}
       <ApSection title="Work preferences">
-        <ApField label="Available hours/day" value={p.available_hours != null ? String(p.available_hours) + ' hrs' : '—'} />
-        <ApField label="Base area" value={p.base_address || '—'} />
-        <ApField label="Other areas" value={p.work_areas_note || '—'} />
+        <ApField label="Available hours/day" value={p.available_hours != null ? String(p.available_hours) + ' hrs' : 'â€”'} />
+        <ApField label="Base area" value={p.base_address || 'â€”'} />
+        <ApField label="Other areas" value={p.work_areas_note || 'â€”'} />
       </ApSection>
 
       {/* documents */}
@@ -432,16 +432,16 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
               color: d.bank_verified ? '#15803d' : '#0891B2',
               borderColor: d.bank_verified ? '#86efac' : '#cbd5e1',
             }}>
-            {d.bank_verified ? '✓ Bank verified' : 'Mark bank verified'}
+            {d.bank_verified ? 'âœ“ Bank verified' : 'Mark bank verified'}
           </button>
         </div>
         <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
-          <ApField label="Holder" value={b.holder || '—'} mono />
-          <ApField label="Account no." value={b.account || '—'} mono />
-          <ApField label="IFSC" value={b.ifsc || '—'} mono />
-          <ApField label="UPI" value={b.upi || '—'} mono />
-          <ApField label="PAN" value={b.pan || '—'} mono />
-          <ApField label="Aadhaar" value={b.aadhaar || '—'} mono />
+          <ApField label="Holder" value={b.holder || 'â€”'} mono />
+          <ApField label="Account no." value={b.account || 'â€”'} mono />
+          <ApField label="IFSC" value={b.ifsc || 'â€”'} mono />
+          <ApField label="UPI" value={b.upi || 'â€”'} mono />
+          <ApField label="PAN" value={b.pan || 'â€”'} mono />
+          <ApField label="Aadhaar" value={b.aadhaar || 'â€”'} mono />
         </div>
         <p className="text-[11px] text-slate-400 mt-2">
           Tip: cross-check documents in the KYC tab. Bank verification via DigiLocker / penny-drop can be wired here later.
@@ -453,12 +453,12 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
         <button disabled={busy || d.status === 'rejected'}
           onClick={() => { const r = window.prompt('Reason for rejection (worker will see this):'); if (r !== null) act('reject', r) }}
           className="flex-1 py-3 rounded-xl font-bold text-white disabled:opacity-40" style={{ background: '#dc2626' }}>
-          {busy ? '…' : 'Reject'}
+          {busy ? 'â€¦' : 'Reject'}
         </button>
         <button disabled={busy || d.status === 'approved'}
           onClick={() => act('approve')}
           className="flex-1 py-3 rounded-xl font-bold text-white disabled:opacity-40" style={{ background: '#16a34a' }}>
-          {d.status === 'approved' ? 'Approved ✓' : busy ? '…' : 'Approve worker'}
+          {d.status === 'approved' ? 'Approved âœ“' : busy ? 'â€¦' : 'Approve worker'}
         </button>
       </div>
       {zoom && (
@@ -489,7 +489,7 @@ function ApField({ label, value, mono }: { label: string; value: string; mono?: 
   )
 }
 
-// ── KYC Tab (inside worker detail) ──────────────────────────────
+// â”€â”€ KYC Tab (inside worker detail) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function KycTab({ workerId }: { workerId: string }) {
   const [detail, setDetail] = useState<any>(null)
   const [urls, setUrls] = useState<Record<string, string | null>>({})
@@ -538,11 +538,11 @@ function KycTab({ workerId }: { workerId: string }) {
     ['signature', 'Signature'],
   ]
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading KYC…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading KYCâ€¦</div>
 
   if (!detail) return (
     <div className="p-8 text-center">
-      <p className="text-3xl mb-2">🪪</p>
+      <p className="text-3xl mb-2">ðŸªª</p>
       <p className="text-slate-600 font-bold text-sm">No KYC submitted yet</p>
       <p className="text-[11px] text-slate-400 mt-1">This worker hasn&apos;t started verification.</p>
     </div>
@@ -568,24 +568,24 @@ function KycTab({ workerId }: { workerId: string }) {
 
       {/* bank */}
       <KycSection title="Bank & payout">
-        <KycField label="Holder" value={detail.bank_holder || '—'} />
-        <KycField label="Account no." value={detail.bank_account || '—'} mono />
-        <KycField label="IFSC" value={detail.bank_ifsc || '—'} mono />
-        <KycField label="UPI ID" value={detail.upi_id || '—'} mono />
+        <KycField label="Holder" value={detail.bank_holder || 'â€”'} />
+        <KycField label="Account no." value={detail.bank_account || 'â€”'} mono />
+        <KycField label="IFSC" value={detail.bank_ifsc || 'â€”'} mono />
+        <KycField label="UPI ID" value={detail.upi_id || 'â€”'} mono />
       </KycSection>
 
       {/* identity */}
       <KycSection title="Identity">
-        <KycField label="PAN" value={detail.pan_number || '—'} mono />
-        <KycField label="Aadhaar" value={detail.aadhaar_number || '—'} mono />
+        <KycField label="PAN" value={detail.pan_number || 'â€”'} mono />
+        <KycField label="Aadhaar" value={detail.aadhaar_number || 'â€”'} mono />
       </KycSection>
 
       {/* personal */}
       <KycSection title="Personal">
-        <KycField label="Date of birth" value={detail.date_of_birth || '—'} />
-        <KycField label="Marital status" value={detail.marital_status || '—'} />
-        <KycField label="Number of kids" value={detail.number_of_kids || '—'} />
-        <KycField label="Languages" value={(detail.languages && detail.languages.length) ? detail.languages.join(', ') : '—'} />
+        <KycField label="Date of birth" value={detail.date_of_birth || 'â€”'} />
+        <KycField label="Marital status" value={detail.marital_status || 'â€”'} />
+        <KycField label="Number of kids" value={detail.number_of_kids || 'â€”'} />
+        <KycField label="Languages" value={(detail.languages && detail.languages.length) ? detail.languages.join(', ') : 'â€”'} />
       </KycSection>
 
       {/* documents */}
@@ -616,7 +616,7 @@ function KycTab({ workerId }: { workerId: string }) {
         ) : (
           consents.map((c: any, i: number) => (
             <KycField key={i} label={c.doc_type}
-              value={`${c.doc_version} · ${new Date(c.accepted_at).toLocaleDateString('en-IN')}`} />
+              value={`${c.doc_version} Â· ${new Date(c.accepted_at).toLocaleDateString('en-IN')}`} />
           ))
         )}
       </KycSection>
@@ -631,11 +631,11 @@ function KycTab({ workerId }: { workerId: string }) {
       <div className="flex gap-3 pt-1">
         <button disabled={busy || detail.status === 'rejected'} onClick={() => act('reject')}
           className="flex-1 py-3 rounded-xl font-bold text-white disabled:opacity-40" style={{ background: '#dc2626' }}>
-          {busy ? '…' : 'Reject'}
+          {busy ? 'â€¦' : 'Reject'}
         </button>
         <button disabled={busy || detail.status === 'verified'} onClick={() => act('verify')}
           className="flex-1 py-3 rounded-xl font-bold text-white disabled:opacity-40" style={{ background: '#16a34a' }}>
-          {detail.status === 'verified' ? 'Verified ✓' : busy ? '…' : 'Verify worker'}
+          {detail.status === 'verified' ? 'Verified âœ“' : busy ? 'â€¦' : 'Verify worker'}
         </button>
       </div>
 
@@ -667,7 +667,7 @@ function KycField({ label, value, mono }: { label: string; value: string; mono?:
   )
 }
 
-// ── Schedule Editor ─────────────────────────────────────────────
+// â”€â”€ Schedule Editor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function ScheduleEditor({ schedule, onChange }: { schedule: WeekSchedule; onChange: (s: WeekSchedule) => void }) {
   function updateDay(day: string, patch: Partial<DaySchedule>) {
     onChange({ ...schedule, [day]: { ...schedule[day], ...patch } })
@@ -734,14 +734,14 @@ function ScheduleEditor({ schedule, onChange }: { schedule: WeekSchedule; onChan
                     <span className="text-[10px] text-amber-700 font-bold">Break:</span>
                     <input type="time" value={b.from} onChange={e => updateBreak(day, i, 'from', e.target.value)}
                       className="px-2 py-1 rounded-lg text-[10px] font-bold text-slate-600 bg-white border border-amber-200 outline-none"/>
-                    <span className="text-[10px] text-slate-400">–</span>
+                    <span className="text-[10px] text-slate-400">â€“</span>
                     <input type="time" value={b.to} onChange={e => updateBreak(day, i, 'to', e.target.value)}
                       className="px-2 py-1 rounded-lg text-[10px] font-bold text-slate-600 bg-white border border-amber-200 outline-none"/>
                     <span className="text-[10px] text-amber-600">
                       -{minsToLabel(Math.max(0, timeToMins(b.to) - timeToMins(b.from)))}
                     </span>
                     <button onClick={() => removeBreak(day, i)}
-                      className="w-5 h-5 rounded-full bg-red-100 text-red-500 text-[10px] flex items-center justify-center hover:bg-red-200 transition-all ml-auto">✕</button>
+                      className="w-5 h-5 rounded-full bg-red-100 text-red-500 text-[10px] flex items-center justify-center hover:bg-red-200 transition-all ml-auto">âœ•</button>
                   </div>
                 ))}
               </div>
@@ -753,7 +753,7 @@ function ScheduleEditor({ schedule, onChange }: { schedule: WeekSchedule; onChan
   )
 }
 
-// ── Schedule Summary ────────────────────────────────────────────
+// â”€â”€ Schedule Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function ScheduleSummary({ schedule }: { schedule: WeekSchedule | null }) {
   if (!schedule) return (
     <div className="rounded-xl px-3 py-2 bg-slate-50 border border-slate-200 text-center">
@@ -776,13 +776,13 @@ function ScheduleSummary({ schedule }: { schedule: WeekSchedule | null }) {
             Today ({DAY_SHORT[todayName]})
           </p>
           {todayDay?.enabled
-            ? <p className="text-xs font-bold text-slate-700">{todayDay.start} – {todayDay.end} · {minsToLabel(netMins(todayDay))} net</p>
+            ? <p className="text-xs font-bold text-slate-700">{todayDay.start} â€“ {todayDay.end} Â· {minsToLabel(netMins(todayDay))} net</p>
             : <p className="text-xs text-slate-400">Day off</p>
           }
         </div>
         <span className="text-xs font-black px-2 py-1 rounded-lg"
           style={{ background: withinShift ? '#D1FAE5' : '#FEF3C7', color: withinShift ? '#059669' : '#D97706' }}>
-          {withinShift ? '✓ In Shift' : '✕ Off Shift'}
+          {withinShift ? 'âœ“ In Shift' : 'âœ• Off Shift'}
         </span>
       </div>
 
@@ -801,7 +801,7 @@ function ScheduleSummary({ schedule }: { schedule: WeekSchedule | null }) {
               }}>
               <p className="text-[8px] font-black text-slate-400">{DAY_SHORT[d].slice(0,2)}</p>
               <p className="text-[10px] font-black mt-0.5" style={{ color: !day?.enabled ? '#CBD5E1' : '#0891B2' }}>
-                {!day?.enabled ? '–' : minsToLabel(net)}
+                {!day?.enabled ? 'â€“' : minsToLabel(net)}
               </p>
             </div>
           )
@@ -817,14 +817,14 @@ function ScheduleSummary({ schedule }: { schedule: WeekSchedule | null }) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // UNIFIED WORKER TABS: Payouts, Earnings, Referrals, Tier, SOS
 // Each fetches only this worker's data via ?worker_id= filter.
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-function money(n: number) { return '₹' + (n ?? 0).toLocaleString('en-IN') }
+function money(n: number) { return 'â‚¹' + (n ?? 0).toLocaleString('en-IN') }
 function fmtDate(d?: string | null) {
-  if (!d) return '—'
+  if (!d) return 'â€”'
   return new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })
 }
 
@@ -836,7 +836,7 @@ const PAYOUT_ST: Record<string, { bg: string; fg: string; label: string }> = {
   rejected:   { bg: '#fee2e2', fg: '#b91c1c', label: 'Rejected' },
 }
 
-// ── Payouts tab (actionable) ────────────────────────────────────
+// â”€â”€ Payouts tab (actionable) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function PayoutsTab({ workerId }: { workerId: string }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -865,10 +865,10 @@ function PayoutsTab({ workerId }: { workerId: string }) {
     } finally { setBusy(null) }
   }
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading payouts…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading payoutsâ€¦</div>
   if (rows.length === 0) return (
     <div className="p-8 text-center">
-      <p className="text-3xl mb-2">💸</p>
+      <p className="text-3xl mb-2">ðŸ’¸</p>
       <p className="text-slate-600 font-bold text-sm">No payout requests</p>
     </div>
   )
@@ -882,7 +882,7 @@ function PayoutsTab({ workerId }: { workerId: string }) {
             <div className="flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-100">
               <div>
                 <p className="text-sm font-black text-slate-800">{money(r.amount)}</p>
-                <p className="text-[11px] text-slate-400">{fmtDate(r.from)} – {fmtDate(r.to)}</p>
+                <p className="text-[11px] text-slate-400">{fmtDate(r.from)} â€“ {fmtDate(r.to)}</p>
               </div>
               <span className="text-[11px] font-black px-2.5 py-1 rounded-full"
                 style={{ background: st.bg, color: st.fg }}>{st.label}</span>
@@ -922,7 +922,7 @@ function PayoutsTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── Earnings tab (read-only breakdown) ──────────────────────────
+// â”€â”€ Earnings tab (read-only breakdown) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function EarningsTab({ workerId }: { workerId: string }) {
   const [m, setM] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -938,7 +938,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
         fetch(`/api/tiers?status=all&worker_id=${workerId}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
       ])
 
-      // Base + Order — lifetime earned from the payroll engine (treated as the
+      // Base + Order â€” lifetime earned from the payroll engine (treated as the
       // earned baseline). Payout requests track what was actually withdrawn.
       const e = earnRes?.earnings ?? earnRes ?? {}
       const baseOrderEarned = Number(e.base ?? 0) + Number(e.order ?? 0)
@@ -954,7 +954,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
         else if (p.status !== 'rejected') { pendBaseOrder += bo; pendTravelPO += tv }
       }
 
-      // Travel claims — approved = paid, pending = pending. (Falls back to
+      // Travel claims â€” approved = paid, pending = pending. (Falls back to
       // payout-embedded travel if no separate claims exist.)
       const claims = claimRes?.claims ?? []
       let paidTravel = 0, pendTravel = 0
@@ -964,7 +964,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
       }
       if (paidTravel === 0 && pendTravel === 0) { paidTravel = paidTravelPO; pendTravel = pendTravelPO }
 
-      // Referral rewards — paid vs earned.
+      // Referral rewards â€” paid vs earned.
       const refs = refRes?.referrals ?? refRes?.rows ?? []
       let paidRef = 0, pendRef = 0
       for (const r of refs) {
@@ -972,7 +972,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
         else if (r.status === 'earned') pendRef += Number(r.amount ?? 0)
       }
 
-      // Tier bonuses — paid vs earned.
+      // Tier bonuses â€” paid vs earned.
       const tiers = tierRes?.rewards ?? tierRes?.rows ?? []
       let paidTier = 0, pendTier = 0
       for (const t of tiers) {
@@ -995,7 +995,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
   }
   useEffect(() => { load() }, [workerId])
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading money breakdown…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading money breakdownâ€¦</div>
   if (!m) return <div className="p-8 text-center text-slate-400 text-sm">No earnings data.</div>
 
   const srcRow = (label: string, paid: number, pend: number, color: string) => (
@@ -1053,7 +1053,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── Referrals tab ───────────────────────────────────────────────
+// â”€â”€ Referrals tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function ReferralsTab({ workerId }: { workerId: string }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -1082,10 +1082,10 @@ function ReferralsTab({ workerId }: { workerId: string }) {
     } finally { setBusy(null) }
   }
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading referrals…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading referralsâ€¦</div>
   if (rows.length === 0) return (
     <div className="p-8 text-center">
-      <p className="text-3xl mb-2">🎁</p>
+      <p className="text-3xl mb-2">ðŸŽ</p>
       <p className="text-slate-600 font-bold text-sm">No referrals yet</p>
     </div>
   )
@@ -1103,8 +1103,8 @@ function ReferralsTab({ workerId }: { workerId: string }) {
           <div key={r.id} className="rounded-xl border border-slate-200 p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-bold text-slate-800">{r.referred ?? '—'}</p>
-                <p className="text-[11px] text-slate-400">Code {r.code ?? '—'} · {r.jobs ?? 0} job(s)</p>
+                <p className="text-sm font-bold text-slate-800">{r.referred ?? 'â€”'}</p>
+                <p className="text-[11px] text-slate-400">Code {r.code ?? 'â€”'} Â· {r.jobs ?? 0} job(s)</p>
               </div>
               <div className="text-right">
                 <p className="text-sm font-black text-cyan-700">{money(r.amount)}</p>
@@ -1126,7 +1126,7 @@ function ReferralsTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── Tier tab ────────────────────────────────────────────────────
+// â”€â”€ Tier tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function TierTab({ workerId }: { workerId: string }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -1155,10 +1155,10 @@ function TierTab({ workerId }: { workerId: string }) {
     } finally { setBusy(null) }
   }
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading tiers…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading tiersâ€¦</div>
   if (rows.length === 0) return (
     <div className="p-8 text-center">
-      <p className="text-3xl mb-2">🏆</p>
+      <p className="text-3xl mb-2">ðŸ†</p>
       <p className="text-slate-600 font-bold text-sm">No tier rewards yet</p>
     </div>
   )
@@ -1176,7 +1176,7 @@ function TierTab({ workerId }: { workerId: string }) {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-black text-slate-800 capitalize">{r.tier} tier</p>
-                <p className="text-[11px] text-slate-400">Reached at {r.orders_at ?? '—'} orders</p>
+                <p className="text-[11px] text-slate-400">Reached at {r.orders_at ?? 'â€”'} orders</p>
               </div>
               <div className="text-right">
                 <p className="text-sm font-black text-cyan-700">{money(r.amount)}</p>
@@ -1198,7 +1198,7 @@ function TierTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── SOS tab (direct query) ──────────────────────────────────────
+// â”€â”€ SOS tab (direct query) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -1224,10 +1224,10 @@ function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
     } finally { setBusy(null) }
   }
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading SOS…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading SOSâ€¦</div>
   if (rows.length === 0) return (
     <div className="p-8 text-center">
-      <p className="text-3xl mb-2">🆘</p>
+      <p className="text-3xl mb-2">ðŸ†˜</p>
       <p className="text-slate-600 font-bold text-sm">No SOS alerts</p>
       <p className="text-[11px] text-slate-400 mt-1">This worker hasn&apos;t triggered any emergency alerts.</p>
     </div>
@@ -1243,13 +1243,13 @@ function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-black" style={{ color: active ? '#b91c1c' : '#334155' }}>
-                  {active ? '🔴 Active alert' : '✓ Resolved'}
+                  {active ? 'ðŸ”´ Active alert' : 'âœ“ Resolved'}
                 </p>
                 <p className="text-[11px] text-slate-400">{new Date(r.created_at).toLocaleString('en-IN')}</p>
               </div>
               {r.lat && r.lng && (
                 <a href={`https://www.google.com/maps?q=${r.lat},${r.lng}`} target="_blank" rel="noreferrer"
-                  className="text-[11px] font-black px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600">📍 Map</a>
+                  className="text-[11px] font-black px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600">ðŸ“ Map</a>
               )}
             </div>
             {active && (
@@ -1265,9 +1265,9 @@ function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   )
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// ScheduleRequestTab — worker-initiated schedule change requests
-// ═══════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// ScheduleRequestTab â€” worker-initiated schedule change requests
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const SCHED_DAYS = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
 const SCHED_SHORT: Record<string, string> = {
@@ -1341,7 +1341,7 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
     } finally { setBusy(false) }
   }
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading schedule…</div>
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading scheduleâ€¦</div>
   if (!data) return <div className="p-8 text-center text-slate-400 text-sm">No response from server.</div>
 
   const requests: any[] = data.requests ?? []
@@ -1359,10 +1359,10 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
         </div>
       )}
 
-      {/* ── Current live schedule ── */}
+      {/* â”€â”€ Current live schedule â”€â”€ */}
       <div>
         <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">
-          Current schedule {current ? `· ${schedLabel(schedWeekNet(current))}/week` : ''}
+          Current schedule {current ? `Â· ${schedLabel(schedWeekNet(current))}/week` : ''}
         </p>
         {current ? <SchedGrid sched={current} /> : (
           <div className="rounded-xl border border-slate-200 p-4 text-center">
@@ -1371,12 +1371,12 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
         )}
       </div>
 
-      {/* ── Pending request ── */}
+      {/* â”€â”€ Pending request â”€â”€ */}
       {pending ? (
         <div className="rounded-xl border-2 overflow-hidden" style={{ borderColor: '#FCD34D' }}>
           <div className="px-4 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
             <div>
-              <p className="text-xs font-black text-amber-800">⏳ Pending request</p>
+              <p className="text-xs font-black text-amber-800">â³ Pending request</p>
               <p className="text-[11px] text-amber-700 mt-0.5">
                 Asking for {schedLabel(pending.net_week_mins)}/week
                 {current ? ` (currently ${schedLabel(schedWeekNet(current))})` : ''}
@@ -1396,9 +1396,9 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
 
             {/* Estimated base pay change */}
             <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
-              <span className="text-[11px] text-slate-500">Est. base pay (₹50/hr)</span>
+              <span className="text-[11px] text-slate-500">Est. base pay (â‚¹50/hr)</span>
               <span className="text-[13px] font-black text-cyan-700">
-                ₹{Math.round((pending.net_week_mins / 60) * 50).toLocaleString('en-IN')}/week
+                â‚¹{Math.round((pending.net_week_mins / 60) * 50).toLocaleString('en-IN')}/week
               </span>
             </div>
 
@@ -1406,18 +1406,18 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
             {conflicts.length > 0 ? (
               <div className="rounded-xl bg-red-50 border border-red-200 p-3">
                 <p className="text-xs font-black text-red-700 mb-1.5">
-                  ⚠ {conflicts.length} booking{conflicts.length > 1 ? 's' : ''} would break
+                  âš  {conflicts.length} booking{conflicts.length > 1 ? 's' : ''} would break
                 </p>
                 <div className="space-y-1">
                   {conflicts.slice(0, 5).map((c: any, i: number) => (
                     <p key={i} className="text-[11px] text-red-600">
-                      • {new Date(c.scheduled_at).toLocaleString('en-IN', {
+                      â€¢ {new Date(c.scheduled_at).toLocaleString('en-IN', {
                           day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                      {' — '}{c.reason}
+                      {' â€” '}{c.reason}
                     </p>
                   ))}
                   {conflicts.length > 5 && (
-                    <p className="text-[11px] text-red-500">…and {conflicts.length - 5} more</p>
+                    <p className="text-[11px] text-red-500">â€¦and {conflicts.length - 5} more</p>
                   )}
                 </div>
                 <p className="text-[11px] text-red-500 mt-2">
@@ -1426,7 +1426,7 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
               </div>
             ) : (
               <div className="rounded-xl bg-green-50 border border-green-200 px-3 py-2">
-                <p className="text-xs font-bold text-green-700">✓ No booking conflicts — safe to approve</p>
+                <p className="text-xs font-bold text-green-700">âœ“ No booking conflicts â€” safe to approve</p>
               </div>
             )}
 
@@ -1434,12 +1434,12 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
               <button disabled={busy} onClick={() => act(pending.id, 'reject')}
                 className="flex-1 py-2.5 rounded-xl font-bold text-white text-sm disabled:opacity-40"
                 style={{ background: '#dc2626' }}>
-                {busy ? '…' : 'Reject'}
+                {busy ? 'â€¦' : 'Reject'}
               </button>
               <button disabled={busy || conflicts.length > 0} onClick={() => act(pending.id, 'approve')}
                 className="flex-1 py-2.5 rounded-xl font-bold text-white text-sm disabled:opacity-40"
                 style={{ background: conflicts.length > 0 ? '#94a3b8' : '#16a34a' }}>
-                {busy ? '…' : conflicts.length > 0 ? 'Blocked' : 'Approve'}
+                {busy ? 'â€¦' : conflicts.length > 0 ? 'Blocked' : 'Approve'}
               </button>
             </div>
           </div>
@@ -1453,7 +1453,7 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
         </div>
       )}
 
-      {/* ── History ── */}
+      {/* â”€â”€ History â”€â”€ */}
       {history.length > 0 && (
         <div>
           <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">
@@ -1468,7 +1468,7 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
                   </p>
                   <p className="text-[10px] text-slate-400">
                     {new Date(r.requested_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })}
-                    {r.reject_reason ? ` · ${r.reject_reason}` : ''}
+                    {r.reject_reason ? ` Â· ${r.reject_reason}` : ''}
                   </p>
                 </div>
                 <span className="text-[10px] font-black px-2 py-0.5 rounded-full"
@@ -1510,14 +1510,14 @@ function SchedGrid({ sched, highlight }: { sched: any; highlight?: boolean }) {
                   {schedLabel(net)}
                 </p>
                 <p className="text-[8px] text-slate-400 mt-0.5 leading-tight">
-                  {day.start}–{day.end}
+                  {day.start}â€“{day.end}
                 </p>
                 {breaks > 0 && (
                   <p className="text-[8px] text-amber-600">{breaks} brk</p>
                 )}
               </>
             ) : (
-              <p className="text-[10px] text-slate-300 mt-0.5">–</p>
+              <p className="text-[10px] text-slate-300 mt-0.5">â€“</p>
             )}
           </div>
         )
@@ -1526,7 +1526,7 @@ function SchedGrid({ sched, highlight }: { sched: any; highlight?: boolean }) {
   )
 }
 
-// ── Worker Detail Panel ─────────────────────────────────────────
+// â”€â”€ Worker Detail Panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onScheduleSave, toggling, onReload }: {
   w: Worker; index: number; onClose: () => void
   onEdit: () => void; onDelete: () => void
@@ -1563,27 +1563,27 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
   }
 
   const TABS = [
-    { key: 'overview' as const, label: 'Overview', icon: '▦' },
-    { key: 'approval' as const, label: 'Approval & KYC', icon: '✅' },
-    { key: 'schedule' as const, label: 'Schedule', icon: '🗓' },
-    { key: 'schedreq' as const, label: 'Schedule req', icon: '🗓' },
-    { key: 'hours'    as const, label: 'Hours',    icon: '⏱' },
-    { key: 'jobs'     as const, label: 'Jobs',     icon: '≡' },
-    { key: 'payouts'  as const, label: 'Payouts',  icon: '💸' },
-    { key: 'earnings' as const, label: 'Earnings', icon: '₹' },
-    { key: 'referrals'as const, label: 'Referrals',icon: '🎁' },
-    { key: 'tier'     as const, label: 'Tier',     icon: '🏆' },
-    { key: 'sos'      as const, label: 'SOS',      icon: '🆘' },
+    { key: 'overview' as const, label: 'Overview', icon: 'â–¦' },
+    { key: 'approval' as const, label: 'Approval & KYC', icon: 'âœ…' },
+    { key: 'schedule' as const, label: 'Schedule', icon: 'ðŸ—“' },
+    { key: 'schedreq' as const, label: 'Schedule req', icon: 'ðŸ—“' },
+    { key: 'hours'    as const, label: 'Hours',    icon: 'â±' },
+    { key: 'jobs'     as const, label: 'Jobs',     icon: 'â‰¡' },
+    { key: 'payouts'  as const, label: 'Payouts',  icon: 'ðŸ’¸' },
+    { key: 'earnings' as const, label: 'Earnings', icon: 'â‚¹' },
+    { key: 'referrals'as const, label: 'Referrals',icon: 'ðŸŽ' },
+    { key: 'tier'     as const, label: 'Tier',     icon: 'ðŸ†' },
+    { key: 'sos'      as const, label: 'SOS',      icon: 'ðŸ†˜' },
   ]
 
   return (
     <div className="bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm">
 
-      {/* ── Premium header ── */}
+      {/* â”€â”€ Premium header â”€â”€ */}
       <div className="relative px-6 pt-6 pb-5 overflow-hidden"
         style={{ background: `linear-gradient(135deg,${avatarBg}0D,transparent 60%)` }}>
         <button onClick={onClose}
-          className="absolute top-4 right-4 w-8 h-8 rounded-lg bg-white/70 backdrop-blur text-slate-400 flex items-center justify-center hover:bg-white hover:text-slate-600 transition-all border border-slate-200/60">✕</button>
+          className="absolute top-4 right-4 w-8 h-8 rounded-lg bg-white/70 backdrop-blur text-slate-400 flex items-center justify-center hover:bg-white hover:text-slate-600 transition-all border border-slate-200/60">âœ•</button>
 
         <div className="flex items-center gap-4">
           <div className="relative shrink-0">
@@ -1601,7 +1601,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
                 style={{ background: `${st.color}12`, color: st.color, borderColor: `${st.color}30` }}>
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: st.color }}/>{st.label}
               </span>
-              {w.is_verified && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200">✓ Verified</span>}
+              {w.is_verified && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200">âœ“ Verified</span>}
               {!w.is_active && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200">Inactive</span>}
             </div>
           </div>
@@ -1611,7 +1611,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
         {w.is_busy && w.current_service && w.work_started_at && (
           <div className="mt-4 px-3 py-2.5 rounded-xl bg-white border border-amber-200 flex items-center justify-between">
             <div className="min-w-0">
-              <p className="text-[10px] font-black uppercase tracking-wider text-amber-600">⚡ On a job now</p>
+              <p className="text-[10px] font-black uppercase tracking-wider text-amber-600">âš¡ On a job now</p>
               <p className="text-xs font-bold text-slate-700 truncate">{w.current_service}</p>
             </div>
             <LiveTimer start={w.work_started_at} color="#D97706"/>
@@ -1622,25 +1622,25 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
         <div className="flex gap-2 mt-4">
           {w.phone && (
             <a href={`tel:+91${w.phone}`} className="flex-1 h-9 rounded-lg flex items-center justify-center gap-1.5 text-xs font-bold bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:text-slate-800 transition-all">
-              📞 Call
+              ðŸ“ž Call
             </a>
           )}
           <button onClick={onEdit} className="flex-1 h-9 rounded-lg flex items-center justify-center gap-1.5 text-xs font-bold bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:text-slate-800 transition-all">
-            ✏️ Edit
+            âœï¸ Edit
           </button>
-          <button onClick={onDelete} className="w-9 h-9 rounded-lg flex items-center justify-center text-xs bg-white text-red-400 border border-slate-200 hover:border-red-200 hover:bg-red-50 transition-all">🗑</button>
+          <button onClick={onDelete} className="w-9 h-9 rounded-lg flex items-center justify-center text-xs bg-white text-red-400 border border-slate-200 hover:border-red-200 hover:bg-red-50 transition-all">ðŸ—‘</button>
         </div>
       </div>
 
-      {/* ── OTP strip (if set) ── */}
+      {/* â”€â”€ OTP strip (if set) â”€â”€ */}
       {w.worker_otp && (
         <div className="px-6 py-2.5 bg-violet-50/50 border-y border-violet-100 flex items-center justify-between">
-          <span className="text-[11px] font-bold text-violet-500 uppercase tracking-wide">🔐 Worker OTP</span>
+          <span className="text-[11px] font-bold text-violet-500 uppercase tracking-wide">ðŸ” Worker OTP</span>
           <span className="font-mono font-black text-lg tracking-[0.2em] text-violet-700">{w.worker_otp}</span>
         </div>
       )}
 
-      {/* ── Tabs ── */}
+      {/* â”€â”€ Tabs â”€â”€ */}
       <div className="flex gap-1 px-4 pt-3 border-b border-slate-100">
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
@@ -1654,16 +1654,16 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
 
       <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 340px)' }}>
 
-        {/* ── OVERVIEW TAB ── */}
+        {/* â”€â”€ OVERVIEW TAB â”€â”€ */}
         {tab === 'overview' && (
           <div className="p-5 space-y-4">
             {/* stat tiles */}
             <div className="grid grid-cols-2 gap-2.5">
               {[
-                { label: 'Revenue',   value: `₹${w.totalRevenue.toLocaleString('en-IN')}`, accent: '#0891B2' },
+                { label: 'Revenue',   value: `â‚¹${w.totalRevenue.toLocaleString('en-IN')}`, accent: '#0891B2' },
                 { label: 'Total Jobs',value: w.totalOrders, accent: '#7C3AED' },
                 { label: 'Completed', value: w.completed,   accent: '#059669' },
-                { label: 'Weekly Hrs',value: weekMins > 0 ? minsToLabel(weekMins) : '—', accent: '#D97706' },
+                { label: 'Weekly Hrs',value: weekMins > 0 ? minsToLabel(weekMins) : 'â€”', accent: '#D97706' },
               ].map(s => (
                 <div key={s.label} className="rounded-xl border border-slate-200 p-3.5">
                   <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-1">{s.label}</p>
@@ -1695,7 +1695,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
                   className="rounded-xl px-3 py-3 text-left transition-all border hover:border-slate-300 disabled:opacity-40 active:scale-[0.98]"
                   style={{ borderColor: ctrl.on ? `${ctrl.color}40` : '#E2E8F0', background: ctrl.on ? `${ctrl.color}0A` : '#fff' }}>
                   <p className="text-xs font-black" style={{ color: ctrl.on ? ctrl.color : '#94A3B8' }}>
-                    {toggling === ctrl.field ? 'Updating…' : ctrl.label}
+                    {toggling === ctrl.field ? 'Updatingâ€¦' : ctrl.label}
                   </p>
                 </button>
               ))}
@@ -1705,9 +1705,9 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
             {w.serviceBreakdown.length > 0 && (
               <div className="rounded-xl border border-slate-200 overflow-hidden">
                 <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                  <p className="text-xs font-black text-slate-700">✅ Completed work by service</p>
+                  <p className="text-xs font-black text-slate-700">âœ… Completed work by service</p>
                   <span className="text-[11px] font-black text-cyan-700">
-                    ₹{w.serviceBreakdown.reduce((s, x) => s + x.income, 0).toLocaleString('en-IN')} total
+                    â‚¹{w.serviceBreakdown.reduce((s, x) => s + x.income, 0).toLocaleString('en-IN')} total
                   </span>
                 </div>
                 <div className="divide-y divide-slate-100">
@@ -1715,9 +1715,9 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
                     <div key={sv.name} className="flex items-center justify-between px-4 py-2.5">
                       <div className="min-w-0">
                         <p className="text-[13px] font-bold text-slate-800 truncate">{sv.name}</p>
-                        <p className="text-[11px] text-slate-400">{sv.count} job{sv.count > 1 ? 's' : ''} · {secsToHrsLabel(sv.secs)}</p>
+                        <p className="text-[11px] text-slate-400">{sv.count} job{sv.count > 1 ? 's' : ''} Â· {secsToHrsLabel(sv.secs)}</p>
                       </div>
-                      <p className="text-[13px] font-black text-cyan-700 flex-shrink-0">₹{sv.income.toLocaleString('en-IN')}</p>
+                      <p className="text-[13px] font-black text-cyan-700 flex-shrink-0">â‚¹{sv.income.toLocaleString('en-IN')}</p>
                     </div>
                   ))}
                 </div>
@@ -1734,7 +1734,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
           </div>
         )}
 
-        {/* ── SCHEDULE TAB ── */}
+        {/* â”€â”€ SCHEDULE TAB â”€â”€ */}
         {tab === 'schedule' && (
           <div className="p-5">
             {editingSched ? (
@@ -1747,7 +1747,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
                     <button onClick={saveSched} disabled={savingSched}
                       className="text-[11px] font-black px-3 py-1.5 rounded-lg text-white disabled:opacity-50"
                       style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)' }}>
-                      {savingSched ? 'Saving…' : '✓ Save'}
+                      {savingSched ? 'Savingâ€¦' : 'âœ“ Save'}
                     </button>
                   </div>
                 </div>
@@ -1765,7 +1765,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
                   <p className="text-xs font-black text-slate-600">Work Schedule</p>
                   <button onClick={() => setEditing(true)}
                     className="text-[11px] font-black px-3 py-1.5 rounded-lg text-cyan-700 bg-cyan-50 border border-cyan-200 hover:bg-cyan-100 transition-all">
-                    ✏️ Edit schedule
+                    âœï¸ Edit schedule
                   </button>
                 </div>
                 <ScheduleSummary schedule={w.schedule}/>
@@ -1774,17 +1774,17 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
           </div>
         )}
 
-        {/* ── SCHEDULE REQUEST TAB (worker-initiated schedule change requests) ── */}
+        {/* â”€â”€ SCHEDULE REQUEST TAB (worker-initiated schedule change requests) â”€â”€ */}
         {tab === 'schedreq' && <ScheduleRequestTab workerId={w.id} onChanged={onReload} />}
 
-        {/* ── HOURS TAB ── */}
+        {/* â”€â”€ HOURS TAB â”€â”€ */}
         {tab === 'hours' && (
           <div className="p-5">
             <WorkHoursPanel w={w}/>
           </div>
         )}
 
-        {/* ── JOBS TAB (completed work: date · income · hours) ── */}
+        {/* â”€â”€ JOBS TAB (completed work: date Â· income Â· hours) â”€â”€ */}
         {tab === 'jobs' && (
           <div className="p-5">
             <p className="text-[11px] font-black uppercase tracking-wider text-slate-400 mb-2">Completed Jobs ({w.completedList.length})</p>
@@ -1801,12 +1801,12 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
                             <p className="text-slate-800 font-semibold text-xs truncate">{job.service_name}</p>
-                            <p className="text-[10px] text-slate-400 mt-0.5">📅 {new Date(doneOn).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })} · 📍 {job.area}</p>
-                            {jobDur && <p className="text-[10px] text-green-600 mt-0.5 font-mono">⏱ {dur(jobDur)}</p>}
+                            <p className="text-[10px] text-slate-400 mt-0.5">ðŸ“… {new Date(doneOn).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })} Â· ðŸ“ {job.area}</p>
+                            {jobDur && <p className="text-[10px] text-green-600 mt-0.5 font-mono">â± {dur(jobDur)}</p>}
                           </div>
                           <div className="flex flex-col items-end gap-1 flex-shrink-0">
                             <span className="text-[9px] font-black px-2 py-0.5 rounded-full" style={{ background: '#D1FAE5', color: '#059669' }}>Done</span>
-                            <p className="text-xs font-black text-cyan-700">₹{job.final_amount.toLocaleString('en-IN')}</p>
+                            <p className="text-xs font-black text-cyan-700">â‚¹{job.final_amount.toLocaleString('en-IN')}</p>
                           </div>
                         </div>
                       </div>
@@ -1825,10 +1825,10 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
           </div>
         )}
 
-        {/* ── APPROVAL TAB (details + documents + approve/reject) ── */}
+        {/* â”€â”€ APPROVAL TAB (details + documents + approve/reject) â”€â”€ */}
         {tab === 'approval' && <ApprovalTab workerId={w.id} onChanged={onReload} />}
 
-        {/* ── UNIFIED TABS ── */}
+        {/* â”€â”€ UNIFIED TABS â”€â”€ */}
         {tab === 'payouts' && <PayoutsTab workerId={w.id} />}
         {tab === 'earnings' && <EarningsTab workerId={w.id} />}
         {tab === 'referrals' && <ReferralsTab workerId={w.id} />}
@@ -1839,7 +1839,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
     </div>
   )
 }
-// ── Worker Form ─────────────────────────────────────────────────
+// â”€â”€ Worker Form â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init: any; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState(init)
   const [saving, setSaving] = useState(false)
@@ -1899,10 +1899,10 @@ function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init
         style={{ borderLeft: '1px solid #E2E8F0', boxShadow: '-20px 0 60px rgba(0,0,0,0.1)' }}>
         <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
           <div>
-            <h2 className="text-lg font-black text-slate-800">{mode === 'add' ? '+ Add Worker' : '✏️ Edit Worker'}</h2>
+            <h2 className="text-lg font-black text-slate-800">{mode === 'add' ? '+ Add Worker' : 'âœï¸ Edit Worker'}</h2>
             <p className="text-xs text-slate-400 mt-0.5">{mode === 'add' ? 'Add a new team member' : 'Update worker details'}</p>
           </div>
-          <button onClick={onClose} className="w-9 h-9 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center">✕</button>
+          <button onClick={onClose} className="w-9 h-9 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center">âœ•</button>
         </div>
         <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
           <div className="flex items-center gap-4 p-4 rounded-2xl bg-slate-50 border border-slate-200">
@@ -1926,7 +1926,7 @@ function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init
               <span className="px-3 py-3 text-sm font-bold bg-slate-50 text-slate-500 border-r border-slate-200 flex-shrink-0">+91</span>
               <input type="tel" value={form.phone} onChange={e => set('phone', e.target.value.replace(/\D/g,'').slice(0,10))} placeholder="98765 43210"
                 className="flex-1 px-4 py-3 text-slate-800 text-sm outline-none placeholder-slate-300"/>
-              {form.phone?.length === 10 && <span className="pr-4 text-green-600 font-bold">✓</span>}
+              {form.phone?.length === 10 && <span className="pr-4 text-green-600 font-bold">âœ“</span>}
             </div>
           </div>
           <div>
@@ -1949,7 +1949,7 @@ function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init
             />
             {form.worker_otp && form.worker_otp.length >= 3 && (
               <div className="mt-2 flex items-center gap-2 px-3 py-2 rounded-xl bg-violet-50 border border-violet-200">
-                <span>🔐</span>
+                <span>ðŸ”</span>
                 <p className="text-xs text-violet-700 font-bold">Worker will say <span className="font-mono font-black text-base tracking-widest">{form.worker_otp}</span> to customer</p>
               </div>
             )}
@@ -1973,13 +1973,13 @@ function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init
               </div>
             </button>
           ))}
-          {err && <p className="text-sm font-bold text-red-600 bg-red-50 px-4 py-3 rounded-xl border border-red-200">⚠️ {err}</p>}
+          {err && <p className="text-sm font-bold text-red-600 bg-red-50 px-4 py-3 rounded-xl border border-red-200">âš ï¸ {err}</p>}
         </div>
         <div className="px-6 py-5 border-t border-slate-100">
           <button onClick={save} disabled={saving}
             className="w-full h-14 rounded-2xl text-white font-black text-base disabled:opacity-50 active:scale-[0.98] transition-all"
             style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)', boxShadow: '0 8px 24px rgba(8,145,178,0.22)' }}>
-            {saving ? 'Saving…' : mode === 'add' ? '+ Add Worker' : '✓ Save Changes'}
+            {saving ? 'Savingâ€¦' : mode === 'add' ? '+ Add Worker' : 'âœ“ Save Changes'}
           </button>
         </div>
       </div>
@@ -1998,14 +1998,14 @@ function DeleteModal({ worker, onClose, onDone }: { worker: Worker; onClose: () 
     <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center px-4">
       <div className="w-full max-w-sm rounded-3xl p-6 space-y-5 bg-white border border-red-200 shadow-2xl">
         <div className="text-center">
-          <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl mx-auto mb-3 bg-red-50">🗑️</div>
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl mx-auto mb-3 bg-red-50">ðŸ—‘ï¸</div>
           <h3 className="text-slate-800 font-black text-lg">Remove Worker?</h3>
           <p className="text-sm text-slate-500 mt-2"><strong className="text-slate-700">{worker.full_name}</strong> will be removed. History preserved.</p>
         </div>
         <div className="flex gap-3">
           <button onClick={onClose} className="flex-1 h-12 rounded-2xl font-bold text-sm bg-slate-100 text-slate-500">Cancel</button>
           <button onClick={del} disabled={busy} className="flex-1 h-12 rounded-2xl font-black text-sm text-white disabled:opacity-50" style={{ background: 'linear-gradient(135deg,#EF4444,#DC2626)' }}>
-            {busy ? 'Removing…' : 'Remove'}
+            {busy ? 'Removingâ€¦' : 'Remove'}
           </button>
         </div>
       </div>
@@ -2013,7 +2013,7 @@ function DeleteModal({ worker, onClose, onDone }: { worker: Worker; onClose: () 
   )
 }
 
-// ── Status colour (matches maps: green/amber/grey + more) ──────
+// â”€â”€ Status colour (matches maps: green/amber/grey + more) â”€â”€â”€â”€â”€â”€
 function statusOf(w: Worker): { color: string; label: string } {
   const inShift = isWithinShift(w.schedule)
   if (!w.is_active)                       return { color: '#DC2626', label: 'Inactive' }
@@ -2023,7 +2023,7 @@ function statusOf(w: Worker): { color: string; label: string } {
   return { color: '#94A3B8', label: 'Unavailable' }
 }
 
-// ── Main Page ───────────────────────────────────────────────────
+// â”€â”€ Main Page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export default function AdminWorkers() {
   const [workers,  setWorkers]  = useState<Worker[]>([])
   const [loading,  setLoading]  = useState(true)
@@ -2043,7 +2043,7 @@ export default function AdminWorkers() {
       supabase.from('workers').select('user_id,is_available,is_verified,joined_at,schedule,worker_otp'),
       supabase.from('bookings').select('worker_id,status,final_amount,scheduled_at,work_started_at,work_ended_at,work_duration_seconds,services(name),addresses(area)').order('created_at', { ascending: false }),
       supabase.from('bookings').select('worker_id,work_started_at,services(name)').eq('status','in_progress'),
-    ])
+    ]) as any[]
     const wMap: Record<string,any> = {}
     ;(wRows ?? []).forEach((w: any) => { wMap[w.user_id] = w })
     const busyMap: Record<string,any> = {}
@@ -2058,7 +2058,7 @@ export default function AdminWorkers() {
       const recentBookings: RecentJob[] = wb.slice(0, 10).map((b: any) => ({
         id: b.id ?? Math.random().toString(),
         service_name: b.services?.name ?? 'Service',
-        area: b.addresses?.area ?? '—',
+        area: b.addresses?.area ?? 'â€”',
         status: b.status, final_amount: b.final_amount ?? 0, scheduled_at: b.scheduled_at,
         work_started_at: b.work_started_at ?? null, work_ended_at: b.work_ended_at ?? null,
       }))
@@ -2083,14 +2083,14 @@ export default function AdminWorkers() {
         .map((b: any) => ({
           id: b.id ?? Math.random().toString(),
           service_name: b.services?.name ?? 'Service',
-          area: b.addresses?.area ?? '—',
+          area: b.addresses?.area ?? 'â€”',
           status: b.status, final_amount: b.final_amount ?? 0, scheduled_at: b.scheduled_at,
           work_started_at: b.work_started_at ?? null, work_ended_at: b.work_ended_at ?? null,
         }))
 
       const wh = buildWorkHours(comp)
       return {
-        id: u.id, full_name: u.full_name ?? 'Unknown', phone: u.phone ?? '—', email: u.email ?? '',
+        id: u.id, full_name: u.full_name ?? 'Unknown', phone: u.phone ?? 'â€”', email: u.email ?? '',
         is_active: u.is_active ?? true, is_available: w.is_available !== undefined ? w.is_available : true, is_verified: w.is_verified ?? false,
         is_busy: !!busy, current_service: busy?.service ?? null, work_started_at: busy?.work_started_at ?? null,
         joined_at: w.joined_at ?? null, created_at: u.created_at ?? null,
@@ -2134,7 +2134,7 @@ export default function AdminWorkers() {
     if (field === 'is_active') {
       await supabase.from('users').update({ is_active: !w.is_active }).eq('id', w.id)
       if (w.is_active) {
-        // deactivating → mark unavailable too
+        // deactivating â†’ mark unavailable too
         await supabase.from('workers').upsert({ user_id: w.id, is_available: false }, { onConflict: 'user_id' })
       }
     } else {
@@ -2169,7 +2169,7 @@ export default function AdminWorkers() {
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
       <div className="flex flex-col items-center gap-3">
         <div className="w-10 h-10 rounded-full border-4 border-t-transparent animate-spin border-slate-200" style={{ borderTopColor: '#0891B2' }}/>
-        <p className="text-sm text-slate-400">Loading workers…</p>
+        <p className="text-sm text-slate-400">Loading workersâ€¦</p>
       </div>
     </div>
   )
@@ -2181,17 +2181,17 @@ export default function AdminWorkers() {
       <div className="flex items-center justify-between gap-4 mb-5">
         <div className="flex items-center gap-3">
           <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl"
-            style={{ background: '#06B6D414', border: '1px solid #06B6D425' }}>👷</div>
+            style={{ background: '#06B6D414', border: '1px solid #06B6D425' }}>ðŸ‘·</div>
           <div>
             <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">Workers</h1>
             <p className="text-xs text-slate-400 font-medium">
-              {workers.length} total · {busyCount} on job · {freeCount} free now
-              {pendingCount > 0 && <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-black text-[10px]">✅ {pendingCount} pending approval{pendingCount > 1 ? 's' : ''}</span>}
+              {workers.length} total Â· {busyCount} on job Â· {freeCount} free now
+              {pendingCount > 0 && <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-black text-[10px]">âœ… {pendingCount} pending approval{pendingCount > 1 ? 's' : ''}</span>}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <input type="text" placeholder="Search name or phone…" value={search} onChange={e => setSearch(e.target.value)}
+          <input type="text" placeholder="Search name or phoneâ€¦" value={search} onChange={e => setSearch(e.target.value)}
             className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-44 md:w-64"/>
           <button onClick={() => setDrawer('add')}
             className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-white font-black text-sm active:scale-95 transition-all whitespace-nowrap"
@@ -2201,13 +2201,13 @@ export default function AdminWorkers() {
         </div>
       </div>
 
-      {/* KPI row — dense */}
+      {/* KPI row â€” dense */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
         {[
-          { label: 'Total Workers',  value: workers.length, accent: '#0891B2', icon: '👷' },
-          { label: 'On Job Now',     value: busyCount,      accent: '#0891B2', icon: '⚡' },
-          { label: 'Free in Shift',  value: freeCount,      accent: '#059669', icon: '🟢' },
-          { label: 'Total Revenue',  value: `₹${totalRev > 99999 ? (totalRev/1000).toFixed(0)+'k' : totalRev.toLocaleString('en-IN')}`, accent: '#0E7490', icon: '💰' },
+          { label: 'Total Workers',  value: workers.length, accent: '#0891B2', icon: 'ðŸ‘·' },
+          { label: 'On Job Now',     value: busyCount,      accent: '#0891B2', icon: 'âš¡' },
+          { label: 'Free in Shift',  value: freeCount,      accent: '#059669', icon: 'ðŸŸ¢' },
+          { label: 'Total Revenue',  value: `â‚¹${totalRev > 99999 ? (totalRev/1000).toFixed(0)+'k' : totalRev.toLocaleString('en-IN')}`, accent: '#0E7490', icon: 'ðŸ’°' },
         ].map(c => (
           <div key={c.label} className="bg-white rounded-2xl border border-slate-200/80 p-5 hover:border-slate-300 hover:shadow-sm transition-all">
             <div className="flex items-center justify-between mb-2">
@@ -2234,7 +2234,7 @@ export default function AdminWorkers() {
           {filtered.length === 0
             ? (
               <div className="rounded-xl p-16 text-center bg-white border border-slate-200">
-                <p className="text-4xl mb-3">👷</p>
+                <p className="text-4xl mb-3">ðŸ‘·</p>
                 <p className="text-slate-700 font-bold">No workers found</p>
                 <button onClick={() => setDrawer('add')} className="mt-4 px-6 py-2.5 rounded-xl text-white font-black text-sm" style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)' }}>+ Add First Worker</button>
               </div>
@@ -2289,15 +2289,15 @@ export default function AdminWorkers() {
                             {/* Verified */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               {w.is_verified
-                                ? <span className="text-[11px] font-bold text-cyan-700">✓ Verified</span>
-                                : <span className="text-[11px] text-slate-400">—</span>}
+                                ? <span className="text-[11px] font-bold text-cyan-700">âœ“ Verified</span>
+                                : <span className="text-[11px] text-slate-400">â€”</span>}
                             </td>
                             {/* Jobs */}
                             <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-slate-700">{w.totalOrders}</td>
                             {/* Done */}
                             <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-emerald-600">{w.completed}</td>
                             {/* Revenue */}
-                            <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">₹{w.totalRevenue.toLocaleString('en-IN')}</td>
+                            <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">â‚¹{w.totalRevenue.toLocaleString('en-IN')}</td>
                             {/* OTP */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               {w.worker_otp
