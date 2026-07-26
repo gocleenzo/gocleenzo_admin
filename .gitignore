@@ -5,4 +5,3 @@ coverage/
 .env.local
 .env
 *.log
-next-env.d.ts
