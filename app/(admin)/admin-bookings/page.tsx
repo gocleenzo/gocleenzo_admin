@@ -23,7 +23,13 @@ type Booking = {
 type Worker = {
   id: string; name: string; phone: string
   is_available: boolean; is_busy: boolean
-  schedule: any | null
+  // Date-specific schedule (replaces the old day-of-week `schedule` JSONB).
+  // Keyed by 'yyyy-MM-dd' -> that date's hours, from worker_schedule_dates.
+  scheduleDates: Record<string, { enabled: boolean; start: string; end: string; breaks: { from: string; to: string }[] }> | null
+  // True if this worker has EVER set any date-specific schedule at all.
+  // Used to decide the fallback for dates with no explicit entry — see
+  // isWorkerAvailableAt.
+  hasAnyScheduleDates: boolean
 }
 
 const STATUS: Record<string, { label: string; color: string; bg: string; icon: string; step: number }> = {
@@ -68,6 +74,12 @@ function timeToMins(t: string) {
   const [h, m] = t.split(':').map(Number); return h * 60 + m
 }
 
+/// Local (Asia/Kolkata) date string 'yyyy-MM-dd' for a given Date.
+function localDateStr(d: Date): string {
+  const local = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+  return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
+}
+
 function isWorkerAvailableAt(
   worker: Worker, scheduledAt: string, durationMins: number,
   existingBookings: { worker_id: string; scheduled_at: string }[]
@@ -76,17 +88,29 @@ function isWorkerAvailableAt(
   const slotDt    = new Date(scheduledAt)
   const slotEnd   = new Date(slotDt.getTime() + durationMins * 60000)
   const localSlot = new Date(slotDt.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
-  if (worker.schedule) {
-    const days = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday']
-    const dayName = days[localSlot.getDay()]
-    const day = worker.schedule[dayName]
-    if (!day || !day.enabled) return false
+
+  // Date-specific schedule check (replaces the old day-of-week model —
+  // matches what the worker app now proposes/admin approves per date).
+  const dateStr = localDateStr(slotDt)
+  const dayEntry = worker.scheduleDates?.[dateStr]
+  if (dayEntry) {
+    if (!dayEntry.enabled) return false
     const slotMins = localSlot.getHours() * 60 + localSlot.getMinutes()
-    if (slotMins < timeToMins(day.start) || slotMins >= timeToMins(day.end)) return false
-    for (const b of (day.breaks ?? [])) {
+    if (slotMins < timeToMins(dayEntry.start) || slotMins >= timeToMins(dayEntry.end)) return false
+    for (const b of (dayEntry.breaks ?? [])) {
       if (slotMins >= timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
     }
+  } else if (worker.hasAnyScheduleDates) {
+    // This worker uses date-specific scheduling but has no entry for this
+    // exact date — treat as unavailable. Once a worker has started setting
+    // explicit dates, silence for a given date means "not scheduled", not
+    // "assume free" — that's the whole point of the date-specific model.
+    return false
   }
+  // else: worker has never set ANY date-specific schedule — fall back to
+  // "always available" so newly-onboarded workers aren't silently blocked
+  // from assignment before anyone has asked them to set a schedule.
+
   for (const bk of existingBookings) {
     if (bk.worker_id !== worker.id) continue
     const bkDt  = new Date(bk.scheduled_at)
@@ -617,7 +641,12 @@ export default function AdminBookings() {
     .map(b => ({ worker_id: b.worker_id ?? '', scheduled_at: b.scheduled_at }))
 
   const load = useCallback(async () => {
-    const [{ data: bd }, { data: wd }, { data: availData }, { data: activeJobs }, { data: schedData }] =
+    const todayStr = (() => {
+      const d = new Date()
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    })()
+
+    const [{ data: bd }, { data: wd }, { data: availData }, { data: activeJobs }, { data: schedDateRows }] =
       await Promise.all([
         supabase.from('bookings').select(
           `id,status,final_amount,base_price,discount_amount,scheduled_at,created_at,
@@ -633,13 +662,26 @@ export default function AdminBookings() {
         supabase.from('users').select('id,full_name,phone').eq('role','worker').order('full_name'),
         supabase.from('workers').select('user_id,is_available'),
         supabase.from('bookings').select('worker_id').eq('status','in_progress'),
-        supabase.from('workers').select('user_id,schedule'),
+        supabase.from('worker_schedule_dates')
+          .select('worker_id,date,enabled,start_time,end_time,breaks')
+          .gte('date', todayStr),
       ])
 
     const availMap: Record<string,boolean> = {}
     ;(availData ?? []).forEach((w: any) => { availMap[w.user_id] = w.is_available })
-    const schedMap: Record<string,any> = {}
-    ;(schedData ?? []).forEach((w: any) => { schedMap[w.user_id] = w.schedule })
+
+    // Group date-specific schedule rows by worker, then by date.
+    const scheduleDatesMap: Record<string, Record<string, any>> = {}
+    ;(schedDateRows ?? []).forEach((r: any) => {
+      if (!scheduleDatesMap[r.worker_id]) scheduleDatesMap[r.worker_id] = {}
+      scheduleDatesMap[r.worker_id][r.date] = {
+        enabled: r.enabled === true,
+        start: r.start_time ?? '09:00',
+        end: r.end_time ?? '17:00',
+        breaks: r.breaks ?? [],
+      }
+    })
+
     const busySet = new Set<string>()
     ;(activeJobs ?? []).forEach((b: any) => { if (b.worker_id) busySet.add(b.worker_id) })
 
@@ -697,7 +739,8 @@ export default function AdminBookings() {
       id: w.id, name: w.full_name ?? 'Unknown', phone: w.phone ?? '',
       is_available: availMap[w.id] !== undefined ? availMap[w.id] : true,
       is_busy: busySet.has(w.id),
-      schedule: schedMap[w.id] ?? null,
+      scheduleDates: scheduleDatesMap[w.id] ?? null,
+      hasAnyScheduleDates: !!scheduleDatesMap[w.id],
     })))
 
     setLoading(false)

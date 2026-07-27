@@ -1266,13 +1266,18 @@ function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// ScheduleRequestTab — worker-initiated schedule change requests
+// ScheduleDateRequestTab — worker-initiated DATE-SPECIFIC schedule requests
+// Reads/writes worker_schedule_date_requests + worker_schedule_dates
+// directly via Supabase (no dependency on a server API route).
+//
+// UI: a date-strip selector + a single detail card for whichever date is
+// selected — mirrors the worker app's pattern (one date's info visible at
+// a time) instead of a horizontal scroll of every date's compact card.
 // ═══════════════════════════════════════════════════════════════════
 
-const SCHED_DAYS = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
-const SCHED_SHORT: Record<string, string> = {
-  monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed', thursday: 'Thu',
-  friday: 'Fri', saturday: 'Sat', sunday: 'Sun',
+type DateEntry = {
+  date: string; enabled: boolean; start: string; end: string
+  breaks: { from: string; to: string }[]
 }
 
 function schedToMins(t: string) {
@@ -1285,42 +1290,84 @@ function schedLabel(mins: number) {
   if (m === 0) return `${h}h`
   return `${h}h ${m}m`
 }
-function schedDayNet(day: any): number {
-  if (!day || day.enabled !== true) return 0
-  const s = schedToMins(day.start), e = schedToMins(day.end)
-  let total = e - s
+function dateEntryNet(e: DateEntry | undefined): number {
+  if (!e || e.enabled !== true) return 0
+  const s = schedToMins(e.start), en = schedToMins(e.end)
+  let total = en - s
   if (total <= 0) return 0
-  for (const b of (day.breaks ?? [])) {
+  for (const b of (e.breaks ?? [])) {
     const bs = Math.max(schedToMins(b.from), s)
-    const be = Math.min(schedToMins(b.to), e)
+    const be = Math.min(schedToMins(b.to), en)
     total -= Math.max(0, be - bs)
   }
   return Math.max(0, total)
 }
-function schedWeekNet(sched: any): number {
-  if (!sched) return 0
-  return SCHED_DAYS.reduce((sum, d) => sum + schedDayNet(sched[d]), 0)
+function fmtDateShort(dateStr: string) {
+  const d = new Date(dateStr + 'T00:00:00')
+  return {
+    day: d.getDate(),
+    month: d.toLocaleDateString('en-IN', { month: 'short' }),
+    weekday: d.toLocaleDateString('en-IN', { weekday: 'short' }),
+  }
+}
+function fmtTime(t: string) {
+  const mins = schedToMins(t)
+  const h24 = Math.floor(mins / 60), m = mins % 60
+  const pm = h24 >= 12
+  let h12 = h24 % 12; if (h12 === 0) h12 = 12
+  return `${h12}:${String(m).padStart(2, '0')} ${pm ? 'PM' : 'AM'}`
 }
 
-function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChanged: () => void }) {
-  const [data, setData] = useState<any>(null)
+function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
+  workerId: string; supabase: any; onChanged: () => void
+}) {
+  const [liveDates, setLiveDates] = useState<DateEntry[]>([])
+  const [request, setRequest] = useState<any>(null)
+  const [history, setHistory] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [liveSelected, setLiveSelected] = useState<string | null>(null)
+  const [pendingSelected, setPendingSelected] = useState<string | null>(null)
 
   async function load() {
     setLoading(true); setErr(null)
     try {
-      const res = await fetch(
-        `/api/schedule-requests?status=all&worker_id=${workerId}`,
-        { cache: 'no-store' }
-      )
-      setData(await res.json())
-    } catch { setData(null) } finally { setLoading(false) }
+      const todayStr = new Date().toISOString().slice(0, 10)
+      const [{ data: liveRows }, { data: reqRows }] = await Promise.all([
+        supabase.from('worker_schedule_dates')
+          .select('date, enabled, start_time, end_time, breaks')
+          .eq('worker_id', workerId)
+          .gte('date', todayStr)
+          .order('date', { ascending: true }),
+        supabase.from('worker_schedule_date_requests')
+          .select('id, dates, status, net_total_mins, note, reject_reason, requested_at, reviewed_at')
+          .eq('worker_id', workerId)
+          .order('requested_at', { ascending: false })
+          .limit(10),
+      ])
+      const live: DateEntry[] = (liveRows ?? []).map((r: any) => ({
+        date: r.date, enabled: r.enabled === true,
+        start: r.start_time ?? '09:00', end: r.end_time ?? '17:00',
+        breaks: r.breaks ?? [],
+      }))
+      const all = reqRows ?? []
+      const pending = all.find((r: any) => r.status === 'pending') ?? null
+      const past = all.filter((r: any) => r.status !== 'pending')
+      setLiveDates(live)
+      setRequest(pending)
+      setHistory(past)
+      setLiveSelected(prev => prev && live.some(e => e.date === prev) ? prev : (live[0]?.date ?? null))
+      const pendingEntries: DateEntry[] = pending?.dates ?? []
+      setPendingSelected(prev => prev && pendingEntries.some((e: DateEntry) => e.date === prev) ? prev : (pendingEntries[0]?.date ?? null))
+    } catch {
+      setLiveDates([]); setRequest(null); setHistory([])
+    } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [workerId])
 
-  async function act(id: string, action: 'approve' | 'reject') {
+  async function act(action: 'approve' | 'reject') {
+    if (!request) return
     let reason: string | undefined
     if (action === 'reject') {
       const r = window.prompt('Reason for rejection (the worker will see this):')
@@ -1329,29 +1376,56 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
     }
     setBusy(true); setErr(null)
     try {
-      const res = await fetch('/api/schedule-requests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, action, reason }),
-      })
-      const j = await res.json()
-      if (!res.ok) { setErr(j.error ?? 'Action failed'); return }
+      if (action === 'approve') {
+        const entries: DateEntry[] = request.dates ?? []
+        // Write every date in the batch — including disabled ones — so a
+        // day the worker turned off is recorded as off, not just absent.
+        // This is the actual persistence step: proposed dates become the
+        // live, queryable schedule in worker_schedule_dates.
+        const rows = entries.map(e => ({
+          worker_id: workerId,
+          date: e.date,
+          enabled: e.enabled === true,
+          start_time: e.start,
+          end_time: e.end,
+          breaks: e.breaks ?? [],
+          updated_at: new Date().toISOString(),
+        }))
+        if (rows.length > 0) {
+          const { error } = await supabase.from('worker_schedule_dates')
+            .upsert(rows, { onConflict: 'worker_id,date' })
+          if (error) { setErr(error.message); setBusy(false); return }
+        }
+        await supabase.from('worker_schedule_date_requests')
+          .update({ status: 'approved', reviewed_at: new Date().toISOString() })
+          .eq('id', request.id)
+      } else {
+        await supabase.from('worker_schedule_date_requests')
+          .update({ status: 'rejected', reject_reason: reason, reviewed_at: new Date().toISOString() })
+          .eq('id', request.id)
+      }
       await load()
       onChanged()
+    } catch (e: any) {
+      setErr(e?.message ?? 'Action failed')
     } finally { setBusy(false) }
   }
 
   if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading schedule…</div>
-  if (!data) return <div className="p-8 text-center text-slate-400 text-sm">No response from server.</div>
 
-  const requests: any[] = data.requests ?? []
-  const pending = requests.find(r => r.status === 'pending')
-  const history = requests.filter(r => r.status !== 'pending')
-  const current = data.current
-  const conflicts: any[] = data.conflicts ?? []
+  const liveNet = liveDates.reduce((s, e) => s + dateEntryNet(e), 0)
+  const pendingEntries: DateEntry[] = request?.dates ?? []
+  const pendingNet = request?.net_total_mins ?? pendingEntries.reduce((s, e) => s + dateEntryNet(e), 0)
+  const liveEntry = liveDates.find(e => e.date === liveSelected)
+  const pendingEntry = pendingEntries.find(e => e.date === pendingSelected)
 
   return (
     <div className="p-5 space-y-4">
+      <div className="rounded-xl bg-blue-50 border border-blue-200 px-3 py-2.5">
+        <p className="text-[11px] text-blue-700 font-semibold">
+          📅 Date-specific schedule — each date is independent, no repeating weekly pattern.
+        </p>
+      </div>
 
       {err && (
         <div className="rounded-xl bg-red-50 border border-red-200 p-3">
@@ -1359,87 +1433,75 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
         </div>
       )}
 
-      {/* ── Current live schedule ── */}
+      {/* ── Current live dates ── */}
       <div>
         <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">
-          Current schedule {current ? `· ${schedLabel(schedWeekNet(current))}/week` : ''}
+          Approved upcoming dates {liveDates.length > 0 ? `· ${schedLabel(liveNet)} total` : ''}
         </p>
-        {current ? <SchedGrid sched={current} /> : (
+        {liveDates.length > 0 ? (
+          <>
+            <DateStrip entries={liveDates} selected={liveSelected} onSelect={setLiveSelected} />
+            {liveEntry && (
+              <div className="mt-2">
+                <DateDetailCard entry={liveEntry} />
+              </div>
+            )}
+          </>
+        ) : (
           <div className="rounded-xl border border-slate-200 p-4 text-center">
-            <p className="text-sm text-slate-400">No schedule set yet</p>
+            <p className="text-sm text-slate-400">No approved dates yet</p>
           </div>
         )}
       </div>
 
       {/* ── Pending request ── */}
-      {pending ? (
+      {request ? (
         <div className="rounded-xl border-2 overflow-hidden" style={{ borderColor: '#FCD34D' }}>
           <div className="px-4 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
             <div>
               <p className="text-xs font-black text-amber-800">⏳ Pending request</p>
               <p className="text-[11px] text-amber-700 mt-0.5">
-                Asking for {schedLabel(pending.net_week_mins)}/week
-                {current ? ` (currently ${schedLabel(schedWeekNet(current))})` : ''}
+                Proposing {schedLabel(pendingNet)} across {pendingEntries.length} date{pendingEntries.length === 1 ? '' : 's'}
               </p>
             </div>
             <p className="text-[11px] text-slate-500">
-              {new Date(pending.requested_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+              {new Date(request.requested_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
             </p>
           </div>
 
           <div className="p-4 space-y-3">
-            <SchedGrid sched={pending.proposed} highlight />
+            <DateStrip entries={pendingEntries} selected={pendingSelected} onSelect={setPendingSelected} highlight />
+            {pendingEntry && <DateDetailCard entry={pendingEntry} highlight />}
 
-            {pending.note && (
-              <p className="text-[12px] text-slate-600 italic">Note: {pending.note}</p>
+            {request.note && (
+              <p className="text-[12px] text-slate-600 italic">Note: {request.note}</p>
             )}
 
-            {/* Estimated base pay change */}
             <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
               <span className="text-[11px] text-slate-500">Est. base pay (₹50/hr)</span>
               <span className="text-[13px] font-black text-cyan-700">
-                ₹{Math.round((pending.net_week_mins / 60) * 50).toLocaleString('en-IN')}/week
+                ₹{Math.round((pendingNet / 60) * 50).toLocaleString('en-IN')}
               </span>
             </div>
 
-            {/* Conflict warning */}
-            {conflicts.length > 0 ? (
-              <div className="rounded-xl bg-red-50 border border-red-200 p-3">
-                <p className="text-xs font-black text-red-700 mb-1.5">
-                  ⚠ {conflicts.length} booking{conflicts.length > 1 ? 's' : ''} would break
-                </p>
-                <div className="space-y-1">
-                  {conflicts.slice(0, 5).map((c: any, i: number) => (
-                    <p key={i} className="text-[11px] text-red-600">
-                      • {new Date(c.scheduled_at).toLocaleString('en-IN', {
-                          day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                      {' — '}{c.reason}
-                    </p>
-                  ))}
-                  {conflicts.length > 5 && (
-                    <p className="text-[11px] text-red-500">…and {conflicts.length - 5} more</p>
-                  )}
-                </div>
-                <p className="text-[11px] text-red-500 mt-2">
-                  Approval is blocked until these bookings are moved or cancelled.
-                </p>
-              </div>
-            ) : (
-              <div className="rounded-xl bg-green-50 border border-green-200 px-3 py-2">
-                <p className="text-xs font-bold text-green-700">✓ No booking conflicts — safe to approve</p>
-              </div>
-            )}
+            <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2">
+              <p className="text-[11px] text-slate-500">
+                ⓘ Booking-conflict checking for date-specific schedules isn&apos;t wired up yet —
+                double-check this worker&apos;s upcoming bookings before approving a change
+                that removes hours from a date they&apos;re already booked on.
+              </p>
+            </div>
 
             <div className="flex gap-2 pt-1">
-              <button disabled={busy} onClick={() => act(pending.id, 'reject')}
+              <button disabled={busy} onClick={() => act('reject')}
                 className="flex-1 py-2.5 rounded-xl font-bold text-white text-sm disabled:opacity-40"
                 style={{ background: '#dc2626' }}>
                 {busy ? '…' : 'Reject'}
               </button>
-              <button disabled={busy || conflicts.length > 0} onClick={() => act(pending.id, 'approve')}
+              <button disabled={busy} onClick={() => act('approve')}
                 className="flex-1 py-2.5 rounded-xl font-bold text-white text-sm disabled:opacity-40"
-                style={{ background: conflicts.length > 0 ? '#94a3b8' : '#16a34a' }}>
-                {busy ? '…' : conflicts.length > 0 ? 'Blocked' : 'Approve'}
+                style={{ background: '#16a34a' }}>
+                {busy ? '…' : 'Approve'}
               </button>
             </div>
           </div>
@@ -1448,7 +1510,7 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
         <div className="rounded-xl border border-slate-200 p-4 text-center">
           <p className="text-sm text-slate-500 font-semibold">No pending request</p>
           <p className="text-[11px] text-slate-400 mt-0.5">
-            The worker can propose new hours from their app.
+            The worker can propose new dates from their app.
           </p>
         </div>
       )}
@@ -1464,7 +1526,7 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
               <div key={r.id} className="flex items-center justify-between px-3 py-2.5">
                 <div>
                   <p className="text-[12px] font-bold text-slate-700">
-                    {schedLabel(r.net_week_mins)}/week
+                    {schedLabel(r.net_total_mins ?? 0)} · {(r.dates ?? []).length} date{(r.dates ?? []).length === 1 ? '' : 's'}
                   </p>
                   <p className="text-[10px] text-slate-400">
                     {new Date(r.requested_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })}
@@ -1487,44 +1549,85 @@ function ScheduleRequestTab({ workerId, onChanged }: { workerId: string; onChang
   )
 }
 
-/// Compact 7-day grid used for both current and proposed schedules.
-function SchedGrid({ sched, highlight }: { sched: any; highlight?: boolean }) {
+/// Horizontally scrollable date-strip selector — tap a date to view its
+/// detail below. Mirrors the worker app's date-strip pattern.
+function DateStrip({ entries, selected, onSelect, highlight }: {
+  entries: DateEntry[]; selected: string | null; onSelect: (date: string) => void; highlight?: boolean
+}) {
   return (
-    <div className="grid grid-cols-7 gap-1.5">
-      {SCHED_DAYS.map(d => {
-        const day = sched?.[d]
-        const on = day?.enabled === true
-        const net = schedDayNet(day)
-        const breaks = (day?.breaks ?? []).length
+    <div className="flex gap-1.5 overflow-x-auto pb-1">
+      {entries.map(e => {
+        const isSel = e.date === selected
+        const { day, month, weekday } = fmtDateShort(e.date)
+        const activeBg = highlight ? '#F59E0B' : '#0891B2'
         return (
-          <div key={d} className="rounded-xl p-2 text-center border"
+          <button key={e.date} onClick={() => onSelect(e.date)}
+            className="rounded-xl p-2 text-center border flex-shrink-0 transition-all"
             style={{
-              background: !on ? '#F8FAFC' : highlight ? '#FFFBEB' : '#ECFEFF',
-              borderColor: !on ? '#F1F5F9' : highlight ? '#FDE68A' : '#A5F3FC',
+              width: 64,
+              background: isSel ? activeBg : (e.enabled ? (highlight ? '#FFFBEB' : '#ECFEFF') : '#F8FAFC'),
+              borderColor: isSel ? 'transparent' : (e.enabled ? (highlight ? '#FDE68A' : '#A5F3FC') : '#F1F5F9'),
             }}>
-            <p className="text-[9px] font-black text-slate-400">{SCHED_SHORT[d]}</p>
-            {on ? (
-              <>
-                <p className="text-[10px] font-black mt-0.5"
-                  style={{ color: highlight ? '#B45309' : '#0891B2' }}>
-                  {schedLabel(net)}
-                </p>
-                <p className="text-[8px] text-slate-400 mt-0.5 leading-tight">
-                  {day.start}–{day.end}
-                </p>
-                {breaks > 0 && (
-                  <p className="text-[8px] text-amber-600">{breaks} brk</p>
-                )}
-              </>
-            ) : (
-              <p className="text-[10px] text-slate-300 mt-0.5">–</p>
-            )}
-          </div>
+            <p className="text-[9px] font-black" style={{ color: isSel ? '#fff' : '#94a3b8' }}>{weekday}</p>
+            <p className="text-[11px] font-black mt-0.5" style={{ color: isSel ? '#fff' : '#334155' }}>{day} {month}</p>
+            <p className="text-[9px] font-bold mt-0.5"
+              style={{ color: isSel ? 'rgba(255,255,255,0.85)' : (e.enabled ? '#059669' : '#94a3b8') }}>
+              {e.enabled ? schedLabel(dateEntryNet(e)) : 'Off'}
+            </p>
+          </button>
         )
       })}
     </div>
   )
 }
+
+/// Full detail for the single selected date — hours, break, net total.
+function DateDetailCard({ entry, highlight }: { entry: DateEntry; highlight?: boolean }) {
+  const d = new Date(entry.date + 'T00:00:00')
+  const fullWeekday = d.toLocaleDateString('en-IN', { weekday: 'long' })
+  const fullDate = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long' })
+
+  return (
+    <div className="rounded-xl border p-4"
+      style={{ borderColor: highlight ? '#FDE68A' : '#E2E8F0', background: highlight ? '#FFFBEB' : '#fff' }}>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <p className="text-sm font-black text-slate-800">{fullWeekday}</p>
+          <p className="text-xs text-slate-400">{fullDate}</p>
+        </div>
+        <span className="text-xs font-black px-2.5 py-1 rounded-full"
+          style={{ background: entry.enabled ? '#DCFCE7' : '#F1F5F9', color: entry.enabled ? '#15803D' : '#94A3B8' }}>
+          {entry.enabled ? 'Working' : 'Off'}
+        </span>
+      </div>
+      {entry.enabled ? (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-slate-400 w-12">Hours</span>
+            <span className="text-sm font-black text-cyan-700">{fmtTime(entry.start)} – {fmtTime(entry.end)}</span>
+            <span className="text-[11px] font-bold text-slate-400">({schedLabel(dateEntryNet(entry))})</span>
+          </div>
+          {entry.breaks.length > 0 ? (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-slate-400 w-12">Break</span>
+              <span className="text-sm font-bold text-amber-600">
+                {fmtTime(entry.breaks[0].from)} – {fmtTime(entry.breaks[0].to)}
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-slate-400 w-12">Break</span>
+              <span className="text-sm text-slate-400">None</span>
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-sm text-slate-400">No shift scheduled this day</p>
+      )}
+    </div>
+  )
+}
+
 
 // ── Worker Detail Panel ─────────────────────────────────────────
 function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onScheduleSave, toggling, onReload }: {
@@ -1775,7 +1878,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, onSchedul
         )}
 
         {/* ── SCHEDULE REQUEST TAB (worker-initiated schedule change requests) ── */}
-        {tab === 'schedreq' && <ScheduleRequestTab workerId={w.id} onChanged={onReload} />}
+        {tab === 'schedreq' && <ScheduleDateRequestTab workerId={w.id} supabase={createClient()} onChanged={onReload} />}
 
         {/* ── HOURS TAB ── */}
         {tab === 'hours' && (
@@ -2043,7 +2146,7 @@ export default function AdminWorkers() {
       supabase.from('workers').select('user_id,is_available,is_verified,joined_at,schedule,worker_otp'),
       supabase.from('bookings').select('worker_id,status,final_amount,scheduled_at,work_started_at,work_ended_at,work_duration_seconds,services(name),addresses(area)').order('created_at', { ascending: false }),
       supabase.from('bookings').select('worker_id,work_started_at,services(name)').eq('status','in_progress'),
-    ])
+    ]) as any[]
     const wMap: Record<string,any> = {}
     ;(wRows ?? []).forEach((w: any) => { wMap[w.user_id] = w })
     const busyMap: Record<string,any> = {}
