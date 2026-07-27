@@ -9,7 +9,7 @@
     "date-fns": "^4.3.0",
     "google-auth-library": "^10.9.0",
     "lucide-react": "^1.16.0",
-    "next": "^15.2.4",
+    "next": "^15.5.21",
     "postcss": "^8.5.15",
     "razorpay": "^2.9.6",
     "react-hook-form": "^7.76.1",

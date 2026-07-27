@@ -1,12 +1,12 @@
 // lib/otp.ts
-// OTP generation for booking confirmation (NOT for auth — auth uses Supabase phone OTP)
+// OTP generation for booking confirmation (NOT for auth - auth uses Supabase phone OTP)
 
-// ─── Generate OTP (for booking verification) ─────────────────────────────────
+// --- Generate OTP (for booking verification) ---
 export function generateOtp(): string {
   return Math.floor(100000 + Math.random() * 900000).toString()
 }
 
-// ─── Send booking confirmation SMS ────────────────────────────────────────────
+// --- Send booking confirmation SMS ---
 // PLACEHOLDER: no SMS provider is currently configured for this project
 // (MSG91 was removed; Supabase Phone Auth only handles login OTP, not
 // arbitrary outbound messages). This logs instead of sending so booking
@@ -24,11 +24,9 @@ export async function sendBookingConfirmationSms(
 ): Promise<boolean> {
   try {
     console.log(
-      `[sendBookingConfirmationSms] STUB — no SMS provider configured. ` +
-      `Would send to ${phone}: "${serviceLabel} booked for ${scheduledAt}. Your OTP: ${otp}"`
+      '[sendBookingConfirmationSms] STUB - no SMS provider configured. ' +
+      'Would send to ' + phone + ': "' + serviceLabel + ' booked for ' + scheduledAt + '. Your OTP: ' + otp + '"'
     )
-    // No-op: return true so callers don't treat this as a failure while
-    // it's still a placeholder.
     return true
   } catch (err) {
     console.error('sendBookingConfirmationSms error:', err)
