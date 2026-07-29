@@ -7,10 +7,13 @@ type AreaRow = {
   country: string
   state: string
   city: string
-  area: string
+  area: string      // friendly display label, e.g. "Vile Parle" — NOT the match key anymore
+  pincode: string | null
   is_active: boolean
   created_at: string
 }
+
+const PINCODE_RE = /^[1-9][0-9]{5}$/ // Indian pincodes: 6 digits, doesn't start with 0
 
 export default function AdminServiceAreas() {
   const supabase = createClient()
@@ -19,16 +22,14 @@ export default function AdminServiceAreas() {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
 
-  // location selector state
   const [country, setCountry] = useState('India')
   const [state, setState] = useState('')
   const [city, setCity] = useState('')
 
-  // new-area input
-  const [newArea, setNewArea] = useState('')
+  const [newPincode, setNewPincode] = useState('')
+  const [newLabel, setNewLabel] = useState('')
   const [adding, setAdding] = useState(false)
 
-  // "add new city" mini-form toggle
   const [showNewCity, setShowNewCity] = useState(false)
   const [newState, setNewState] = useState('')
   const [newCity, setNewCity] = useState('')
@@ -42,12 +43,10 @@ export default function AdminServiceAreas() {
         .order('country', { ascending: true })
         .order('state', { ascending: true })
         .order('city', { ascending: true })
-        .order('area', { ascending: true })
+        .order('pincode', { ascending: true })
       if (error) { setErr(error.message); setLoading(false); return }
       const all = (data ?? []) as AreaRow[]
       setRows(all)
-      // default the selector to the first existing state/city, if any and
-      // nothing is selected yet
       if (!state && all.length > 0) {
         setState(all[0].state)
         setCity(all[0].city)
@@ -60,7 +59,6 @@ export default function AdminServiceAreas() {
   }
   useEffect(() => { load() }, [])
 
-  // Distinct states / cities derived from existing rows, for the selectors.
   const states = Array.from(new Set(rows.map(r => r.state))).sort()
   const citiesForState = Array.from(
     new Set(rows.filter(r => r.state === state).map(r => r.city))
@@ -70,6 +68,7 @@ export default function AdminServiceAreas() {
     r => r.country === country && r.state === state && r.city === city
   )
   const activeCount = currentAreas.filter(r => r.is_active).length
+  const missingPincodeCount = currentAreas.filter(r => !r.pincode).length
 
   async function toggleArea(row: AreaRow) {
     setRows(prev => prev.map(r => r.id === row.id ? { ...r, is_active: !r.is_active } : r))
@@ -78,32 +77,44 @@ export default function AdminServiceAreas() {
       .update({ is_active: !row.is_active })
       .eq('id', row.id)
     if (error) {
-      // revert on failure
       setRows(prev => prev.map(r => r.id === row.id ? { ...r, is_active: row.is_active } : r))
       setErr(error.message)
     }
   }
 
   async function deleteArea(row: AreaRow) {
-    if (!window.confirm(`Remove "${row.area}" from ${row.city}? Customers there will no longer be able to book.`)) return
+    const label = row.area || row.pincode || 'this entry'
+    if (!window.confirm(`Remove "${label}" from ${row.city}? Customers in this pincode will no longer be able to book.`)) return
     setRows(prev => prev.filter(r => r.id !== row.id))
     const { error } = await supabase.from('service_areas').delete().eq('id', row.id)
     if (error) { setErr(error.message); await load() }
   }
 
   async function addArea() {
-    const name = newArea.trim()
-    if (!name || !state || !city) return
+    const pincode = newPincode.trim()
+    const label = newLabel.trim()
+    if (!PINCODE_RE.test(pincode)) {
+      setErr('Enter a valid 6-digit pincode')
+      return
+    }
+    if (!state || !city) return
     setAdding(true); setErr(null)
     try {
       const { data, error } = await supabase
         .from('service_areas')
-        .insert({ country, state, city, area: name, is_active: true })
+        .insert({ country, state, city, pincode, area: label || pincode, is_active: true })
         .select('*')
         .single()
-      if (error) { setErr(error.message); setAdding(false); return }
+      if (error) {
+        setErr(error.code === '23505'
+          ? 'That pincode is already added for this city.'
+          : error.message)
+        setAdding(false)
+        return
+      }
       setRows(prev => [...prev, data as AreaRow])
-      setNewArea('')
+      setNewPincode('')
+      setNewLabel('')
     } finally {
       setAdding(false)
     }
@@ -112,8 +123,6 @@ export default function AdminServiceAreas() {
   async function addCity() {
     const s = newState.trim(), c = newCity.trim()
     if (!s || !c) return
-    // Just switch the selector to this new state/city — the city doesn't
-    // exist as a "thing" in the DB until the first area is added to it.
     setState(s)
     setCity(c)
     setShowNewCity(false)
@@ -126,8 +135,9 @@ export default function AdminServiceAreas() {
       <div>
         <h1 className="text-xl font-black text-slate-800">Service Areas</h1>
         <p className="text-sm text-slate-500 mt-1">
-          Choose which areas Cleenzo is available in. Customers outside these areas can
-          still browse the app, but can&apos;t complete a booking.
+          Add the pincodes Cleenzo serves. A customer&apos;s address is matched by its
+          exact pincode — customers outside these pincodes can still browse the app,
+          but can&apos;t complete a booking.
         </p>
       </div>
 
@@ -195,23 +205,33 @@ export default function AdminServiceAreas() {
         )}
       </div>
 
-      {/* Areas for the selected city */}
+      {/* Pincodes for the selected city */}
       {state && city ? (
         <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm font-black text-slate-800">
-              Areas in {city}, {state}
+              Pincodes in {city}, {state}
             </p>
             <span className="text-[11px] font-bold text-cyan-700 bg-cyan-50 px-2.5 py-1 rounded-full">
               {activeCount} active
             </span>
           </div>
 
+          {missingPincodeCount > 0 && (
+            <div className="rounded-xl bg-amber-50 border border-amber-200 p-3">
+              <p className="text-xs font-bold text-amber-800">
+                {missingPincodeCount} area{missingPincodeCount > 1 ? 's' : ''} here {missingPincodeCount > 1 ? 'have' : 'has'} no pincode set —
+                they won&apos;t match any customer until you add one (edit isn&apos;t supported yet;
+                delete and re-add with a pincode).
+              </p>
+            </div>
+          )}
+
           {loading ? (
             <p className="text-sm text-slate-400 text-center py-6">Loading…</p>
           ) : currentAreas.length === 0 ? (
             <p className="text-sm text-slate-400 text-center py-6">
-              No areas added yet for this city — add the first one below.
+              No pincodes added yet for this city — add the first one below.
             </p>
           ) : (
             <div className="space-y-2">
@@ -223,9 +243,16 @@ export default function AdminServiceAreas() {
                     borderColor: row.is_active ? '#A5F3FC' : '#E2E8F0',
                   }}>
                   <div className="flex items-center gap-3">
-                    <span className="text-sm font-bold" style={{ color: row.is_active ? '#0E7490' : '#94A3B8' }}>
-                      {row.area}
+                    <span className="text-sm font-black font-mono"
+                      style={{ color: row.is_active ? '#0E7490' : '#94A3B8' }}>
+                      {row.pincode || '——————'}
                     </span>
+                    {row.area && (
+                      <span className="text-sm font-semibold"
+                        style={{ color: row.is_active ? '#0891B2' : '#94A3B8' }}>
+                        {row.area}
+                      </span>
+                    )}
                     <span className="text-[10px] font-black px-2 py-0.5 rounded-full"
                       style={{
                         background: row.is_active ? '#DCFCE7' : '#F1F5F9',
@@ -251,13 +278,19 @@ export default function AdminServiceAreas() {
             </div>
           )}
 
-          {/* Add new area */}
-          <div className="flex gap-2 pt-2 border-t border-slate-100">
-            <input value={newArea} onChange={e => setNewArea(e.target.value)}
+          {/* Add new pincode */}
+          <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-slate-100">
+            <input value={newPincode}
+              onChange={e => setNewPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
               onKeyDown={e => { if (e.key === 'Enter') addArea() }}
-              placeholder="Add an area (e.g. Vile Parle)"
+              placeholder="Pincode (e.g. 400056)"
+              inputMode="numeric"
+              className="w-full sm:w-40 px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono outline-none focus:border-cyan-400" />
+            <input value={newLabel} onChange={e => setNewLabel(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') addArea() }}
+              placeholder="Label (optional, e.g. Vile Parle)"
               className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm outline-none focus:border-cyan-400" />
-            <button onClick={addArea} disabled={adding || !newArea.trim()}
+            <button onClick={addArea} disabled={adding || !PINCODE_RE.test(newPincode)}
               className="px-4 py-2 rounded-xl bg-cyan-600 text-white text-sm font-bold hover:bg-cyan-700 disabled:opacity-40">
               {adding ? 'Adding…' : '+ Add'}
             </button>
@@ -266,7 +299,7 @@ export default function AdminServiceAreas() {
       ) : (
         <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
           <p className="text-sm text-slate-400">
-            Select or add a state and city above to manage its areas.
+            Select or add a state and city above to manage its pincodes.
           </p>
         </div>
       )}
