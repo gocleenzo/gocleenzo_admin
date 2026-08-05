@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { GoogleMap, useJsApiLoader } from '@react-google-maps/api'
+import { GOOGLE_MAPS_LOADER_OPTIONS } from '@/lib/googleMapsLoader'
 
 type Worker = {
   user_id: string
@@ -14,23 +15,21 @@ type Worker = {
 
 const MUMBAI = { lat: 19.076, lng: 72.8777 }
 const STALE_MS = 2 * 60 * 1000
-const RADIUS_M = 5000 // 5km coverage
 const POLL_MS = 10000
 
 const containerStyle = { width: '100%', height: '100%' }
 
 export default function CoverageMap() {
-  const { isLoaded } = useJsApiLoader({
-    id: 'admin-live-map', // same id as the live map to avoid double-loading
-    googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '',
-  })
+  // Uses the shared loader config (same id/options as every other admin
+  // page) — required by @react-google-maps/api's singleton loader, see
+  // lib/googleMapsLoader.ts.
+  const { isLoaded } = useJsApiLoader(GOOGLE_MAPS_LOADER_OPTIONS)
 
   const [workers, setWorkers] = useState<Map<string, Worker>>(new Map())
   const [, setTick] = useState(0)
   const mapRef = useRef<google.maps.Map | null>(null)
   const infoRef = useRef<google.maps.InfoWindow | null>(null)
   const markersRef = useRef<Map<string, google.maps.Marker>>(new Map())
-  const circlesRef = useRef<Map<string, google.maps.Circle>>(new Map())
 
   // Poll the secure server route (live-only: only workers with current_lat)
   useEffect(() => {
@@ -60,7 +59,11 @@ export default function CoverageMap() {
     return () => clearInterval(t)
   }, [])
 
-  // Draw markers + coverage circles
+  // Draw markers only — the 5km coverage-radius circle overlay has been
+  // removed. This now shows exactly where each live, on-shift worker is,
+  // without implying a fixed service radius around them (that concept is
+  // now handled by admin-drawn service_zones + zone_workers assignments
+  // instead of a uniform circle around every worker).
   useEffect(() => {
     if (!isLoaded || !mapRef.current) return
     const map = mapRef.current
@@ -73,34 +76,14 @@ export default function CoverageMap() {
       seen.add(w.user_id)
       const stale =
         !w.updatedAt || now - new Date(w.updatedAt).getTime() > STALE_MS
-      // live-only: skip stale workers entirely (no live circle when off-shift)
+      // live-only: skip stale workers entirely (no marker when off-shift)
       if (stale) {
         markersRef.current.get(w.user_id)?.setMap(null)
         markersRef.current.delete(w.user_id)
-        circlesRef.current.get(w.user_id)?.setMap(null)
-        circlesRef.current.delete(w.user_id)
         return
       }
 
       const pos = { lat: w.lat, lng: w.lng }
-
-      // circle
-      let circle = circlesRef.current.get(w.user_id)
-      if (!circle) {
-        circle = new google.maps.Circle({
-          map,
-          center: pos,
-          radius: RADIUS_M,
-          strokeColor: '#0891B2',
-          strokeOpacity: 0.9,
-          strokeWeight: 3,
-          fillColor: '#06B6D4',
-          fillOpacity: 0.2,
-        })
-        circlesRef.current.set(w.user_id, circle)
-      } else {
-        circle.setCenter(pos)
-      }
 
       // marker
       let marker = markersRef.current.get(w.user_id)
@@ -123,7 +106,6 @@ export default function CoverageMap() {
           infoRef.current.setContent(
             `<div style="font-family:system-ui;font-size:13px;line-height:1.4">
                <strong>${cur.name}</strong>${cur.verified ? ' ✅' : ''}<br/>
-               <span style="color:#6b7280">Covers 5 km from here</span><br/>
                <span style="color:#6b7280">${ago == null ? '' : `Updated ${ago}s ago`}</span>
              </div>`
           )
@@ -140,12 +122,6 @@ export default function CoverageMap() {
       if (!seen.has(id)) {
         m.setMap(null)
         markersRef.current.delete(id)
-      }
-    })
-    circlesRef.current.forEach((c, id) => {
-      if (!seen.has(id)) {
-        c.setMap(null)
-        circlesRef.current.delete(id)
       }
     })
   }, [workers, isLoaded])
@@ -167,14 +143,14 @@ export default function CoverageMap() {
             className="w-11 h-11 rounded-2xl flex items-center justify-center text-lg"
             style={{ background: '#0891B214', border: '1px solid #0891B225' }}
           >
-            🛰️
+            📍
           </div>
           <div>
             <p className="font-black text-slate-900 text-lg leading-none tracking-tight">
-              Coverage Radar
+              Live Worker Locations
             </p>
             <p className="text-[11px] text-slate-400 mt-1 font-semibold">
-              5 km live coverage · on-shift workers only
+              on-shift workers only
             </p>
           </div>
         </div>

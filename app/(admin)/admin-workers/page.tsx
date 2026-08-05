@@ -1107,79 +1107,96 @@ function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   )
 }
 
-// ── Zones tab — assign this worker to service zones ─────────────
-// A worker only becomes eligible for bookings in a zone once they're
-// explicitly assigned here (via zone_workers). Zones with zero
-// assignments impose no restriction at all (see try_claim_slot) — so
-// this tab is purely additive: assigning workers here is what actually
-// turns zone-based worker restriction "on" for a given area.
-function ZonesTab({ workerId, supabase }: { workerId: string; supabase: any }) {
-  const [zones, setZones] = useState<any[]>([])
-  const [assignedIds, setAssignedIds] = useState<Set<string>>(new Set())
+// ── Areas tab — assign this worker to pincodes ───────────────────
+// A worker only becomes eligible for bookings in a pincode once
+// they're explicitly assigned here (via worker_pincodes). Pincodes
+// with zero assignments impose no restriction at all (see
+// try_claim_slot) — so this tab is purely additive: assigning a
+// worker to a pincode here is what actually turns pincode-based
+// worker restriction "on" for that area. No map or drawing needed —
+// just type the pincode(s) this worker covers.
+function AreasTab({ workerId, supabase }: { workerId: string; supabase: any }) {
+  const [pincodes, setPincodes] = useState<{ id: string; pincode: string }[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [input, setInput] = useState('')
+  const [adding, setAdding] = useState(false)
 
   async function load() {
     setLoading(true); setErr(null)
     try {
-      const [{ data: zoneRows, error: zErr }, { data: assignRows, error: aErr }] = await Promise.all([
-        supabase.from('service_zones').select('id, name, is_active').order('name', { ascending: true }),
-        supabase.from('zone_workers').select('zone_id').eq('worker_id', workerId),
-      ])
-      if (zErr) { setErr(zErr.message); setLoading(false); return }
-      if (aErr) { setErr(aErr.message); setLoading(false); return }
-      setZones(zoneRows ?? [])
-      setAssignedIds(new Set((assignRows ?? []).map((r: any) => r.zone_id)))
+      const { data, error } = await supabase
+        .from('worker_pincodes')
+        .select('id, pincode')
+        .eq('worker_id', workerId)
+        .order('pincode', { ascending: true })
+      if (error) { setErr(error.message); setLoading(false); return }
+      setPincodes(data ?? [])
     } catch (e: any) {
-      setErr(e?.message ?? 'Could not load zones')
+      setErr(e?.message ?? 'Could not load areas')
     } finally {
       setLoading(false)
     }
   }
   useEffect(() => { load() }, [workerId])
 
-  async function toggleZone(zoneId: string) {
-    setBusy(zoneId); setErr(null)
-    const isAssigned = assignedIds.has(zoneId)
+  function normalizePincode(raw: string): string | null {
+    const trimmed = raw.trim()
+    // Indian pincodes are 6 digits — reject anything else rather than
+    // silently saving a malformed value that would never match a real
+    // address's pincode.
+    if (!/^\d{6}$/.test(trimmed)) return null
+    return trimmed
+  }
+
+  async function addPincode() {
+    const clean = normalizePincode(input)
+    if (!clean) {
+      setErr('Enter a valid 6-digit pincode')
+      return
+    }
+    if (pincodes.some(p => p.pincode === clean)) {
+      setErr('This pincode is already assigned to this worker')
+      return
+    }
+    setAdding(true); setErr(null)
     try {
-      if (isAssigned) {
-        const { error } = await supabase.from('zone_workers')
-          .delete().eq('zone_id', zoneId).eq('worker_id', workerId)
-        if (error) { setErr(error.message); setBusy(null); return }
-        setAssignedIds(prev => {
-          const next = new Set(prev); next.delete(zoneId); return next
-        })
-      } else {
-        const { error } = await supabase.from('zone_workers')
-          .insert({ zone_id: zoneId, worker_id: workerId })
-        if (error) { setErr(error.message); setBusy(null); return }
-        setAssignedIds(prev => new Set(prev).add(zoneId))
-      }
+      const { data, error } = await supabase
+        .from('worker_pincodes')
+        .insert({ worker_id: workerId, pincode: clean })
+        .select('id, pincode')
+        .single()
+      if (error) { setErr(error.message); setAdding(false); return }
+      setPincodes(prev => [...prev, data].sort((a, b) => a.pincode.localeCompare(b.pincode)))
+      setInput('')
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not add pincode')
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  async function removePincode(id: string) {
+    setBusy(id); setErr(null)
+    try {
+      const { error } = await supabase.from('worker_pincodes').delete().eq('id', id)
+      if (error) { setErr(error.message); setBusy(null); return }
+      setPincodes(prev => prev.filter(p => p.id !== id))
     } finally {
       setBusy(null)
     }
   }
 
-  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading zones…</div>
-
-  if (zones.length === 0) return (
-    <div className="p-8 text-center">
-      <p className="text-3xl mb-2">📐</p>
-      <p className="text-slate-600 font-bold text-sm">No service zones drawn yet</p>
-      <p className="text-[11px] text-slate-400 mt-1">Draw zones first in Service Zones, then assign workers here.</p>
-    </div>
-  )
-
-  const assignedCount = zones.filter(z => assignedIds.has(z.id)).length
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading areas…</div>
 
   return (
     <div className="p-5 space-y-4">
       <div className="rounded-xl bg-cyan-50 border border-cyan-200 px-3 py-2.5">
         <p className="text-[11px] text-cyan-700 font-semibold">
-          📐 A worker only receives bookings from a zone once assigned here.
-          Zones with no workers assigned are unrestricted — every available
-          worker remains eligible.
+          📍 A worker only receives bookings from a pincode once assigned here.
+          Pincodes with no workers assigned are unrestricted — every available
+          worker remains eligible until you assign someone specific.
         </p>
       </div>
 
@@ -1189,40 +1206,54 @@ function ZonesTab({ workerId, supabase }: { workerId: string; supabase: any }) {
         </div>
       )}
 
+      <div className="flex gap-2">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          onKeyDown={e => { if (e.key === 'Enter') addPincode() }}
+          placeholder="e.g. 400056"
+          inputMode="numeric"
+          maxLength={6}
+          className="flex-1 px-4 py-2.5 rounded-xl text-sm font-mono font-bold text-slate-800 outline-none bg-white border border-slate-200 placeholder-slate-300 focus:border-cyan-400"
+        />
+        <button
+          onClick={addPincode}
+          disabled={adding || input.length !== 6}
+          className="px-5 py-2.5 rounded-xl text-sm font-black text-white disabled:opacity-40"
+          style={{ background: '#0891B2' }}
+        >
+          {adding ? '…' : '+ Add'}
+        </button>
+      </div>
+
       <div className="flex items-center justify-between">
         <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">
-          Zones ({assignedCount} of {zones.length} assigned)
+          Assigned pincodes ({pincodes.length})
         </p>
       </div>
 
-      <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
-        {zones.map(zone => {
-          const isAssigned = assignedIds.has(zone.id)
-          return (
-            <div key={zone.id} className="flex items-center justify-between px-4 py-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="text-sm font-bold text-slate-800 truncate">{zone.name}</span>
-                {!zone.is_active && (
-                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400 flex-shrink-0">
-                    Inactive
-                  </span>
-                )}
-              </div>
+      {pincodes.length === 0 ? (
+        <div className="p-8 text-center rounded-xl border border-slate-200">
+          <p className="text-3xl mb-2">📍</p>
+          <p className="text-slate-600 font-bold text-sm">No pincodes assigned yet</p>
+          <p className="text-[11px] text-slate-400 mt-1">This worker is eligible for every unrestricted pincode until you add one above.</p>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
+          {pincodes.map(p => (
+            <div key={p.id} className="flex items-center justify-between px-4 py-3">
+              <span className="text-sm font-mono font-bold text-slate-800">{p.pincode}</span>
               <button
-                disabled={busy === zone.id}
-                onClick={() => toggleZone(zone.id)}
-                className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 disabled:opacity-50"
-                style={{ background: isAssigned ? '#0891B2' : '#CBD5E1' }}
+                disabled={busy === p.id}
+                onClick={() => removePincode(p.id)}
+                className="text-slate-400 hover:text-red-600 text-sm px-2 disabled:opacity-50"
               >
-                <span
-                  className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
-                  style={{ left: isAssigned ? '22px' : '2px' }}
-                />
+                {busy === p.id ? '…' : '✕ Remove'}
               </button>
             </div>
-          )
-        })}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -1829,7 +1860,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
   const todayMins    = todayNetMins(w.todaySchedule)
   const st           = statusOf(w)
 
-  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'hours'|'jobs'|'zones'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
+  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'hours'|'jobs'|'areas'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
   const [jobsShown, setJobsShown] = useState(10)
 
   useEffect(() => {
@@ -1843,7 +1874,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     { key: 'schedreq' as const, label: 'Schedule', icon: '🗓' },
     { key: 'hours'    as const, label: 'Hours',    icon: '⏱' },
     { key: 'jobs'     as const, label: 'Jobs',     icon: '≡' },
-    { key: 'zones'    as const, label: 'Zones',    icon: '📐' },
+    { key: 'areas'    as const, label: 'Areas',    icon: '📍' },
     { key: 'payouts'  as const, label: 'Payouts',  icon: '💸' },
     { key: 'earnings' as const, label: 'Earnings', icon: '₹' },
     { key: 'referrals'as const, label: 'Referrals',icon: '🎁' },
@@ -2064,7 +2095,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
         {tab === 'approval' && <ApprovalTab workerId={w.id} onChanged={onReload} />}
 
         {/* ── UNIFIED TABS ── */}
-        {tab === 'zones' && <ZonesTab workerId={w.id} supabase={createClient()} />}
+        {tab === 'areas' && <AreasTab workerId={w.id} supabase={createClient()} />}
         {tab === 'payouts' && <PayoutsTab workerId={w.id} />}
         {tab === 'earnings' && <EarningsTab workerId={w.id} />}
         {tab === 'referrals' && <ReferralsTab workerId={w.id} />}

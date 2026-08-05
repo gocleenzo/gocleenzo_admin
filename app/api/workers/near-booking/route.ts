@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
       : null
 
   // Ranked live workers
-  const { data: workers, error: wErr } = await supabase.rpc(
+  const { data: workersRaw, error: wErr } = await supabase.rpc(
     'live_workers_for_booking',
     { p_booking_id: bookingId }
   )
@@ -44,5 +44,44 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: wErr.message }, { status: 500 })
   }
 
-  return NextResponse.json({ customer, workers: workers ?? [] })
+  let workers = workersRaw ?? []
+
+  // ── Zone restriction — same rule the customer app's try_claim_slot and
+  // admin-bookings' Drawer/quick-assign both already enforce, applied here
+  // so the map (and its click-to-select pins) can't be used to bypass
+  // zone assignment either. If the booking's address falls inside a zone
+  // that has explicit worker assignments, only those workers are
+  // returned; everyone else is filtered out of the map entirely rather
+  // than just being blocked after the fact at save time. A zone with no
+  // assignments configured (or an address with no coordinates) keeps
+  // the previous behaviour — every live worker is shown, unrestricted.
+  if (customer) {
+    try {
+      const { data: zoneId } = await supabase.rpc('find_zone_for_point', {
+        p_lat: customer.lat,
+        p_lng: customer.lng,
+      })
+      if (zoneId) {
+        const { data: assignRows } = await supabase
+          .from('zone_workers')
+          .select('worker_id')
+          .eq('zone_id', zoneId)
+        const eligibleIds = new Set(
+          (assignRows ?? []).map((r: any) => r.worker_id as string)
+        )
+        // Only filter if the zone actually has assignments — an empty
+        // set means unrestricted, not "no one eligible".
+        if (eligibleIds.size > 0) {
+          workers = workers.filter((w: any) => eligibleIds.has(w.user_id))
+        }
+      }
+    } catch (e) {
+      // Fail open — a lookup hiccup here should never hide every worker
+      // from the map, it should just fall back to unrestricted (the
+      // pre-existing behaviour).
+      console.warn('Zone filtering for near-booking map failed (non-fatal):', e)
+    }
+  }
+
+  return NextResponse.json({ customer, workers })
 }

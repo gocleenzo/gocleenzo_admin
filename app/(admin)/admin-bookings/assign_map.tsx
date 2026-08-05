@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { GoogleMap, useJsApiLoader } from '@react-google-maps/api'
 import { isWithinShift, type WeekSchedule } from '@/lib/shift'
+import { GOOGLE_MAPS_LOADER_OPTIONS } from '@/lib/googleMapsLoader'
 
 type LiveWorker = {
   user_id: string
@@ -38,10 +39,10 @@ export default function AssignMap({
   selectedWorkerId?: string
   onSelectWorker?: (id: string) => void
 }) {
-  const { isLoaded } = useJsApiLoader({
-    id: 'admin-live-map',
-    googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '',
-  })
+  // Uses the shared loader config (same id/options as every other admin
+  // page that loads Google Maps) — required by @react-google-maps/api's
+  // singleton loader; see lib/googleMapsLoader.ts.
+  const { isLoaded } = useJsApiLoader(GOOGLE_MAPS_LOADER_OPTIONS)
 
   const [customer, setCustomer] = useState<Customer | null>(null)
   const [workers, setWorkers] = useState<LiveWorker[]>([])

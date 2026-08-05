@@ -327,7 +327,18 @@ function Drawer({
   })
 
   async function assign() {
-    if (!selW) return; setBusy(true)
+    if (!selW) return
+    // Safety net: the dropdown already only lists zone-eligible workers,
+    // but the map's click-to-select pins bypass that list entirely (they
+    // set selW directly via onSelectWorker). Re-validate here before ever
+    // writing to the database, so a zone-restricted booking can't be
+    // assigned to an out-of-zone worker just because they were clicked on
+    // the map instead of chosen from the dropdown.
+    if (zoneWorkerIds != null && !zoneWorkerIds.has(selW)) {
+      alert('This worker is not assigned to cover this pincode. Please choose a worker from the dropdown list, or assign them to this pincode first under Workers → Areas.')
+      return
+    }
+    setBusy(true)
     await supabase.from('bookings')
       .update({ worker_id: selW, status: 'accepted' })
       .eq('id', b.id)
@@ -479,7 +490,7 @@ function Drawer({
               {zoneWorkerIds != null && (
                 <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
                   <p className="text-[11px] text-cyan-700 font-semibold">
-                    📐 This address is in a zone with assigned workers — only workers
+                    📐 This address's pincode has assigned workers — only workers
                     covering this zone are shown below.
                   </p>
                 </div>
@@ -507,7 +518,7 @@ function Drawer({
                     <p className="text-sm font-bold text-red-600">No workers available at this time slot</p>
                     <p className="text-xs text-red-400 mt-1">
                       {zoneWorkerIds != null
-                        ? 'No worker assigned to this zone is free at this time.'
+                        ? 'No worker assigned to this pincode is free at this time.'
                         : `All workers are busy or off-shift at ${new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`}
                     </p>
                   </div>
@@ -642,27 +653,23 @@ function Drawer({
   )
 }
 
-// ── Zone eligibility helper ──────────────────────────────────────
+// ── Pincode eligibility helper ────────────────────────────────────
 // Mirrors the SAME restriction try_claim_slot enforces server-side for
 // customer bookings, applied here so admin assignment can't offer (or
 // let admin quick-pick) a worker who isn't actually assigned to cover
-// the booking's zone. Returns null when there's no restriction — no
-// coordinates on file, address isn't inside any active zone, or that
-// zone has zero worker assignments — meaning every worker stays
-// eligible, same as before this feature existed.
-async function resolveZoneWorkerIds(
-  supabase: any, lat: number | null, lng: number | null
+// the booking address's pincode. Returns null when there's no
+// restriction — no pincode on file, or that pincode has zero worker
+// assignments — meaning every worker stays eligible, same as before
+// this feature existed.
+async function resolvePincodeWorkerIds(
+  supabase: any, pincode: string | null
 ): Promise<Set<string> | null> {
-  if (lat == null || lng == null) return null
+  if (!pincode || pincode.trim() === '') return null
   try {
-    const { data: zoneId } = await supabase.rpc('find_zone_for_point', {
-      p_lat: lat, p_lng: lng,
-    })
-    if (!zoneId) return null
     const { data: rows } = await supabase
-      .from('zone_workers')
+      .from('worker_pincodes')
       .select('worker_id')
-      .eq('zone_id', zoneId)
+      .eq('pincode', pincode.trim())
     const ids = new Set<string>((rows ?? []).map((r: any) => r.worker_id as string))
     return ids.size === 0 ? null : ids
   } catch {
@@ -708,7 +715,7 @@ export default function AdminBookings() {
            service_duration_minutes,
            extra_time_mins,extra_time_price,extra_time_payment_status,
            customer_id,
-           services(name,duration_minutes),addresses(area,city,latitude,longitude),
+           services(name,duration_minutes),addresses(area,city,pincode,latitude,longitude),
            customer:users!customer_id(full_name,phone),
            worker:users!worker_id(full_name,phone),
            booking_items(quantity,unit_price,total_price,service_name,services(name))`
@@ -799,10 +806,9 @@ export default function AdminBookings() {
     )
     const zoneEntries = await Promise.all(
       needsAssignBookings.map(async (b: any) => {
-        const ids = await resolveZoneWorkerIds(
+        const ids = await resolvePincodeWorkerIds(
           supabase,
-          b.addresses?.latitude ?? null,
-          b.addresses?.longitude ?? null
+          b.addresses?.pincode ?? null
         )
         return [b.id as string, ids] as const
       })

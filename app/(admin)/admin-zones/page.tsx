@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { GoogleMap, Marker, Polygon, useJsApiLoader } from '@react-google-maps/api';
 import { createClient } from '@/lib/supabase/client';
+import { GOOGLE_MAPS_LOADER_OPTIONS } from '@/lib/googleMapsLoader';
 
 type LatLngPoint = { lat: number; lng: number };
 
@@ -45,10 +46,10 @@ export default function AdminServiceZones() {
   const supabase = createClient();
 
   // No 'libraries: drawing' needed anymore — we don't use DrawingManager.
-  const { isLoaded } = useJsApiLoader({
-    id: 'google-map-script',
-    googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || '',
-  });
+  // Uses the shared loader config (same id/options as every other admin
+  // page) — required by @react-google-maps/api's singleton loader, see
+  // lib/googleMapsLoader.ts.
+  const { isLoaded } = useJsApiLoader(GOOGLE_MAPS_LOADER_OPTIONS);
 
   const [zones, setZones] = useState<ServiceZone[]>([]);
   const [loading, setLoading] = useState(true);
