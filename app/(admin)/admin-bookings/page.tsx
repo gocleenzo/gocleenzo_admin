@@ -295,10 +295,11 @@ function WorkerOtpDisplay({ workerId }: { workerId: string | null }) {
 
 // ── Drawer (unchanged) ─────────────────────────────────────────
 function Drawer({
-  b, workers, allBookings, onClose, onDone
+  b, workers, allBookings, zoneWorkerIds, onClose, onDone
 }: {
   b: Booking; workers: Worker[]
   allBookings: { worker_id: string; scheduled_at: string }[]
+  zoneWorkerIds: Set<string> | null
   onClose: () => void; onDone: () => void
 }) {
   const [selW, setSelW] = useState(b.worker_id ?? '')
@@ -306,9 +307,16 @@ function Drawer({
   const supabase = createClient()
   const cfg = STATUS[b.status] ?? STATUS.pending
   const durationMins = b.service_duration || 60
+  // Zone restriction: if this address falls inside a zone that has
+  // explicit worker assignments (zoneWorkerIds != null), only those
+  // workers are offered — mirrors the same rule try_claim_slot enforces
+  // for customer bookings, applied here to admin assignment instead.
+  // A zone with no assignments configured (zoneWorkerIds == null) keeps
+  // the previous behaviour: every schedule-available worker is offered.
   const availableForSlot = workers.filter(w =>
     w.id === b.worker_id ||
-    isWorkerAvailableAt(w, b.scheduled_at, durationMins, allBookings)
+    (isWorkerAvailableAt(w, b.scheduled_at, durationMins, allBookings) &&
+      (zoneWorkerIds == null || zoneWorkerIds.has(w.id)))
   )
   const canAssign  = ['pending','accepted'].includes(b.status)
   const totalSec   = b.work_started_at && b.work_ended_at
@@ -468,6 +476,14 @@ function Drawer({
                   {availableForSlot.filter(w => w.id !== b.worker_id).length} available at this time
                 </p>
               </div>
+              {zoneWorkerIds != null && (
+                <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
+                  <p className="text-[11px] text-cyan-700 font-semibold">
+                    📐 This address is in a zone with assigned workers — only workers
+                    covering this zone are shown below.
+                  </p>
+                </div>
+              )}
               <div className="rounded-2xl p-4 space-y-3 bg-slate-50 border border-slate-200">
                 {/* Customer location + nearest LIVE workers */}
                 <AssignMap
@@ -489,7 +505,11 @@ function Drawer({
                 {availableForSlot.filter(w => w.id !== b.worker_id).length === 0 && !b.worker_id ? (
                   <div className="rounded-xl px-4 py-3 text-center bg-red-50 border border-red-200">
                     <p className="text-sm font-bold text-red-600">No workers available at this time slot</p>
-                    <p className="text-xs text-red-400 mt-1">All workers are busy or off-shift at {new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</p>
+                    <p className="text-xs text-red-400 mt-1">
+                      {zoneWorkerIds != null
+                        ? 'No worker assigned to this zone is free at this time.'
+                        : `All workers are busy or off-shift at ${new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`}
+                    </p>
                   </div>
                 ) : (
                   <>
@@ -622,6 +642,34 @@ function Drawer({
   )
 }
 
+// ── Zone eligibility helper ──────────────────────────────────────
+// Mirrors the SAME restriction try_claim_slot enforces server-side for
+// customer bookings, applied here so admin assignment can't offer (or
+// let admin quick-pick) a worker who isn't actually assigned to cover
+// the booking's zone. Returns null when there's no restriction — no
+// coordinates on file, address isn't inside any active zone, or that
+// zone has zero worker assignments — meaning every worker stays
+// eligible, same as before this feature existed.
+async function resolveZoneWorkerIds(
+  supabase: any, lat: number | null, lng: number | null
+): Promise<Set<string> | null> {
+  if (lat == null || lng == null) return null
+  try {
+    const { data: zoneId } = await supabase.rpc('find_zone_for_point', {
+      p_lat: lat, p_lng: lng,
+    })
+    if (!zoneId) return null
+    const { data: rows } = await supabase
+      .from('zone_workers')
+      .select('worker_id')
+      .eq('zone_id', zoneId)
+    const ids = new Set<string>((rows ?? []).map((r: any) => r.worker_id as string))
+    return ids.size === 0 ? null : ids
+  } catch {
+    return null
+  }
+}
+
 // ── Main Page ──────────────────────────────────────────────────
 export default function AdminBookings() {
   const [bookings,  setBookings]  = useState<Booking[]>([])
@@ -634,6 +682,12 @@ export default function AdminBookings() {
   const [mapFor,    setMapFor]    = useState<Booking | null>(null)
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
+  // Per-booking zone-eligible worker id sets — null means unrestricted.
+  // Computed once per load() for every booking that could still need a
+  // worker assigned, so the table's inline assign row and the Drawer's
+  // full picker both stay in sync with the same real restriction
+  // try_claim_slot applies for customer bookings.
+  const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
   const supabase = createClient()
 
   const slimBookings = bookings
@@ -654,7 +708,7 @@ export default function AdminBookings() {
            service_duration_minutes,
            extra_time_mins,extra_time_price,extra_time_payment_status,
            customer_id,
-           services(name,duration_minutes),addresses(area,city),
+           services(name,duration_minutes),addresses(area,city,latitude,longitude),
            customer:users!customer_id(full_name,phone),
            worker:users!worker_id(full_name,phone),
            booking_items(quantity,unit_price,total_price,service_name,services(name))`
@@ -734,6 +788,26 @@ export default function AdminBookings() {
         city: b.addresses?.city ?? '',
       }
     }))
+
+    // Resolve zone eligibility for every booking that could still need a
+    // worker assigned or reassigned — same set of statuses the assign UI
+    // (Drawer's canAssign, table's needsW) actually acts on. Bookings
+    // without address coordinates simply resolve to null (unrestricted),
+    // same as if this feature didn't exist for them.
+    const needsAssignBookings = (bd ?? []).filter((b: any) =>
+      ['pending', 'accepted'].includes(b.status)
+    )
+    const zoneEntries = await Promise.all(
+      needsAssignBookings.map(async (b: any) => {
+        const ids = await resolveZoneWorkerIds(
+          supabase,
+          b.addresses?.latitude ?? null,
+          b.addresses?.longitude ?? null
+        )
+        return [b.id as string, ids] as const
+      })
+    )
+    setZoneEligible(Object.fromEntries(zoneEntries))
 
     if (wd) setWorkers(wd.map((w: any) => ({
       id: w.id, name: w.full_name ?? 'Unknown', phone: w.phone ?? '',
@@ -979,8 +1053,13 @@ export default function AdminBookings() {
                 const isDone      = b.status === 'completed' && b.work_started_at && b.work_ended_at
                 const isCancelled = b.status === 'cancelled'
                 const totalSec    = isDone ? elapsed(b.work_started_at, b.work_ended_at) : 0
+                // Zone restriction applied the same way as the Drawer —
+                // null (unrestricted) means fall back to schedule-only
+                // filtering, same as before this feature existed.
+                const zoneIds = zoneEligible[b.id] ?? null
                 const slotAvailable = workers.filter(w =>
-                  isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings)
+                  isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings) &&
+                  (zoneIds == null || zoneIds.has(w.id))
                 )
 
                 return (
@@ -1089,6 +1168,7 @@ export default function AdminBookings() {
                         <td colSpan={8} className="px-4 py-2" onClick={e => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
                             <span className="text-[11px] text-slate-500 font-medium whitespace-nowrap">
+                              {zoneIds != null && '📐 '}
                               {slotAvailable.length > 0
                                 ? `${slotAvailable.length} free at this slot:`
                                 : 'No workers free at this slot'}
@@ -1180,6 +1260,7 @@ export default function AdminBookings() {
           b={selected}
           workers={workers}
           allBookings={slimBookings}
+          zoneWorkerIds={zoneEligible[selected.id] ?? null}
           onClose={() => setSelected(null)}
           onDone={() => { load(); setSelected(null) }}
         />

@@ -1107,6 +1107,127 @@ function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   )
 }
 
+// ── Zones tab — assign this worker to service zones ─────────────
+// A worker only becomes eligible for bookings in a zone once they're
+// explicitly assigned here (via zone_workers). Zones with zero
+// assignments impose no restriction at all (see try_claim_slot) — so
+// this tab is purely additive: assigning workers here is what actually
+// turns zone-based worker restriction "on" for a given area.
+function ZonesTab({ workerId, supabase }: { workerId: string; supabase: any }) {
+  const [zones, setZones] = useState<any[]>([])
+  const [assignedIds, setAssignedIds] = useState<Set<string>>(new Set())
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function load() {
+    setLoading(true); setErr(null)
+    try {
+      const [{ data: zoneRows, error: zErr }, { data: assignRows, error: aErr }] = await Promise.all([
+        supabase.from('service_zones').select('id, name, is_active').order('name', { ascending: true }),
+        supabase.from('zone_workers').select('zone_id').eq('worker_id', workerId),
+      ])
+      if (zErr) { setErr(zErr.message); setLoading(false); return }
+      if (aErr) { setErr(aErr.message); setLoading(false); return }
+      setZones(zoneRows ?? [])
+      setAssignedIds(new Set((assignRows ?? []).map((r: any) => r.zone_id)))
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not load zones')
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [workerId])
+
+  async function toggleZone(zoneId: string) {
+    setBusy(zoneId); setErr(null)
+    const isAssigned = assignedIds.has(zoneId)
+    try {
+      if (isAssigned) {
+        const { error } = await supabase.from('zone_workers')
+          .delete().eq('zone_id', zoneId).eq('worker_id', workerId)
+        if (error) { setErr(error.message); setBusy(null); return }
+        setAssignedIds(prev => {
+          const next = new Set(prev); next.delete(zoneId); return next
+        })
+      } else {
+        const { error } = await supabase.from('zone_workers')
+          .insert({ zone_id: zoneId, worker_id: workerId })
+        if (error) { setErr(error.message); setBusy(null); return }
+        setAssignedIds(prev => new Set(prev).add(zoneId))
+      }
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading zones…</div>
+
+  if (zones.length === 0) return (
+    <div className="p-8 text-center">
+      <p className="text-3xl mb-2">📐</p>
+      <p className="text-slate-600 font-bold text-sm">No service zones drawn yet</p>
+      <p className="text-[11px] text-slate-400 mt-1">Draw zones first in Service Zones, then assign workers here.</p>
+    </div>
+  )
+
+  const assignedCount = zones.filter(z => assignedIds.has(z.id)).length
+
+  return (
+    <div className="p-5 space-y-4">
+      <div className="rounded-xl bg-cyan-50 border border-cyan-200 px-3 py-2.5">
+        <p className="text-[11px] text-cyan-700 font-semibold">
+          📐 A worker only receives bookings from a zone once assigned here.
+          Zones with no workers assigned are unrestricted — every available
+          worker remains eligible.
+        </p>
+      </div>
+
+      {err && (
+        <div className="rounded-xl bg-red-50 border border-red-200 p-3">
+          <p className="text-sm font-bold text-red-700">{err}</p>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">
+          Zones ({assignedCount} of {zones.length} assigned)
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
+        {zones.map(zone => {
+          const isAssigned = assignedIds.has(zone.id)
+          return (
+            <div key={zone.id} className="flex items-center justify-between px-4 py-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm font-bold text-slate-800 truncate">{zone.name}</span>
+                {!zone.is_active && (
+                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400 flex-shrink-0">
+                    Inactive
+                  </span>
+                )}
+              </div>
+              <button
+                disabled={busy === zone.id}
+                onClick={() => toggleZone(zone.id)}
+                className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 disabled:opacity-50"
+                style={{ background: isAssigned ? '#0891B2' : '#CBD5E1' }}
+              >
+                <span
+                  className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+                  style={{ left: isAssigned ? '22px' : '2px' }}
+                />
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+
 // ═══════════════════════════════════════════════════════════════════
 // ScheduleDateRequestTab — worker-initiated DATE-SPECIFIC schedule requests
 // Reads/writes worker_schedule_date_requests + worker_schedule_dates
@@ -1708,7 +1829,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
   const todayMins    = todayNetMins(w.todaySchedule)
   const st           = statusOf(w)
 
-  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'hours'|'jobs'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
+  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'hours'|'jobs'|'zones'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
   const [jobsShown, setJobsShown] = useState(10)
 
   useEffect(() => {
@@ -1722,6 +1843,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     { key: 'schedreq' as const, label: 'Schedule', icon: '🗓' },
     { key: 'hours'    as const, label: 'Hours',    icon: '⏱' },
     { key: 'jobs'     as const, label: 'Jobs',     icon: '≡' },
+    { key: 'zones'    as const, label: 'Zones',    icon: '📐' },
     { key: 'payouts'  as const, label: 'Payouts',  icon: '💸' },
     { key: 'earnings' as const, label: 'Earnings', icon: '₹' },
     { key: 'referrals'as const, label: 'Referrals',icon: '🎁' },
@@ -1942,6 +2064,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
         {tab === 'approval' && <ApprovalTab workerId={w.id} onChanged={onReload} />}
 
         {/* ── UNIFIED TABS ── */}
+        {tab === 'zones' && <ZonesTab workerId={w.id} supabase={createClient()} />}
         {tab === 'payouts' && <PayoutsTab workerId={w.id} />}
         {tab === 'earnings' && <EarningsTab workerId={w.id} />}
         {tab === 'referrals' && <ReferralsTab workerId={w.id} />}
