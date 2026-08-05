@@ -29,6 +29,7 @@ type ServiceZone = {
   name: string;
   polygon: LatLngPoint[];
   is_active: boolean;
+  is_exclusion: boolean;
   created_at: string;
 };
 
@@ -41,6 +42,7 @@ const DEFAULT_ZOOM = 12;
 const ACTIVE_ZONE_COLOR = '#0891B2';   // matches admin-areas' cyan-600
 const INACTIVE_ZONE_COLOR = '#94A3B8'; // slate-400
 const DRAFT_ZONE_COLOR = '#059669';    // emerald-600
+const EXCLUSION_ZONE_COLOR = '#DC2626'; // red-600 — always red, regardless of active state
 
 export default function AdminServiceZones() {
   const supabase = createClient();
@@ -65,6 +67,7 @@ export default function AdminServiceZones() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [draftPoints, setDraftPoints] = useState<LatLngPoint[]>([]);
   const [draftName, setDraftName] = useState('');
+  const [draftIsExclusion, setDraftIsExclusion] = useState(false);
 
   const mapRef = useRef<google.maps.Map | null>(null);
 
@@ -74,7 +77,7 @@ export default function AdminServiceZones() {
     try {
       const { data, error } = await supabase
         .from('service_zones')
-        .select('id, name, polygon, is_active, created_at')
+        .select('id, name, polygon, is_active, is_exclusion, created_at')
         .order('created_at', { ascending: false });
       if (error) {
         setErr(error.message);
@@ -129,6 +132,7 @@ export default function AdminServiceZones() {
     setIsDrawing(false);
     setDraftPoints([]);
     setDraftName('');
+    setDraftIsExclusion(false);
   }
 
   // ── Save the draft as a new zone ────────────────────────────────────
@@ -145,7 +149,7 @@ export default function AdminServiceZones() {
     setErr(null);
     const { data, error } = await supabase
       .from('service_zones')
-      .insert({ name: draftName.trim(), polygon: draftPoints, is_active: true })
+      .insert({ name: draftName.trim(), polygon: draftPoints, is_active: true, is_exclusion: draftIsExclusion })
       .select('*')
       .single();
     setSaving(false);
@@ -156,6 +160,7 @@ export default function AdminServiceZones() {
     setZones((prev) => [data as ServiceZone, ...prev]);
     setDraftPoints([]);
     setDraftName('');
+    setDraftIsExclusion(false);
   }
 
   async function toggleZone(zone: ServiceZone) {
@@ -259,6 +264,48 @@ export default function AdminServiceZones() {
               autoFocus
               className="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm font-semibold text-slate-700 outline-none focus:border-emerald-400 bg-white"
             />
+
+            {/* Coverage vs Excluded — determines what this shape actually
+                does. Coverage zones (the original system) are being phased
+                out in favor of pincode-based worker assignment, but the
+                option is kept for backward compatibility. Excluded zones
+                are the new, purpose-built hard-block: any address inside
+                one is refused at booking time, before any worker or
+                pincode logic even runs — for precisely-drawn no-go areas
+                like a specific chawl, where blocking an entire pincode
+                would incorrectly also block legitimate nearby societies. */}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setDraftIsExclusion(false)}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-bold border transition-all"
+                style={{
+                  background: !draftIsExclusion ? '#0891B2' : '#fff',
+                  color: !draftIsExclusion ? '#fff' : '#64748b',
+                  borderColor: !draftIsExclusion ? 'transparent' : '#E2E8F0',
+                }}
+              >
+                Coverage area
+              </button>
+              <button
+                type="button"
+                onClick={() => setDraftIsExclusion(true)}
+                className="flex-1 px-3 py-2 rounded-xl text-xs font-bold border transition-all"
+                style={{
+                  background: draftIsExclusion ? '#DC2626' : '#fff',
+                  color: draftIsExclusion ? '#fff' : '#64748b',
+                  borderColor: draftIsExclusion ? 'transparent' : '#E2E8F0',
+                }}
+              >
+                🚫 Excluded area
+              </button>
+            </div>
+            {draftIsExclusion && (
+              <p className="text-[11px] text-red-600 font-medium">
+                No one will ever be able to book any address inside this shape —
+                this overrides worker/pincode assignment entirely.
+              </p>
+            )}
             <div className="flex gap-2">
               <button
                 onClick={handleSaveDraft}
@@ -317,12 +364,19 @@ export default function AdminServiceZones() {
                   }}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <span
-                      className="text-sm font-black truncate"
-                      style={{ color: zone.is_active ? '#0E7490' : '#94A3B8' }}
-                    >
-                      {zone.name}
-                    </span>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="text-sm font-black truncate"
+                        style={{ color: zone.is_active ? '#0E7490' : '#94A3B8' }}
+                      >
+                        {zone.name}
+                      </span>
+                      {zone.is_exclusion && (
+                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 shrink-0">
+                          🚫 Excluded
+                        </span>
+                      )}
+                    </div>
                     <span
                       className="text-[10px] font-black px-2 py-0.5 rounded-full shrink-0 ml-2"
                       style={{
@@ -437,9 +491,13 @@ export default function AdminServiceZones() {
                 key={zone.id}
                 path={zone.polygon}
                 options={{
-                  fillColor: zone.is_active ? ACTIVE_ZONE_COLOR : INACTIVE_ZONE_COLOR,
-                  fillOpacity: 0.15,
-                  strokeColor: zone.is_active ? ACTIVE_ZONE_COLOR : INACTIVE_ZONE_COLOR,
+                  fillColor: zone.is_exclusion
+                    ? EXCLUSION_ZONE_COLOR
+                    : zone.is_active ? ACTIVE_ZONE_COLOR : INACTIVE_ZONE_COLOR,
+                  fillOpacity: zone.is_exclusion ? 0.2 : 0.15,
+                  strokeColor: zone.is_exclusion
+                    ? EXCLUSION_ZONE_COLOR
+                    : zone.is_active ? ACTIVE_ZONE_COLOR : INACTIVE_ZONE_COLOR,
                   strokeWeight: 2,
                   clickable: false,
                 }}
