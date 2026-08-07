@@ -25,6 +25,12 @@ type Worker = {
   completedList: RecentJob[]
   todaySchedule: TodayEntry | null
   worker_otp: string | null
+  // Location tracking — reflects the worker app's device-level Location
+  // toggle. The worker app now BLOCKS ITSELF entirely while location
+  // services are off (LocationGate), so "location off" here also means
+  // the worker literally cannot use the app at all right now — this
+  // isn't just "app closed", it's a hard signal.
+  locationUpdatedAt: string | null
   // work hours aggregates
   totalWorkSecs: number
   todayWorkSecs: number
@@ -33,6 +39,29 @@ type Worker = {
   dailyHours: { date: string; secs: number }[]      // last 30 days
   weeklyHours: { week: string; secs: number }[]     // last 12 weeks
   monthlyHours: { month: string; secs: number }[]   // last 12 months
+}
+
+// A worker's location is considered "live" if it's been updated within
+// this window — matches the same 2-minute freshness threshold used by
+// the live map / coverage views, so a worker's status looks consistent
+// everywhere in the admin app rather than using different thresholds
+// in different places.
+const LOCATION_STALE_MS = 2 * 60 * 1000;
+
+function isLocationLive(updatedAt: string | null): boolean {
+  if (!updatedAt) return false;
+  return Date.now() - new Date(updatedAt).getTime() <= LOCATION_STALE_MS;
+}
+
+function locationAgoLabel(updatedAt: string | null): string {
+  if (!updatedAt) return 'Never';
+  const secs = Math.round((Date.now() - new Date(updatedAt).getTime()) / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
 }
 
 type ServiceStat = {
@@ -1908,6 +1937,15 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: st.color }}/>{st.label}
               </span>
               {w.is_verified && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200">✓ Verified</span>}
+              {isLocationLive(w.locationUpdatedAt) ? (
+                <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"/>📍 Location On
+                </span>
+              ) : (
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200">
+                  📍 Location Off · {locationAgoLabel(w.locationUpdatedAt)}
+                </span>
+              )}
               {!w.is_active && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200">Inactive</span>}
             </div>
           </div>
@@ -2311,7 +2349,7 @@ export default function AdminWorkers() {
     })()
     const [{ data: users }, { data: wRows }, { data: bkng }, { data: active }, { data: todayRows }] = await Promise.all([
       supabase.from('users').select('id,full_name,phone,email,created_at,is_active').eq('role','worker'),
-      supabase.from('workers').select('user_id,is_available,is_verified,joined_at,worker_otp'),
+      supabase.from('workers').select('user_id,is_available,is_verified,joined_at,worker_otp,location_updated_at'),
       supabase.from('bookings').select('worker_id,status,final_amount,scheduled_at,work_started_at,work_ended_at,work_duration_seconds,services(name),addresses(area)').order('created_at', { ascending: false }),
       supabase.from('bookings').select('worker_id,work_started_at,services(name)').eq('status','in_progress'),
       supabase.from('worker_schedule_dates').select('worker_id,enabled,start_time,end_time,breaks').eq('date', todayStr),
@@ -2377,6 +2415,7 @@ export default function AdminWorkers() {
         joined_at: w.joined_at ?? null, created_at: u.created_at ?? null,
         todaySchedule: todayMap[u.id] ?? null,
         worker_otp: w.worker_otp ?? null,
+        locationUpdatedAt: w.location_updated_at ?? null,
         totalOrders: wb.length, totalRevenue: rev, completed: comp.length,
         cancelled: wb.filter((b: any) => b.status === 'cancelled').length,
         pending:    wb.filter((b: any) => b.status === 'pending').length,
@@ -2516,7 +2555,7 @@ export default function AdminWorkers() {
                   <table className="w-full text-sm border-collapse">
                     <thead>
                       <tr className="border-b border-slate-100 bg-slate-50/50">
-                        {['Worker','Status','Verified','Jobs','Done','Revenue','OTP'].map(c => (
+                        {['Worker','Status','Location','Verified','Jobs','Done','Revenue','OTP'].map(c => (
                           <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
                         ))}
                       </tr>
@@ -2557,6 +2596,20 @@ export default function AdminWorkers() {
                                   <LiveTimer start={w.work_started_at} color="#D97706"/>
                                 )}
                               </span>
+                            </td>
+                            {/* Location */}
+                            <td className="px-4 py-3.5 whitespace-nowrap">
+                              {isLocationLive(w.locationUpdatedAt) ? (
+                                <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
+                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"/>
+                                  📍 On
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-red-500">
+                                  <span className="w-2 h-2 rounded-full bg-red-400"/>
+                                  Off · {locationAgoLabel(w.locationUpdatedAt)}
+                                </span>
+                              )}
                             </td>
                             {/* Verified */}
                             <td className="px-4 py-3.5 whitespace-nowrap">

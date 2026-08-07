@@ -76,12 +76,11 @@ export default function AdminOverviewPage() {
       supabase
         .from('bookings')
         .select('id', { count: 'exact', head: true })
-        .eq('status', 'pending'),
+        .in('status', ['pending', 'accepted', 'otp_verified', 'in_progress']),
       supabase.from('bookings').select('final_amount').eq('status', 'completed'),
       supabase
         .from('workers')
-        .select('id', { count: 'exact', head: true })
-        .eq('is_available', true),
+        .select('location_updated_at'),
     ])
 
     const totalRev = ((revenue.data ?? []) as { final_amount: number }[]).reduce(
@@ -89,12 +88,25 @@ export default function AdminOverviewPage() {
       0
     )
 
+    // "Active Workers" now means location genuinely live right now — same
+    // 2-minute freshness window used everywhere else in the admin app
+    // (admin-live-map, admin-coverage, the Workers list's Location
+    // column) — not just "marked available", which is a separate signal
+    // a worker can leave on indefinitely regardless of whether they're
+    // actually online/tracked at this moment.
+    const LOCATION_STALE_MS = 2 * 60 * 1000
+    const liveWorkerCount = ((workers.data ?? []) as { location_updated_at: string | null }[])
+      .filter((w) => {
+        if (!w.location_updated_at) return false
+        return Date.now() - new Date(w.location_updated_at).getTime() <= LOCATION_STALE_MS
+      }).length
+
     setStats({
       totalBookings: total.count ?? 0,
       todayBookings: todayRes.count ?? 0,
       pendingBookings: pending.count ?? 0,
       totalRevenue: totalRev,
-      activeWorkers: workers.count ?? 0,
+      activeWorkers: liveWorkerCount,
     })
     setLoading(false)
   }, [supabase])
@@ -176,9 +188,9 @@ export default function AdminOverviewPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-6">
             {[
               { label: 'Today', value: loading ? '—' : stats.todayBookings, icon: '📅' },
-              { label: 'Pending', value: loading ? '—' : stats.pendingBookings, icon: '⏳', alert: stats.pendingBookings > 0 },
+              { label: 'Active orders', value: loading ? '—' : stats.pendingBookings, icon: '⏳', alert: stats.pendingBookings > 0 },
               { label: 'Revenue', value: loading ? '—' : `₹${stats.totalRevenue.toLocaleString('en-IN')}`, icon: '💰' },
-              { label: 'Active workers', value: loading ? '—' : stats.activeWorkers, icon: '👷' },
+              { label: 'Location on', value: loading ? '—' : stats.activeWorkers, icon: '📍' },
             ].map((s) => (
               <div key={s.label}
                 className="rounded-2xl bg-white/12 border border-white/15 backdrop-blur-sm px-4 py-3.5">

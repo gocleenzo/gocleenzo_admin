@@ -24,9 +24,13 @@ const POLL_MS = 10000
 const containerStyle = { width: '100%', height: '100%' }
 
 // ── Status → colour + label ───────────────────────────────────
-// green = in shift + available, amber = busy, grey = off shift / stale
+// red = location OFF (device toggle, no recent updates at all — the
+//   worker app now blocks itself entirely in this state, see
+//   LocationGate, so this is a hard, meaningful signal, not just "app
+//   closed"), amber = busy, green = in shift + available,
+// grey = location ON but simply off shift right now.
 function workerStatus(w: Worker, stale: boolean): { color: string; label: string } {
-  if (stale)                       return { color: '#9ca3af', label: 'Offline (stale)' }
+  if (stale)                       return { color: '#ef4444', label: '📍 Location Off' }
   if (w.busy)                      return { color: '#f59e0b', label: 'Busy' }
   const inShift = isWithinShift(w.schedule)
   if (inShift && w.available)      return { color: '#16a34a', label: 'Available' }
@@ -115,10 +119,10 @@ export default function WorkerLiveMap() {
             : null
           const agoText =
             ago == null
-              ? 'No recent update'
+              ? 'Location never reported'
               : ago < 60
-              ? `Updated ${ago}s ago`
-              : `Updated ${Math.round(ago / 60)}m ago`
+              ? `📍 Location updated ${ago}s ago`
+              : `📍 Location updated ${Math.round(ago / 60)}m ago`
           infoRef.current.setContent(
             `<div style="font-family:system-ui;font-size:13px;line-height:1.5">
                <strong>${cur.name}</strong>${cur.verified ? ' ✅' : ''}<br/>
@@ -176,7 +180,7 @@ export default function WorkerLiveMap() {
           <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-cyan-50 border border-cyan-100">
             <span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse" />
             <span className="text-xs font-black text-cyan-700">
-              {counts.online} online
+              {counts.online} location on
             </span>
           </span>
           <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-50 border border-slate-200">
@@ -197,7 +201,10 @@ export default function WorkerLiveMap() {
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#f59e0b' }} /> Busy
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#9ca3af' }} /> Off shift / offline
+          <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#9ca3af' }} /> Off shift (location still on)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#ef4444' }} /> 📍 Location off
         </span>
       </div>
 
