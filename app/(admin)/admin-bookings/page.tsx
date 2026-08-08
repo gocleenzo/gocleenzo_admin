@@ -12,7 +12,7 @@ type Booking = {
   services: BookedService[]
   customer: string; customer_id: string; customer_phone: string
   worker: string; worker_id: string | null; worker_phone: string
-  area: string; city: string; otp: string; payment_status: string
+  area: string; city: string; full_address: string; flat_no: string; building: string; pincode: string; latitude: number|null; longitude: number|null; otp: string; payment_status: string
   special_instructions: string | null
   work_started_at: string | null; work_ended_at: string | null
   booking_duration_minutes: number | null
@@ -687,6 +687,8 @@ export default function AdminBookings() {
   const [filter,    setFilter]    = useState('all')
   const [selected,  setSelected]  = useState<Booking | null>(null)
   const [mapFor,    setMapFor]    = useState<Booking | null>(null)
+  const [selectedDate, setSelectedDate] = useState<string>('all')
+  const [selectedArea, setSelectedArea] = useState<string>('all')
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
   // Per-booking zone-eligible worker id sets — null means unrestricted.
@@ -715,7 +717,7 @@ export default function AdminBookings() {
            service_duration_minutes,
            extra_time_mins,extra_time_price,extra_time_payment_status,
            customer_id,
-           services(name,duration_minutes),addresses(area,city,pincode,latitude,longitude),
+           services(name,duration_minutes),addresses(area,city,full_address,flat_no,building,pincode,latitude,longitude),
            customer:users!customer_id(full_name,phone),
            worker:users!worker_id(full_name,phone),
            booking_items(quantity,unit_price,total_price,service_name,services(name))`
@@ -793,6 +795,12 @@ export default function AdminBookings() {
         worker_phone: b.worker?.phone ?? '',
         area: b.addresses?.area ?? '—',
         city: b.addresses?.city ?? '',
+        full_address: b.addresses?.full_address ?? '',
+        flat_no: b.addresses?.flat_no ?? '',
+        building: b.addresses?.building ?? '',
+        pincode: b.addresses?.pincode ?? '',
+        latitude: b.addresses?.latitude ?? null,
+        longitude: b.addresses?.longitude ?? null,
       }
     }))
 
@@ -918,6 +926,34 @@ export default function AdminBookings() {
     return matchSearch && matchStatus && profileFilter(b)
   })
 
+  // ── Date tabs: extract unique scheduled dates from filtered bookings ──
+  const allDates = Array.from(new Set(
+    filtered.map(b => {
+      const d = new Date(b.scheduled_at)
+      return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+    })
+  )).sort((a, b) => new Date(a).getTime() - new Date(b).getTime())
+
+  // ── Area filter: extract unique areas ──
+  const allAreas = Array.from(new Set(filtered.map(b => b.area).filter(a => a && a !== '—'))).sort()
+
+  // Apply date + area filters
+  const dateAreaFiltered = filtered.filter(b => {
+    const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+      { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+    const matchDate = selectedDate === 'all' || dateStr === selectedDate
+    const matchArea = selectedArea === 'all' || b.area === selectedArea
+    return matchDate && matchArea
+  })
+
+  // Group by area within the current date filter
+  const groupedByArea: Record<string, typeof filtered> = {}
+  dateAreaFiltered.forEach(b => {
+    const area = b.area || '—'
+    if (!groupedByArea[area]) groupedByArea[area] = []
+    groupedByArea[area].push(b)
+  })
+
   const liveCount      = bookings.filter(b => liveStatuses.includes(b.status)).length
   const completedCount = bookings.filter(b => b.status === 'completed').length
   const cancelledCount = bookings.filter(b => b.status === 'cancelled').length
@@ -1040,187 +1076,400 @@ export default function AdminBookings() {
         </div>
       )}
 
-      {/* ── DENSE TABLE ── */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/50">
-                {['Service / Customer','Location','Schedule','Status','Worker','Amount','Timer','Actions'].map(c => (
-                  <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(b => {
-                const cfg         = STATUS[b.status] ?? STATUS.pending
-                const needsW      = !b.worker_id && ['pending','accepted'].includes(b.status)
-                const isLive      = b.status === 'in_progress'
-                const isDone      = b.status === 'completed' && b.work_started_at && b.work_ended_at
-                const isCancelled = b.status === 'cancelled'
-                const totalSec    = isDone ? elapsed(b.work_started_at, b.work_ended_at) : 0
-                // Zone restriction applied the same way as the Drawer —
-                // null (unrestricted) means fall back to schedule-only
-                // filtering, same as before this feature existed.
-                const zoneIds = zoneEligible[b.id] ?? null
-                const slotAvailable = workers.filter(w =>
-                  isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings) &&
-                  (zoneIds == null || zoneIds.has(w.id))
-                )
-
-                return (
-                  <Fragment key={b.id}>
-                    <tr
-                      className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
-                      onClick={() => setSelected(b)}
-                      style={{ opacity: isCancelled ? 0.7 : 1 }}>
-                      {/* Service / Customer */}
-                      <td className="px-4 py-3.5">
-                        <div className="flex items-center gap-2">
-                          {isLive && <span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse flex-shrink-0"/>}
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <p className="font-bold text-slate-800 text-[13px] truncate max-w-[180px]">{b.service_name}</p>
-                              {b.services.length > 1 && (
-                                <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200 flex-shrink-0">
-                                  {b.services.length}
-                                </span>
-                              )}
-                              {b.extra_time_mins > 0 && (
-                                <span
-                                  title={b.extra_time_payment_status === 'paid' ? 'Extra time paid online' : 'Extra time payment pending'}
-                                  className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 flex-shrink-0">
-                                  +{b.extra_time_mins}m {b.extra_time_payment_status === 'paid' ? '✓' : '⏳'}
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-[11px] text-slate-400 truncate max-w-[180px]">
-                              {b.customer} · {b.area}
-                            </p>
-                          </div>
-                        </div>
-                      </td>
-                      {/* Location */}
-                      <td className="px-4 py-3.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[12px] font-semibold text-slate-600">📍 {b.area}</span>
-                          <button
-                            onClick={() => setMapFor(b)}
-                            className="px-2 py-1 rounded-lg text-[11px] font-bold bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100 transition-all">
-                            Map
-                          </button>
-                        </div>
-                      </td>
-                      {/* Schedule */}
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        <p className="text-[13px] text-slate-700 font-medium">
-                          {new Date(b.scheduled_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
-                        </p>
-                        <p className="text-[11px] text-slate-400">
-                          {new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
-                        </p>
-                      </td>
-                      {/* Status */}
-                      <td className="px-4 py-3.5">
-                        <span className="text-[11px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
-                          style={{ background: cfg.bg, color: cfg.color }}>
-                          {cfg.icon} {cfg.label}
-                        </span>
-                      </td>
-                      {/* Worker */}
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        {b.worker !== 'Unassigned'
-                          ? <span className="text-[12px] font-semibold text-slate-700">👷 {b.worker.split(' ')[0]}</span>
-                          : <span className="text-[11px] text-amber-600 font-bold">Unassigned</span>}
-                      </td>
-                      {/* Amount */}
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        <span className={`text-[13px] font-black ${isCancelled ? 'text-red-400 line-through' : 'text-cyan-700'}`}>
-                          ₹{b.final_amount.toLocaleString('en-IN')}
-                        </span>
-                      </td>
-                      {/* Timer */}
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        {isLive && b.work_started_at
-                          ? <LiveTimer start={b.work_started_at} end={null} color="#0891B2"/>
-                          : isDone && totalSec > 0
-                            ? <span className="font-mono font-bold text-[12px] text-green-700">{durShort(totalSec)}</span>
-                            : <span className="text-slate-300 text-xs">—</span>}
-                      </td>
-                      {/* Actions */}
-                      <td className="px-4 py-3.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center gap-1.5">
-                          {b.status === 'in_progress' && (
-                            <button onClick={() => quickAct(b.id,'completed')}
-                              className="px-2.5 py-1 rounded-lg text-[11px] font-black bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-all">
-                              ✓ Done
-                            </button>
-                          )}
-                          {['pending','accepted','otp_verified','in_progress'].includes(b.status) && (
-                            <button onClick={() => quickAct(b.id,'cancelled')}
-                              className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">✕</button>
-                          )}
-                          <button onClick={() => setSelected(b)}
-                            className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">
-                            Details
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-
-                    {/* Inline assign row (only when needs worker) */}
-                    {needsW && (
-                      <tr className="border-b border-slate-50 bg-amber-50/40">
-                        <td colSpan={8} className="px-4 py-2" onClick={e => e.stopPropagation()}>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[11px] text-slate-500 font-medium whitespace-nowrap">
-                              {zoneIds != null && '📐 '}
-                              {slotAvailable.length > 0
-                                ? `${slotAvailable.length} free at this slot:`
-                                : 'No workers free at this slot'}
-                            </span>
-                            <select value={assignMap[b.id] ?? ''} onChange={e => setAssignMap(p => ({ ...p, [b.id]: e.target.value }))}
-                              className="flex-1 max-w-xs px-3 py-1.5 rounded-lg text-[13px] text-slate-800 outline-none bg-white"
-                              style={{ border: `1.5px solid ${slotAvailable.length > 0 ? '#FCD34D' : '#FECACA'}` }}>
-                              <option value="">{slotAvailable.length === 0 ? 'No workers free' : 'Assign worker…'}</option>
-                              {slotAvailable.map(w => (
-                                <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
-                              ))}
-                            </select>
-                            <button onClick={() => quickAssign(b.id)}
-                              disabled={!assignMap[b.id] || assigning === b.id || slotAvailable.length === 0}
-                              className="px-3 py-1.5 rounded-lg text-[11px] font-black text-white disabled:opacity-40 active:scale-95 whitespace-nowrap"
-                              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-                              {assigning === b.id ? '…' : 'Assign 🔔'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
-                )
-              })}
-            </tbody>
-          </table>
+      {/* ── DATE TABS ── */}
+      <div className="mb-4">
+        <div className="flex items-center gap-2 overflow-x-auto pb-2">
+          {/* All dates tab */}
+          <button
+            onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
+            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
+            style={{
+              background: selectedDate === 'all' ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+              color: selectedDate === 'all' ? '#fff' : '#64748B',
+              border: `1.5px solid ${selectedDate === 'all' ? '#0891B2' : '#E2E8F0'}`,
+              boxShadow: selectedDate === 'all' ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
+            }}>
+            📅 All Dates
+            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
+              style={{ background: selectedDate === 'all' ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === 'all' ? '#fff' : '#0891B2' }}>
+              {filtered.length}
+            </span>
+          </button>
+          {/* Per-date tabs */}
+          {allDates.map(date => {
+            const cnt = filtered.filter(b =>
+              new Date(b.scheduled_at).toLocaleDateString('en-IN',
+                { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }) === date
+            ).length
+            const isToday = date === new Date().toLocaleDateString('en-IN',
+              { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+            const isTmrw = date === new Date(Date.now() + 86400000).toLocaleDateString('en-IN',
+              { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+            const active = selectedDate === date
+            return (
+              <button key={date}
+                onClick={() => { setSelectedDate(date); setSelectedArea('all') }}
+                className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
+                style={{
+                  background: active ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+                  color: active ? '#fff' : '#64748B',
+                  border: `1.5px solid ${active ? '#0891B2' : isToday ? '#BAE6FD' : '#E2E8F0'}`,
+                  boxShadow: active ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
+                }}>
+                {isToday ? '🟢 Today' : isTmrw ? '🔵 Tomorrow' : `📅 ${date}`}
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
+                  style={{ background: active ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: active ? '#fff' : '#0891B2' }}>
+                  {cnt}
+                </span>
+              </button>
+            )
+          })}
         </div>
 
-        {filtered.length === 0 && (
-          <div className="p-16 text-center">
-            <p className="text-4xl mb-3">
-              {profile === 'live' ? '⚡' : profile === 'completed' ? '✅' : profile === 'cancelled' ? '❌' : '📋'}
-            </p>
-            <p className="text-slate-700 font-bold">
-              {profile === 'live' ? 'No active bookings' : profile === 'completed' ? 'No completed bookings'
-                : profile === 'cancelled' ? 'No cancelled bookings' : 'No bookings found'}
-            </p>
-            <p className="text-sm text-slate-400 mt-1">
-              {profile !== 'all'
-                ? <button onClick={() => setProfile('all')} className="text-cyan-600 font-bold hover:underline">View all bookings</button>
-                : 'Try changing the filter'}
-            </p>
+        {/* Area filter pills (shown under date tabs) */}
+        {allAreas.length > 1 && (
+          <div className="flex items-center gap-2 overflow-x-auto pt-2">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex-shrink-0">Area:</span>
+            <button
+              onClick={() => setSelectedArea('all')}
+              className="flex-shrink-0 px-3 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap"
+              style={{
+                background: selectedArea === 'all' ? '#CFFAFE' : '#fff',
+                color: selectedArea === 'all' ? '#0891B2' : '#64748B',
+                border: `1px solid ${selectedArea === 'all' ? '#0891B2' : '#E2E8F0'}`,
+              }}>
+              All Areas ({dateAreaFiltered.length})
+            </button>
+            {allAreas.map(area => {
+              const cnt = filtered.filter(b => {
+                const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+                  { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+                const matchDate = selectedDate === 'all' || dateStr === selectedDate
+                return matchDate && b.area === area
+              }).length
+              return (
+                <button key={area}
+                  onClick={() => setSelectedArea(area)}
+                  className="flex-shrink-0 px-3 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap"
+                  style={{
+                    background: selectedArea === area ? '#CFFAFE' : '#fff',
+                    color: selectedArea === area ? '#0891B2' : '#64748B',
+                    border: `1px solid ${selectedArea === area ? '#0891B2' : '#E2E8F0'}`,
+                  }}>
+                  📍 {area} ({cnt})
+                </button>
+              )
+            })}
           </div>
         )}
       </div>
+
+      {/* ── AREA GROUPED TABLE ── */}
+      {dateAreaFiltered.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center shadow-sm">
+          <p className="text-4xl mb-3">
+            {profile === 'live' ? '⚡' : profile === 'completed' ? '✅' : profile === 'cancelled' ? '❌' : '📋'}
+          </p>
+          <p className="text-slate-700 font-bold">No bookings found</p>
+          <p className="text-sm text-slate-400 mt-1">
+            {selectedDate !== 'all' || selectedArea !== 'all'
+              ? <button onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
+                  className="text-cyan-600 font-bold hover:underline">Clear filters</button>
+              : 'Try changing the filter'}
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {Object.entries(groupedByArea).map(([area, areaBookings]) => (
+            <div key={area} className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
+              {/* Area header — attractive gradient */}
+              {(() => {
+                const liveInArea = areaBookings.filter(b => b.status === 'in_progress').length
+                const pendingInArea = areaBookings.filter(b => b.status === 'pending').length
+                const areaTotal = areaBookings.reduce((s, b) => s + b.final_amount, 0)
+                const mapsUrl = `https://maps.google.com/?q=${encodeURIComponent(area)}`
+                return (
+                  <div className="flex items-center justify-between px-5 py-4 border-b border-cyan-100/50"
+                    style={{ background: 'linear-gradient(135deg,#ECFEFF 0%,#F0FDFF 50%,#EFF6FF 100%)' }}>
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
+                        style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)', boxShadow: '0 4px 10px rgba(8,145,178,0.3)' }}>
+                        📍
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-black text-[15px] text-slate-800">{area}</h3>
+                          {liveInArea > 0 && (
+                            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black bg-cyan-500 text-white animate-pulse">
+                              ● {liveInArea} LIVE
+                            </span>
+                          )}
+                          {pendingInArea > 0 && (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-amber-100 text-amber-700 border border-amber-200">
+                              ⏳ {pendingInArea} pending
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          {areaBookings.length} booking{areaBookings.length > 1 ? 's' : ''} · ₹{areaTotal.toLocaleString('en-IN')} total
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                        onClick={e => e.stopPropagation()}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold bg-white text-teal-700 border border-teal-200 hover:bg-teal-50 transition-all shadow-sm"
+                        title="Open area in Google Maps">
+                        🗺 View Area
+                      </a>
+                      <button
+                        onClick={e => {
+                          e.stopPropagation()
+                          const firstBooking = areaBookings[0]
+                          const shareText = areaBookings.map(b => {
+                            const addr = [b.flat_no, b.building, b.full_address || b.area].filter(Boolean).join(', ')
+                            const link = b.latitude && b.longitude
+                              ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
+                              : `https://maps.google.com/?q=${encodeURIComponent(addr)}`
+                            return `• ${b.customer} (${b.service_name}) - ${b.scheduled_at ? new Date(b.scheduled_at).toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'}) : ''} → ${link}`
+                          }).join('\n')
+                          navigator.clipboard.writeText(`📍 ${area} Bookings:\n${shareText}`)
+                          alert(`All ${area} booking addresses copied!`)
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 transition-all shadow-sm"
+                        title="Copy maps link">
+                        🔗 Share
+                      </button>
+                    </div>
+                  </div>
+                )
+              })()}
+
+              {/* Table inside area section */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-100 bg-slate-50/50">
+                      {['Service / Customer','Schedule','Location','Status','Worker','Amount','Timer','Actions'].map(c => (
+                        <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {areaBookings.map(b => {
+                      const cfg         = STATUS[b.status] ?? STATUS.pending
+                      const needsW      = !b.worker_id && ['pending','accepted'].includes(b.status)
+                      const isLive      = b.status === 'in_progress'
+                      const isDone      = b.status === 'completed' && b.work_started_at && b.work_ended_at
+                      const isCancelled = b.status === 'cancelled'
+                      const totalSec    = isDone ? elapsed(b.work_started_at, b.work_ended_at) : 0
+                      const zoneIds     = zoneEligible[b.id] ?? null
+                      const slotAvailable = workers.filter(w =>
+                        isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings) &&
+                        (zoneIds == null || zoneIds.has(w.id))
+                      )
+
+                      return (
+                        <Fragment key={b.id}>
+                          <tr
+                            className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
+                            onClick={() => setSelected(b)}
+                            style={{ opacity: isCancelled ? 0.7 : 1 }}>
+                            {/* Service / Customer */}
+                            <td className="px-4 py-3.5">
+                              <div className="flex items-center gap-2.5">
+                                {/* Status indicator dot */}
+                                <div className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center text-base"
+                                  style={{ background: cfg.bg, border: `1px solid ${cfg.color}30` }}>
+                                  {isLive ? <span className="animate-pulse">{cfg.icon}</span> : cfg.icon}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <p className="font-black text-slate-800 text-[13px] truncate max-w-[160px]">{b.service_name}</p>
+                                    {b.services.length > 1 && (
+                                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200 flex-shrink-0">
+                                        +{b.services.length - 1} more
+                                      </span>
+                                    )}
+                                    {b.extra_time_mins > 0 && (
+                                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 flex-shrink-0">
+                                        +{b.extra_time_mins}m {b.extra_time_payment_status === 'paid' ? '✓' : '⏳'}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1.5 mt-0.5">
+                                    <span className="text-[11px] font-semibold text-slate-600">{b.customer}</span>
+                                    <span className="text-slate-300">·</span>
+                                    <a href={`tel:${b.customer_phone}`}
+                                      onClick={e => e.stopPropagation()}
+                                      className="text-[11px] text-cyan-600 font-bold hover:underline">
+                                      {b.customer_phone}
+                                    </a>
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            {/* Schedule */}
+                            <td className="px-4 py-3.5 whitespace-nowrap">
+                              <div className="flex items-center gap-1.5 mb-0.5">
+                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                                  style={{ background: isLive ? '#0891B2' : b.status === 'completed' ? '#059669' : '#F59E0B' }}/>
+                                <p className="text-[13px] text-slate-700 font-bold">
+                                  {new Date(b.scheduled_at).toLocaleDateString('en-IN',
+                                    { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}
+                                </p>
+                              </div>
+                              <p className="text-[12px] text-cyan-600 font-bold">
+                                🕐 {new Date(b.scheduled_at).toLocaleTimeString('en-IN',
+                                  { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
+                              </p>
+                            </td>
+                            {/* Location */}
+                            <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
+                              <div className="flex items-center gap-1.5">
+                                <div className="min-w-0">
+                                  <p className="text-[12px] font-bold text-slate-700 truncate max-w-[130px]" title={[b.flat_no, b.building, b.full_address, b.area].filter(Boolean).join(', ')}>
+                                    📍 {b.area}
+                                  </p>
+                                  {(b.flat_no || b.building) && (
+                                    <p className="text-[10px] text-slate-500 truncate max-w-[130px]">
+                                      {[b.flat_no, b.building].filter(Boolean).join(', ')}
+                                    </p>
+                                  )}
+                                  {b.city && <p className="text-[10px] text-slate-400 truncate max-w-[130px]">{b.city}{b.pincode ? ` - ${b.pincode}` : ''}</p>}
+                                </div>
+                                <div className="flex items-center gap-1 flex-shrink-0">
+                                  <button
+                                    onClick={() => setMapFor(b)}
+                                    title="View on map"
+                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100 transition-all hover:scale-105">
+                                    🗺
+                                  </button>
+                                  <a
+                                    href={b.latitude && b.longitude
+                                      ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
+                                      : `https://maps.google.com/?q=${encodeURIComponent([b.flat_no, b.building, b.full_address || b.area, b.city].filter(Boolean).join(', '))}`}
+                                    target="_blank" rel="noopener noreferrer"
+                                    onClick={e => e.stopPropagation()}
+                                    title="Open exact location in Google Maps"
+                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition-all hover:scale-105">
+                                    📌
+                                  </a>
+                                  <button
+                                    onClick={() => {
+                                      const parts = [b.flat_no, b.building, b.full_address || b.area, b.city, b.pincode].filter(Boolean)
+                                      const fullAddr = parts.join(', ')
+                                      const mapsUrl = b.latitude && b.longitude
+                                        ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
+                                        : `https://maps.google.com/?q=${encodeURIComponent(fullAddr)}`
+                                      const shareText = `${b.customer} - ${b.service_name}\n📍 ${fullAddr}\n🗺 ${mapsUrl}`
+                                      if (navigator.share) {
+                                        navigator.share({ title: `Cleenzo Booking - ${b.customer}`, text: shareText, url: mapsUrl })
+                                      } else {
+                                        navigator.clipboard.writeText(shareText)
+                                        alert('Address & maps link copied!')
+                                      }
+                                    }}
+                                    title="Share full address"
+                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 transition-all hover:scale-105">
+                                    🔗
+                                  </button>
+                                </div>
+                              </div>
+                            </td>
+                            {/* Status */}
+                            <td className="px-4 py-3.5">
+                              <span className="text-[11px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
+                                style={{ background: cfg.bg, color: cfg.color }}>
+                                {cfg.icon} {cfg.label}
+                              </span>
+                            </td>
+                            {/* Worker */}
+                            <td className="px-4 py-3.5 whitespace-nowrap">
+                              {b.worker !== 'Unassigned'
+                                ? <div className="flex items-center gap-1.5">
+                                    <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-black flex-shrink-0"
+                                      style={{ background: 'linear-gradient(135deg,#F59E0B,#D97706)' }}>
+                                      {b.worker[0]?.toUpperCase()}
+                                    </div>
+                                    <span className="text-[12px] font-semibold text-slate-700">{b.worker.split(' ')[0]}</span>
+                                  </div>
+                                : <span className="text-[11px] text-amber-600 font-bold bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Unassigned</span>}
+                            </td>
+                            {/* Amount */}
+                            <td className="px-4 py-3.5 whitespace-nowrap">
+                              <span className={`text-[13px] font-black ${isCancelled ? 'text-red-400 line-through' : 'text-cyan-700'}`}>
+                                ₹{b.final_amount.toLocaleString('en-IN')}
+                              </span>
+                            </td>
+                            {/* Timer */}
+                            <td className="px-4 py-3.5 whitespace-nowrap">
+                              {isLive && b.work_started_at
+                                ? <LiveTimer start={b.work_started_at} end={null} color="#0891B2"/>
+                                : isDone && totalSec > 0
+                                  ? <span className="font-mono font-bold text-[12px] text-green-700">{durShort(totalSec)}</span>
+                                  : <span className="text-slate-300 text-xs">—</span>}
+                            </td>
+                            {/* Actions */}
+                            <td className="px-4 py-3.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                              <div className="flex items-center gap-1.5">
+                                {b.status === 'in_progress' && (
+                                  <button onClick={() => quickAct(b.id,'completed')}
+                                    className="px-2.5 py-1 rounded-lg text-[11px] font-black bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-all">
+                                    ✓ Done
+                                  </button>
+                                )}
+                                {['pending','accepted','otp_verified','in_progress'].includes(b.status) && (
+                                  <button onClick={() => quickAct(b.id,'cancelled')}
+                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">✕</button>
+                                )}
+                                <button onClick={() => setSelected(b)}
+                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">
+                                  Details
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+
+                          {/* Inline assign row */}
+                          {needsW && (
+                            <tr className="border-b border-slate-50 bg-amber-50/40">
+                              <td colSpan={8} className="px-4 py-2" onClick={e => e.stopPropagation()}>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] text-slate-500 font-medium whitespace-nowrap">
+                                    {zoneIds != null && '📐 '}
+                                    {slotAvailable.length > 0
+                                      ? `${slotAvailable.length} free at this slot:`
+                                      : 'No workers free at this slot'}
+                                  </span>
+                                  <select value={assignMap[b.id] ?? ''} onChange={e => setAssignMap(p => ({ ...p, [b.id]: e.target.value }))}
+                                    className="flex-1 max-w-xs px-3 py-1.5 rounded-lg text-[13px] text-slate-800 outline-none bg-white"
+                                    style={{ border: `1.5px solid ${slotAvailable.length > 0 ? '#FCD34D' : '#FECACA'}` }}>
+                                    <option value="">{slotAvailable.length === 0 ? 'No workers free' : 'Assign worker…'}</option>
+                                    {slotAvailable.map(w => (
+                                      <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
+                                    ))}
+                                  </select>
+                                  <button onClick={() => quickAssign(b.id)}
+                                    disabled={!assignMap[b.id] || assigning === b.id || slotAvailable.length === 0}
+                                    className="px-3 py-1.5 rounded-lg text-[11px] font-black text-white disabled:opacity-40 active:scale-95 whitespace-nowrap"
+                                    style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+                                    {assigning === b.id ? '…' : 'Assign 🔔'}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Quick location + nearby workers popup (from the row Map button) */}
       {mapFor && (
