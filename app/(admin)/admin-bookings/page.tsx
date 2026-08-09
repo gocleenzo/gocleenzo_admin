@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback, Fragment } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
 
-type BookedService = { name: string; qty: number; unit_price: number }
+type BookedService = { serviceId: string | null; name: string; qty: number; unit_price: number }
 
 type Booking = {
   id: string; status: string; final_amount: number; base_price: number
@@ -19,6 +19,7 @@ type Booking = {
   service_duration_minutes: number | null
   extra_time_mins: number; extra_time_price: number
   extra_time_payment_status: string | null
+  is_manual_booking: boolean
 }
 type Worker = {
   id: string; name: string; phone: string
@@ -520,8 +521,16 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   const supabase = createClient()
   const [phone, setPhone] = useState('')
   const [name, setName] = useState('')
-  const [serviceId, setServiceId] = useState('')
-  const [quantity, setQuantity] = useState(1)
+  // Multiple services, each with its own quantity — replaces the old
+  // single serviceId+quantity pair. At least one line with a real
+  // service selected is required to submit.
+  const [serviceLines, setServiceLines] = useState<{ serviceId: string; quantity: number }[]>([
+    { serviceId: '', quantity: 1 },
+  ])
+  // Manually entered by admin — the actual amount charged, independent
+  // of whatever the selected services' catalog prices add up to (a
+  // phone-negotiated price, a discount given verbally, etc.).
+  const [finalAmount, setFinalAmount] = useState('')
   const [scheduledIso, setScheduledIso] = useState('')
   const [flatNo, setFlatNo] = useState('')
   const [building, setBuilding] = useState('')
@@ -554,11 +563,35 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   }, [pincode])
 
   const filteredWorkers = zoneWorkerIds == null ? workers : workers.filter(w => zoneWorkerIds.has(w.id))
-  const selectedService = services.find(s => s.id === serviceId)
-  const durationMins = selectedService?.duration_minutes ?? 60
 
-  const canSubmit = phone.trim().length >= 10 && serviceId && scheduledIso &&
-    fullAddress.trim() && pincode.trim()
+  function addServiceLine() {
+    setServiceLines(prev => [...prev, { serviceId: '', quantity: 1 }])
+    setScheduledIso('')
+  }
+  function removeServiceLine(idx: number) {
+    setServiceLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx))
+    setScheduledIso('')
+  }
+  function updateServiceLine(idx: number, patch: Partial<{ serviceId: string; quantity: number }>) {
+    setServiceLines(prev => prev.map((line, i) => i === idx ? { ...line, ...patch } : line))
+    setScheduledIso('')
+  }
+
+  // Total duration across every service line — the SlotPicker needs one
+  // combined duration to check availability against, same as how a
+  // multi-item cart booking works in the customer app.
+  const durationMins = serviceLines.reduce((sum, line) => {
+    const svc = services.find(s => s.id === line.serviceId)
+    if (!svc) return sum
+    return sum + (svc.duration_minutes ?? 60) * Math.max(1, line.quantity)
+  }, 0)
+
+  const validLines = serviceLines.filter(l => l.serviceId)
+  const finalAmountNum = Number(finalAmount)
+
+  const canSubmit = phone.trim().length >= 10 && validLines.length > 0 && scheduledIso &&
+    fullAddress.trim() && pincode.trim() &&
+    finalAmount.trim() !== '' && finalAmountNum > 0
 
   async function submit() {
     if (!canSubmit) return
@@ -568,9 +601,11 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
       const { data, error: rpcError } = await supabase.rpc('admin_create_manual_booking', {
         p_customer_phone: phone.trim(),
         p_customer_name: name.trim() || null,
-        p_service_id: serviceId,
-        p_quantity: quantity,
+        // Array of {"service_id": "...", "quantity": N} — matches the
+        // updated admin_create_manual_booking signature exactly.
+        p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
         p_scheduled_at: scheduledIso,
+        p_final_amount: finalAmountNum,
         p_flat_no: flatNo.trim() || null,
         p_building: building.trim() || null,
         p_full_address: fullAddress.trim(),
@@ -584,8 +619,9 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
         const reasonMap: Record<string, string> = {
           no_workers: 'No worker is available at this time slot for this pincode.',
           slot_full: 'This slot is already full — no free worker at that time.',
-          invalid_service: 'Please choose a valid service.',
-          invalid_phone: 'Please enter a valid phone number.',
+          no_services: 'Please add at least one service.',
+          invalid_amount: 'Please enter a valid final amount.',
+          service_not_found: 'One of the selected services could not be found.',
         }
         setError(reasonMap[data?.reason] ?? (data?.message || 'Could not create the booking.'))
         setSubmitting(false)
@@ -645,18 +681,54 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
             </div>
 
             <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Service</p>
-              <div className="grid grid-cols-3 gap-3">
-                <select value={serviceId} onChange={e => { setServiceId(e.target.value); setScheduledIso('') }}
-                  className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
-                  <option value="">Select service…</option>
-                  {services.map(s => (
-                    <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
-                  ))}
-                </select>
-                <input type="number" min={1} value={quantity} onChange={e => setQuantity(Math.max(1, Number(e.target.value)))}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Services</p>
+                <button type="button" onClick={addServiceLine}
+                  className="text-[11px] font-bold text-cyan-700 hover:text-cyan-800">
+                  + Add another service
+                </button>
               </div>
+              <div className="space-y-2">
+                {serviceLines.map((line, idx) => (
+                  <div key={idx} className="grid grid-cols-3 gap-3">
+                    <select value={line.serviceId}
+                      onChange={e => updateServiceLine(idx, { serviceId: e.target.value })}
+                      className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                      <option value="">Select service…</option>
+                      {services.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
+                      ))}
+                    </select>
+                    <div className="flex items-center gap-2">
+                      <input type="number" min={1} value={line.quantity}
+                        onChange={e => updateServiceLine(idx, { quantity: Math.max(1, Number(e.target.value)) })}
+                        className="flex-1 px-3 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                      {serviceLines.length > 1 && (
+                        <button type="button" onClick={() => removeServiceLine(idx)}
+                          className="w-9 h-9 flex-shrink-0 rounded-lg flex items-center justify-center bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-2">
+                We'll match an existing account by phone, or create a lightweight profile automatically.
+              </p>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
+                Final Amount (₹)
+              </p>
+              <input type="number" min={0} placeholder="Amount to charge — entered manually"
+                value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              <p className="text-[11px] text-slate-400 mt-1.5">
+                Entered by hand — independent of the selected services' catalog
+                prices (covers phone-negotiated pricing).
+              </p>
             </div>
 
             <div>
@@ -724,6 +796,292 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
               className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
               style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
               {submitting ? '…' : '📞 Create Phone Booking'}
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+// ── Edit Manual Booking Modal ──────────────────────────────────
+// Same shape as PhoneBookingModal, but pre-filled from an EXISTING
+// manual booking and calling admin_edit_manual_booking instead of
+// admin_create_manual_booking. Only ever shown for bookings where
+// b.is_manual_booking is true and status is still pending/accepted —
+// enforced both here (button only renders in that case) AND server-side
+// (the RPC itself re-checks both conditions).
+function EditManualBookingModal({ booking, services, workers, allBookings, onClose, onDone }: {
+  booking: Booking
+  services: ServiceOption[]
+  workers: Worker[]
+  allBookings: { worker_id: string; scheduled_at: string }[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const supabase = createClient()
+  const [phone, setPhone] = useState(booking.customer_phone ?? '')
+  const [name, setName] = useState(booking.customer ?? '')
+  const [serviceLines, setServiceLines] = useState<{ serviceId: string; quantity: number }[]>(
+    booking.services.length > 0
+      ? booking.services.map(s => ({ serviceId: s.serviceId ?? '', quantity: s.qty }))
+      : [{ serviceId: '', quantity: 1 }]
+  )
+  const [finalAmount, setFinalAmount] = useState(String(booking.final_amount ?? ''))
+  const [scheduledIso, setScheduledIso] = useState(booking.scheduled_at)
+  const [flatNo, setFlatNo] = useState(booking.flat_no ?? '')
+  const [building, setBuilding] = useState(booking.building ?? '')
+  const [fullAddress, setFullAddress] = useState(booking.full_address ?? '')
+  const [area, setArea] = useState(booking.area ?? '')
+  const [city, setCity] = useState(booking.city ?? '')
+  const [pincode, setPincode] = useState(booking.pincode ?? '')
+  // Strip the auto-appended admin markers so re-editing doesn't stack
+  // "[Phone booking created by admin] [Phone booking edited by admin]
+  // [Phone booking edited by admin]..." indefinitely — the RPC re-adds
+  // exactly one "[edited by admin]" marker itself on save.
+  const [notes, setNotes] = useState(
+    (booking.special_instructions ?? '')
+      .replace(/\s*\[Phone booking (created|edited) by admin\]/g, '')
+      .trim()
+  )
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
+  const [zoneChecking, setZoneChecking] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const t = setTimeout(async () => {
+      const p = pincode.trim()
+      if (!p) { if (!cancelled) { setZoneWorkerIds(null); setZoneChecking(false) }; return }
+      setZoneChecking(true)
+      const ids = await resolvePincodeWorkerIds(supabase, p)
+      if (!cancelled) { setZoneWorkerIds(ids); setZoneChecking(false) }
+    }, 400)
+    return () => { cancelled = true; clearTimeout(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pincode])
+
+  const filteredWorkers = zoneWorkerIds == null ? workers : workers.filter(w => zoneWorkerIds.has(w.id))
+
+  function addServiceLine() {
+    setServiceLines(prev => [...prev, { serviceId: '', quantity: 1 }])
+    setScheduledIso('')
+  }
+  function removeServiceLine(idx: number) {
+    setServiceLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx))
+    setScheduledIso('')
+  }
+  function updateServiceLine(idx: number, patch: Partial<{ serviceId: string; quantity: number }>) {
+    setServiceLines(prev => prev.map((line, i) => i === idx ? { ...line, ...patch } : line))
+    setScheduledIso('')
+  }
+
+  const durationMins = serviceLines.reduce((sum, line) => {
+    const svc = services.find(s => s.id === line.serviceId)
+    if (!svc) return sum
+    return sum + (svc.duration_minutes ?? 60) * Math.max(1, line.quantity)
+  }, 0)
+
+  const validLines = serviceLines.filter(l => l.serviceId)
+  const finalAmountNum = Number(finalAmount)
+
+  const canSubmit = phone.trim().length >= 10 && validLines.length > 0 && scheduledIso &&
+    fullAddress.trim() && pincode.trim() &&
+    finalAmount.trim() !== '' && finalAmountNum > 0
+
+  // The booking's OWN current slot must never count against itself in
+  // the availability re-check (mirrors admin_reschedule_booking's same
+  // exclusion) — done server-side in the RPC, nothing needed here.
+  async function submit() {
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_edit_manual_booking', {
+        p_booking_id: booking.id,
+        p_customer_phone: phone.trim(),
+        p_customer_name: name.trim() || null,
+        p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
+        p_scheduled_at: scheduledIso,
+        p_final_amount: finalAmountNum,
+        p_flat_no: flatNo.trim() || null,
+        p_building: building.trim() || null,
+        p_full_address: fullAddress.trim(),
+        p_area: area.trim() || null,
+        p_city: city.trim() || null,
+        p_pincode: pincode.trim(),
+        p_special_instructions: notes.trim() || null,
+      })
+      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
+      if (!data?.success) {
+        const reasonMap: Record<string, string> = {
+          not_found: 'Booking not found.',
+          not_manual_booking: 'Only phone bookings can be edited this way.',
+          cannot_edit_status: 'This booking can no longer be edited (work has started, or it is finished/cancelled).',
+          no_workers: 'No worker is available at this time slot for this pincode.',
+          slot_full: 'This slot is already full — no free worker at that time.',
+          no_services: 'Please add at least one service.',
+          invalid_amount: 'Please enter a valid final amount.',
+          service_not_found: 'One of the selected services could not be found.',
+        }
+        setError(reasonMap[data?.reason] ?? (data?.message || 'Could not save changes.'))
+        setSubmitting(false)
+        return
+      }
+      setDone(true)
+      setSubmitting(false)
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not save changes.')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <div>
+            <h2 className="text-lg font-black text-slate-800">✏️ Edit Phone Booking</h2>
+            <p className="text-xs text-slate-400 mt-0.5">#{booking.id.slice(0,8).toUpperCase()}</p>
+          </div>
+          <button onClick={onClose}
+            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+        </div>
+
+        {done ? (
+          <div className="px-6 py-6 space-y-4">
+            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
+              <p className="text-3xl mb-2">✅</p>
+              <p className="font-black text-slate-800">Changes saved</p>
+            </div>
+            <button onClick={onDone}
+              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Customer</p>
+              <div className="grid grid-cols-2 gap-3">
+                <input type="tel" placeholder="Phone number *" value={phone} onChange={e => setPhone(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Name" value={name} onChange={e => setName(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Services</p>
+                <button type="button" onClick={addServiceLine}
+                  className="text-[11px] font-bold text-cyan-700 hover:text-cyan-800">
+                  + Add another service
+                </button>
+              </div>
+              <div className="space-y-2">
+                {serviceLines.map((line, idx) => (
+                  <div key={idx} className="grid grid-cols-3 gap-3">
+                    <select value={line.serviceId}
+                      onChange={e => updateServiceLine(idx, { serviceId: e.target.value })}
+                      className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                      <option value="">Select service…</option>
+                      {services.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
+                      ))}
+                    </select>
+                    <div className="flex items-center gap-2">
+                      <input type="number" min={1} value={line.quantity}
+                        onChange={e => updateServiceLine(idx, { quantity: Math.max(1, Number(e.target.value)) })}
+                        className="flex-1 px-3 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                      {serviceLines.length > 1 && (
+                        <button type="button" onClick={() => removeServiceLine(idx)}
+                          className="w-9 h-9 flex-shrink-0 rounded-lg flex items-center justify-center bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
+                Final Amount (₹)
+              </p>
+              <input type="number" min={0} value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Address</p>
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Building / Society" value={building} onChange={e => setBuilding(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+              <input type="text" placeholder="Full address *" value={fullAddress} onChange={e => setFullAddress(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 mb-3"/>
+              <div className="grid grid-cols-3 gap-3">
+                <input type="text" placeholder="Area" value={area} onChange={e => setArea(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="City" value={city} onChange={e => setCity(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Pincode *" value={pincode}
+                  onChange={e => { setPincode(e.target.value); setScheduledIso('') }}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
+              {zoneChecking && (
+                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode…</p>
+              )}
+              {!zoneChecking && zoneWorkerIds != null && (
+                <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
+                  <p className="text-[11px] text-cyan-700 font-semibold">
+                    📐 {zoneWorkerIds.size} worker{zoneWorkerIds.size === 1 ? '' : 's'} cover pincode {pincode.trim()}.
+                  </p>
+                </div>
+              )}
+              <SlotPicker
+                workers={filteredWorkers}
+                durationMins={durationMins}
+                existingBookings={allBookings.filter(bk => bk.scheduled_at !== booking.scheduled_at || bk.worker_id !== booking.worker_id)}
+                value={scheduledIso}
+                onChange={setScheduledIso}
+                emptyHint={
+                  !pincode.trim()
+                    ? 'Enter a pincode above to check real-time availability.'
+                    : 'No worker covers this pincode yet — assign one under Workers → Areas.'
+                }
+              />
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Notes (optional)</p>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 resize-none"/>
+            </div>
+
+            {error && (
+              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+                <p className="text-xs font-bold text-red-600">{error}</p>
+              </div>
+            )}
+
+            <button onClick={submit} disabled={!canSubmit || submitting}
+              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
+              {submitting ? '…' : '✏️ Save Changes'}
             </button>
           </div>
         )}
@@ -877,12 +1235,15 @@ function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
 
 // ── Drawer (unchanged) ─────────────────────────────────────────
 function Drawer({
-  b, workers, allBookings, zoneWorkerIds, onClose, onDone
+  b, workers, allBookings, zoneWorkerIds, onClose, onDone, onEditManual
 }: {
   b: Booking; workers: Worker[]
   allBookings: { worker_id: string; scheduled_at: string }[]
   zoneWorkerIds: Set<string> | null
   onClose: () => void; onDone: () => void
+  // Opens the Edit modal for this booking (only ever called when
+  // b.is_manual_booking is true — see the button below).
+  onEditManual: () => void
 }) {
   const [selW, setSelW] = useState(b.worker_id ?? '')
   const [busy, setBusy] = useState(false)
@@ -1037,8 +1398,16 @@ function Drawer({
             <h2 className="text-lg font-black text-slate-800">Booking Details</h2>
             <p className="text-xs font-mono text-slate-400 mt-0.5">#{b.id.slice(0,8).toUpperCase()}</p>
           </div>
-          <button onClick={onClose}
-            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+          <div className="flex items-center gap-2">
+            {b.is_manual_booking && ['pending','accepted'].includes(b.status) && (
+              <button onClick={onEditManual}
+                className="px-3 py-2 rounded-xl text-[11px] font-black text-violet-700 bg-violet-50 border border-violet-200 hover:bg-violet-100 transition-all">
+                ✏️ Edit
+              </button>
+            )}
+            <button onClick={onClose}
+              className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
@@ -1373,6 +1742,7 @@ export default function AdminBookings() {
   // Admin-side phone call / manual capacity-hold modals.
   const [showPhoneModal, setShowPhoneModal] = useState(false)
   const [showBlockModal, setShowBlockModal] = useState(false)
+  const [showEditModal, setShowEditModal] = useState(false)
   // Per-booking zone-eligible worker id sets — null means unrestricted.
   // Computed once per load() for every booking that could still need a
   // worker assigned, so the table's inline assign row and the Drawer's
@@ -1396,13 +1766,13 @@ export default function AdminBookings() {
         supabase.from('bookings').select(
           `id,status,final_amount,base_price,discount_amount,scheduled_at,created_at,
            otp,worker_id,payment_status,special_instructions,work_started_at,work_ended_at,booking_duration_minutes,
-           service_duration_minutes,
+           service_duration_minutes,is_manual_booking,
            extra_time_mins,extra_time_price,extra_time_payment_status,
            customer_id,
            services(name,duration_minutes),addresses(area,city,full_address,flat_no,building,pincode,latitude,longitude),
            customer:users!customer_id(full_name,phone),
            worker:users!worker_id(full_name,phone),
-           booking_items(quantity,unit_price,total_price,service_name,services(name))`
+           booking_items(service_id,quantity,unit_price,total_price,service_name,services(name))`
         ).order('created_at', { ascending: false }),
         supabase.from('users').select('id,full_name,phone').eq('role','worker').order('full_name'),
         supabase.from('workers').select('user_id,is_available'),
@@ -1439,11 +1809,13 @@ export default function AdminBookings() {
       const items = (b.booking_items ?? []) as any[]
       const servicesList: BookedService[] = items.length > 0
         ? items.map((it: any) => ({
+            serviceId: it.service_id ?? null,
             name: it.service_name ?? it.services?.name ?? 'Service',
             qty: it.quantity ?? 1,
             unit_price: it.unit_price ?? 0,
           }))
         : [{
+            serviceId: null,
             name: b.services?.name ?? 'Service',
             qty: 1,
             unit_price: b.base_price ?? 0,
@@ -1467,6 +1839,7 @@ export default function AdminBookings() {
         extra_time_mins: b.extra_time_mins ?? 0,
         extra_time_price: b.extra_time_price ?? 0,
         extra_time_payment_status: b.extra_time_payment_status ?? null,
+        is_manual_booking: b.is_manual_booking === true,
         service_name: serviceNameLabel,
         services: servicesList,
         service_duration: b.services?.duration_minutes ?? 60,
@@ -2227,6 +2600,18 @@ export default function AdminBookings() {
           zoneWorkerIds={zoneEligible[selected.id] ?? null}
           onClose={() => setSelected(null)}
           onDone={() => { load(); setSelected(null) }}
+          onEditManual={() => setShowEditModal(true)}
+        />
+      )}
+
+      {showEditModal && selected && (
+        <EditManualBookingModal
+          booking={selected}
+          services={services}
+          workers={workers}
+          allBookings={slimBookings}
+          onClose={() => setShowEditModal(false)}
+          onDone={() => { setShowEditModal(false); load(); setSelected(null) }}
         />
       )}
 
