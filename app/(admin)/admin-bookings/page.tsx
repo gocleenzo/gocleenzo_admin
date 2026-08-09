@@ -32,6 +32,15 @@ type Worker = {
   hasAnyScheduleDates: boolean
 }
 
+// Service catalog entry, used to populate the Phone Booking modal's
+// service picker (admin_create_manual_booking needs a real service id).
+type ServiceOption = { id: string; name: string; duration_minutes: number; base_price: number | null }
+
+// The fixed system placeholder account admin_block_slot ties manual
+// capacity holds to server-side — surfaced here only for display, never
+// sent from the client (the RPC hardcodes it on the DB side).
+const SYSTEM_PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000001'
+
 const STATUS: Record<string, { label: string; color: string; bg: string; icon: string; step: number }> = {
   pending:      { label: 'Pending',      color: '#D97706', bg: '#FEF3C7', icon: '⏳', step: 0 },
   accepted:     { label: 'Assigned',     color: '#2563EB', bg: '#DBEAFE', icon: '👤', step: 1 },
@@ -78,6 +87,42 @@ function timeToMins(t: string) {
 function localDateStr(d: Date): string {
   const local = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
   return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
+}
+
+// ── Slot picker time grid ───────────────────────────────────────
+// Same 30-min slot list (7AM-7PM) the customer Flutter app uses, split
+// into Morning / Afternoon / Evening groups for the grid.
+const TIME_SLOTS = [
+  '07:00 AM','07:30 AM','08:00 AM','08:30 AM','09:00 AM','09:30 AM','10:00 AM','10:30 AM','11:00 AM','11:30 AM',
+  '12:00 PM','12:30 PM','01:00 PM','01:30 PM','02:00 PM','02:30 PM','03:00 PM','03:30 PM',
+  '04:00 PM','04:30 PM','05:00 PM','05:30 PM','06:00 PM','06:30 PM','07:00 PM',
+]
+const SLOT_GROUPS: { label: string; slots: string[] }[] = [
+  { label: 'Morning',   slots: TIME_SLOTS.slice(0, 10) },
+  { label: 'Afternoon', slots: TIME_SLOTS.slice(10, 18) },
+  { label: 'Evening',   slots: TIME_SLOTS.slice(18) },
+]
+
+/// Combines a calendar date with a '07:00 AM'-style slot label into a
+/// concrete Date, using the browser's local time — same assumption the
+/// rest of this admin panel already makes (local = IST).
+function slotToDateTime(date: Date, slot: string): Date {
+  const [time, period] = slot.split(' ')
+  let [hh, mm] = time.split(':').map(Number)
+  if (period === 'PM' && hh !== 12) hh += 12
+  if (period === 'AM' && hh === 12) hh = 0
+  const d = new Date(date)
+  d.setHours(hh, mm, 0, 0)
+  return d
+}
+
+function nextDays(n: number): Date[] {
+  return Array.from({ length: n }, (_, i) => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    d.setDate(d.getDate() + i)
+    return d
+  })
 }
 
 function isWorkerAvailableAt(
@@ -290,6 +335,543 @@ function WorkerOtpDisplay({ workerId }: { workerId: string | null }) {
           : <p className="text-xs font-bold text-red-500 mt-1">⚠️ Not set<br/><span className="font-normal text-slate-400">Go to Workers → Edit</span></p>
       }
     </div>
+  )
+}
+
+// ── Slot Picker ──────────────────────────────────────────────
+// Mirrors the customer app's own booking-flow picker: a 7-day date
+// carousel + a Morning/Afternoon/Evening time grid. Availability per slot
+// reuses the SAME isWorkerAvailableAt() logic the rest of this admin panel
+// already relies on (worker date-specific schedule + breaks + existing
+// bookings), plus a worker_holidays check for the selected date and a
+// 30-min minimum-notice cutoff — the same rules the customer app's
+// _loadSlotAvailability applies. Pincode/zone eligibility is the CALLER's
+// job: pass in an already zone-filtered `workers` list.
+function SlotPicker({
+  workers, durationMins, existingBookings, value, onChange, emptyHint,
+}: {
+  workers: Worker[]
+  durationMins: number
+  existingBookings: { worker_id: string; scheduled_at: string }[]
+  value: string
+  onChange: (iso: string) => void
+  emptyHint?: string
+}) {
+  const supabase = createClient()
+  const dates = nextDays(7)
+  const [selectedDate, setSelectedDate] = useState<Date>(dates[0])
+  const [availability, setAvailability] = useState<Record<string, boolean>>({})
+  const [loading, setLoading] = useState(false)
+
+  // Which slot label (if any) `value` corresponds to on the currently
+  // selected date — keeps the grid in sync if the parent resets `value`.
+  const selectedSlot = (() => {
+    if (!value) return ''
+    const d = new Date(value)
+    if (localDateStr(d) !== localDateStr(selectedDate)) return ''
+    const found = TIME_SLOTS.find(s => {
+      const sd = slotToDateTime(selectedDate, s)
+      return Math.abs(sd.getTime() - d.getTime()) < 60000
+    })
+    return found ?? ''
+  })()
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      if (workers.length === 0 || durationMins <= 0) { setAvailability({}); return }
+      setLoading(true)
+      const dateStr = localDateStr(selectedDate)
+      const { data: holidays } = await supabase
+        .from('worker_holidays').select('worker_id').eq('holiday_date', dateStr)
+      const holidayIds = new Set((holidays ?? []).map((h: any) => h.worker_id as string))
+      const eligible = workers.filter(w => !holidayIds.has(w.id))
+      const now = new Date()
+      const cutoff = new Date(now.getTime() + 30 * 60000)
+      const avail: Record<string, boolean> = {}
+      for (const slot of TIME_SLOTS) {
+        const slotDt = slotToDateTime(selectedDate, slot)
+        if (slotDt < cutoff) { avail[slot] = false; continue }
+        avail[slot] = eligible.some(w =>
+          isWorkerAvailableAt(w, slotDt.toISOString(), durationMins, existingBookings))
+      }
+      if (!cancelled) { setAvailability(avail); setLoading(false) }
+    }
+    run()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate.getTime(), workers, durationMins, existingBookings])
+
+  const availableCount = Object.values(availability).filter(Boolean).length
+
+  if (workers.length === 0) {
+    return (
+      <div className="rounded-xl px-4 py-3 text-center bg-amber-50 border border-amber-200">
+        <p className="text-xs font-bold text-amber-700">
+          {emptyHint ?? 'No eligible workers to check availability against yet.'}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Date carousel */}
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {dates.map((d, i) => {
+          const active = localDateStr(d) === localDateStr(selectedDate)
+          const isToday = i === 0
+          return (
+            <button key={d.toISOString()} type="button"
+              onClick={() => setSelectedDate(d)}
+              className="flex-shrink-0 w-14 py-2 rounded-xl text-center transition-all"
+              style={{
+                background: active ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#F8FAFC',
+                border: `1.5px solid ${active ? '#0891B2' : '#E2E8F0'}`,
+              }}>
+              <p className="text-[9px] font-bold" style={{ color: active ? '#DFFAFE' : '#94A3B8' }}>
+                {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][(d.getDay() + 6) % 7]}
+              </p>
+              <p className="text-lg font-black" style={{ color: active ? '#fff' : '#1E293B' }}>
+                {d.getDate()}
+              </p>
+              <p className="text-[8px] font-black" style={{ color: active ? '#fff' : isToday ? '#0891B2' : 'transparent' }}>
+                {isToday ? 'TODAY' : '·'}
+              </p>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Legend + count */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="flex items-center gap-1 text-[10px] text-slate-500">
+            <span className="w-2 h-2 rounded-full bg-cyan-500 inline-block"/> Available
+          </span>
+          <span className="flex items-center gap-1 text-[10px] text-slate-500">
+            <span className="w-2 h-2 rounded-full bg-slate-200 inline-block"/> Full
+          </span>
+        </div>
+        <span className="text-[10px] text-slate-400">
+          {loading ? 'Checking…' : `${availableCount} slot${availableCount === 1 ? '' : 's'} available`}
+        </span>
+      </div>
+
+      {/* Time grid, grouped Morning / Afternoon / Evening */}
+      {loading ? (
+        <div className="py-8 text-center text-xs text-slate-400">Checking worker availability…</div>
+      ) : (
+        <div className="space-y-3">
+          {SLOT_GROUPS.map(group => (
+            <div key={group.label}>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">{group.label}</p>
+              <div className="grid grid-cols-4 gap-2">
+                {group.slots.map(slot => {
+                  const isAvail = availability[slot] ?? false
+                  const active = selectedSlot === slot
+                  return (
+                    <button key={slot} type="button" disabled={!isAvail}
+                      onClick={() => onChange(slotToDateTime(selectedDate, slot).toISOString())}
+                      className="px-2 py-2 rounded-lg text-[11px] font-bold transition-all"
+                      style={{
+                        background: !isAvail ? '#F8FAFC' : active ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+                        color: !isAvail ? '#CBD5E1' : active ? '#fff' : '#334155',
+                        border: `1px solid ${!isAvail ? '#E2E8F0' : active ? '#0891B2' : '#E2E8F0'}`,
+                        cursor: isAvail ? 'pointer' : 'not-allowed',
+                      }}>
+                      {slot}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+          {availableCount === 0 && (
+            <div className="rounded-xl px-4 py-3 text-center bg-amber-50 border border-amber-200">
+              <p className="text-xs font-bold text-amber-700">No slots available on this date — try another day.</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Phone Booking Modal ───────────────────────────────────────
+// Wraps admin_create_manual_booking. Looks up (or lazily creates) the
+// customer by phone, then runs the same real-time availability checks
+// (worker schedule, breaks, pincode zone, holidays) the customer app
+// relies on — via the shared SlotPicker — before writing a normal
+// `pending` booking tagged "[Phone booking created by admin]" with an
+// auto-generated OTP.
+//
+// NOTE: Address is asked BEFORE Date & Time here (unlike the customer
+// app) because the slot picker needs the pincode to know which workers'
+// availability to check — entering it later would show availability
+// against the wrong (unrestricted) worker set.
+function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: {
+  services: ServiceOption[]
+  workers: Worker[]
+  allBookings: { worker_id: string; scheduled_at: string }[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const supabase = createClient()
+  const [phone, setPhone] = useState('')
+  const [name, setName] = useState('')
+  const [serviceId, setServiceId] = useState('')
+  const [quantity, setQuantity] = useState(1)
+  const [scheduledIso, setScheduledIso] = useState('')
+  const [flatNo, setFlatNo] = useState('')
+  const [building, setBuilding] = useState('')
+  const [fullAddress, setFullAddress] = useState('')
+  const [area, setArea] = useState('')
+  const [city, setCity] = useState('')
+  const [pincode, setPincode] = useState('')
+  const [notes, setNotes] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<{ bookingId: string; otp: string } | null>(null)
+
+  // Zone (pincode) eligibility — same rule try_claim_slot enforces
+  // server-side for customer bookings, resolved live as the admin types
+  // a pincode. null = unrestricted (every worker eligible).
+  const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
+  const [zoneChecking, setZoneChecking] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const t = setTimeout(async () => {
+      const p = pincode.trim()
+      if (!p) { if (!cancelled) { setZoneWorkerIds(null); setZoneChecking(false) }; return }
+      setZoneChecking(true)
+      const ids = await resolvePincodeWorkerIds(supabase, p)
+      if (!cancelled) { setZoneWorkerIds(ids); setZoneChecking(false) }
+    }, 400)
+    return () => { cancelled = true; clearTimeout(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pincode])
+
+  const filteredWorkers = zoneWorkerIds == null ? workers : workers.filter(w => zoneWorkerIds.has(w.id))
+  const selectedService = services.find(s => s.id === serviceId)
+  const durationMins = selectedService?.duration_minutes ?? 60
+
+  const canSubmit = phone.trim().length >= 10 && serviceId && scheduledIso &&
+    fullAddress.trim() && pincode.trim()
+
+  async function submit() {
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_create_manual_booking', {
+        p_customer_phone: phone.trim(),
+        p_customer_name: name.trim() || null,
+        p_service_id: serviceId,
+        p_quantity: quantity,
+        p_scheduled_at: scheduledIso,
+        p_flat_no: flatNo.trim() || null,
+        p_building: building.trim() || null,
+        p_full_address: fullAddress.trim(),
+        p_area: area.trim() || null,
+        p_city: city.trim() || null,
+        p_pincode: pincode.trim(),
+        p_special_instructions: notes.trim() || null,
+      })
+      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
+      if (!data?.success) {
+        const reasonMap: Record<string, string> = {
+          no_workers: 'No worker is available at this time slot for this pincode.',
+          slot_full: 'This slot is already full — no free worker at that time.',
+          invalid_service: 'Please choose a valid service.',
+          invalid_phone: 'Please enter a valid phone number.',
+        }
+        setError(reasonMap[data?.reason] ?? (data?.message || 'Could not create the booking.'))
+        setSubmitting(false)
+        return
+      }
+      setResult({ bookingId: data.booking_id, otp: data.otp })
+      setSubmitting(false)
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not create the booking.')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <div>
+            <h2 className="text-lg font-black text-slate-800">📞 Phone Booking</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Create a booking for a customer who called in</p>
+          </div>
+          <button onClick={onClose}
+            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+        </div>
+
+        {result ? (
+          <div className="px-6 py-6 space-y-4">
+            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
+              <p className="text-3xl mb-2">✅</p>
+              <p className="font-black text-slate-800">Booking created</p>
+              <p className="text-xs text-slate-500 mt-1 font-mono">#{result.bookingId.slice(0,8).toUpperCase()}</p>
+              <div className="mt-4 px-4 py-3 rounded-xl bg-white border border-green-200 inline-block">
+                <p className="text-[10px] text-slate-400 mb-0.5">Booking OTP</p>
+                <p className="font-mono font-black text-2xl text-green-700 tracking-widest">{result.otp}</p>
+              </div>
+            </div>
+            <button onClick={onDone}
+              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Customer</p>
+              <div className="grid grid-cols-2 gap-3">
+                <input type="tel" placeholder="Phone number *" value={phone} onChange={e => setPhone(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Name (if new customer)" value={name} onChange={e => setName(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1.5">
+                We'll match an existing account by phone, or create a lightweight profile automatically.
+              </p>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Service</p>
+              <div className="grid grid-cols-3 gap-3">
+                <select value={serviceId} onChange={e => { setServiceId(e.target.value); setScheduledIso('') }}
+                  className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                  <option value="">Select service…</option>
+                  {services.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
+                  ))}
+                </select>
+                <input type="number" min={1} value={quantity} onChange={e => setQuantity(Math.max(1, Number(e.target.value)))}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Address</p>
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Building / Society" value={building} onChange={e => setBuilding(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+              <input type="text" placeholder="Full address *" value={fullAddress} onChange={e => setFullAddress(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 mb-3"/>
+              <div className="grid grid-cols-3 gap-3">
+                <input type="text" placeholder="Area" value={area} onChange={e => setArea(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="City" value={city} onChange={e => setCity(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Pincode *" value={pincode}
+                  onChange={e => { setPincode(e.target.value); setScheduledIso('') }}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
+              {zoneChecking && (
+                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode…</p>
+              )}
+              {!zoneChecking && zoneWorkerIds != null && (
+                <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
+                  <p className="text-[11px] text-cyan-700 font-semibold">
+                    📐 {zoneWorkerIds.size} worker{zoneWorkerIds.size === 1 ? '' : 's'} cover pincode {pincode.trim()} —
+                    availability below is checked against {zoneWorkerIds.size === 1 ? 'them' : 'only them'}.
+                  </p>
+                </div>
+              )}
+              <SlotPicker
+                workers={filteredWorkers}
+                durationMins={durationMins}
+                existingBookings={allBookings}
+                value={scheduledIso}
+                onChange={setScheduledIso}
+                emptyHint={
+                  !pincode.trim()
+                    ? 'Enter a pincode above to check real-time availability.'
+                    : 'No worker covers this pincode yet — assign one under Workers → Areas.'
+                }
+              />
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Notes (optional)</p>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+                placeholder="Anything the worker should know…"
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 resize-none"/>
+            </div>
+
+            {error && (
+              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+                <p className="text-xs font-bold text-red-600">{error}</p>
+              </div>
+            )}
+
+            <button onClick={submit} disabled={!canSubmit || submitting}
+              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+              {submitting ? '…' : '📞 Create Phone Booking'}
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+// ── Block Slot Modal ──────────────────────────────────────────
+// Wraps admin_block_slot — reserves a worker's capacity for a window
+// (e.g. while negotiating a phone booking) without a real customer.
+// The hold is linked server-side to the fixed system placeholder
+// account so ordinary availability checks treat the slot as occupied.
+//
+// Date & Time comes AFTER picking the worker + duration here, since the
+// slot picker needs both to know what to check availability against.
+function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
+  workers: Worker[]
+  allBookings: { worker_id: string; scheduled_at: string }[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const supabase = createClient()
+  const [workerId, setWorkerId] = useState('')
+  const [scheduledIso, setScheduledIso] = useState('')
+  const [durationMins, setDurationMins] = useState(60)
+  const [note, setNote] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  const selectedWorker = workers.find(w => w.id === workerId)
+  const filteredWorkers = selectedWorker ? [selectedWorker] : []
+
+  const canSubmit = workerId && scheduledIso && durationMins > 0
+
+  async function submit() {
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_block_slot', {
+        p_worker_id: workerId,
+        p_scheduled_at: scheduledIso,
+        p_duration_minutes: durationMins,
+        p_note: note.trim() || null,
+      })
+      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
+      if (!data?.success) {
+        setError(data?.message || 'Could not block this slot.')
+        setSubmitting(false)
+        return
+      }
+      setDone(true)
+      setSubmitting(false)
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not block this slot.')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <div>
+            <h2 className="text-lg font-black text-slate-800">🚫 Block Slot</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Hold a worker's time without a real booking</p>
+          </div>
+          <button onClick={onClose}
+            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+        </div>
+
+        {done ? (
+          <div className="px-6 py-6 space-y-4">
+            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
+              <p className="text-3xl mb-2">✅</p>
+              <p className="font-black text-slate-800">Slot blocked</p>
+              <p className="text-xs text-slate-500 mt-1">
+                This worker will now show as unavailable for that window.
+              </p>
+            </div>
+            <button onClick={onDone}
+              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)' }}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Worker</p>
+              <select value={workerId} onChange={e => { setWorkerId(e.target.value); setScheduledIso('') }}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                <option value="">Select worker…</option>
+                {workers.map(w => (
+                  <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Duration (minutes)</p>
+              <input type="number" min={15} step={15} value={durationMins}
+                onChange={e => { setDurationMins(Math.max(15, Number(e.target.value))); setScheduledIso('') }}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
+              <SlotPicker
+                workers={filteredWorkers}
+                durationMins={durationMins}
+                existingBookings={allBookings}
+                value={scheduledIso}
+                onChange={setScheduledIso}
+                emptyHint="Select a worker above first."
+              />
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Reason (optional)</p>
+              <input type="text" placeholder="e.g. Negotiating price on call" value={note} onChange={e => setNote(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+            </div>
+
+            <p className="text-[11px] text-slate-400">
+              This bypasses normal booking checks and reserves capacity directly — it
+              won't notify the worker or a customer, it just keeps this window off the table
+              for real bookings.
+            </p>
+
+            {error && (
+              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+                <p className="text-xs font-bold text-red-600">{error}</p>
+              </div>
+            )}
+
+            <button onClick={submit} disabled={!canSubmit || submitting}
+              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)' }}>
+              {submitting ? '…' : '🚫 Block This Slot'}
+            </button>
+          </div>
+        )}
+      </div>
+    </>
   )
 }
 
@@ -777,6 +1359,7 @@ async function resolvePincodeWorkerIds(
 export default function AdminBookings() {
   const [bookings,  setBookings]  = useState<Booking[]>([])
   const [workers,   setWorkers]   = useState<Worker[]>([])
+  const [services,  setServices]  = useState<ServiceOption[]>([])
   const [loading,   setLoading]   = useState(true)
   const [search,    setSearch]    = useState('')
   const [profile,   setProfile]   = useState<'all'|'live'|'completed'|'cancelled'>('all')
@@ -787,6 +1370,9 @@ export default function AdminBookings() {
   const [selectedArea, setSelectedArea] = useState<string>('all')
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
+  // Admin-side phone call / manual capacity-hold modals.
+  const [showPhoneModal, setShowPhoneModal] = useState(false)
+  const [showBlockModal, setShowBlockModal] = useState(false)
   // Per-booking zone-eligible worker id sets — null means unrestricted.
   // Computed once per load() for every booking that could still need a
   // worker assigned, so the table's inline assign row and the Drawer's
@@ -931,6 +1517,19 @@ export default function AdminBookings() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // Service catalog for the Phone Booking modal — loaded once, doesn't
+  // need to live-update with the realtime bookings subscription below.
+  useEffect(() => {
+    supabase.from('services').select('id,name,duration_minutes,base_price').order('name')
+      .then(({ data }) => {
+        if (data) setServices(data.map((s: any) => ({
+          id: s.id, name: s.name, duration_minutes: s.duration_minutes ?? 60,
+          base_price: s.base_price ?? null,
+        })))
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     const ch = supabase.channel('bkng')
@@ -1080,8 +1679,22 @@ export default function AdminBookings() {
             <p className="text-xs text-slate-400 font-medium">{bookings.length} total · {inProgressNow} working now</p>
           </div>
         </div>
-        <input type="text" placeholder="Search service, customer, phone, worker…" value={search} onChange={e => setSearch(e.target.value)}
-          className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto">
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowPhoneModal(true)}
+              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black text-white active:scale-[0.98] transition-all whitespace-nowrap"
+              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)', boxShadow: '0 4px 12px rgba(8,145,178,0.25)' }}>
+              📞 Phone Booking
+            </button>
+            <button onClick={() => setShowBlockModal(true)}
+              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black text-white active:scale-[0.98] transition-all whitespace-nowrap"
+              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)', boxShadow: '0 4px 12px rgba(220,38,38,0.25)' }}>
+              🚫 Block Slot
+            </button>
+          </div>
+          <input type="text" placeholder="Search service, customer, phone, worker…" value={search} onChange={e => setSearch(e.target.value)}
+            className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
+        </div>
       </div>
 
       {/* Profile tabs */}
@@ -1614,6 +2227,25 @@ export default function AdminBookings() {
           zoneWorkerIds={zoneEligible[selected.id] ?? null}
           onClose={() => setSelected(null)}
           onDone={() => { load(); setSelected(null) }}
+        />
+      )}
+
+      {showPhoneModal && (
+        <PhoneBookingModal
+          services={services}
+          workers={workers}
+          allBookings={slimBookings}
+          onClose={() => setShowPhoneModal(false)}
+          onDone={() => { setShowPhoneModal(false); load() }}
+        />
+      )}
+
+      {showBlockModal && (
+        <BlockSlotModal
+          workers={workers}
+          allBookings={slimBookings}
+          onClose={() => setShowBlockModal(false)}
+          onDone={() => { setShowBlockModal(false); load() }}
         />
       )}
     </div>
