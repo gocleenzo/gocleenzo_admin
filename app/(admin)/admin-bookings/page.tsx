@@ -304,6 +304,12 @@ function Drawer({
 }) {
   const [selW, setSelW] = useState(b.worker_id ?? '')
   const [busy, setBusy] = useState(false)
+  // Reschedule — admin-only date/time change. Datetime-local inputs work
+  // in the browser's LOCAL time, which for this app is assumed to be IST
+  // (matches every other date/time input already in this admin panel).
+  const [newDateTime, setNewDateTime] = useState('')
+  const [rescheduling, setRescheduling] = useState(false)
+  const [rescheduleError, setRescheduleError] = useState<string | null>(null)
   const supabase = createClient()
   const cfg = STATUS[b.status] ?? STATUS.pending
   const durationMins = b.service_duration || 60
@@ -348,6 +354,63 @@ function Drawer({
       { booking_id: b.id, type: 'booking_assigned' }
     )
     setBusy(false); onDone()
+  }
+
+  // Admin-only reschedule — restricted to statuses where work hasn't
+  // started yet (canAssign already encodes exactly this: pending/
+  // accepted). Re-validates the NEW time against real worker
+  // availability via the same RPC pattern try_claim_slot uses for
+  // customer bookings — this is NOT a free-form override, a booking
+  // can't be moved onto a slot with no free worker.
+  async function reschedule() {
+    if (!newDateTime) return
+    setRescheduling(true)
+    setRescheduleError(null)
+    try {
+      const isoString = new Date(newDateTime).toISOString()
+      const { data, error } = await supabase.rpc('admin_reschedule_booking', {
+        p_booking_id: b.id,
+        p_new_scheduled_at: isoString,
+      })
+      if (error) {
+        setRescheduleError(error.message)
+        setRescheduling(false)
+        return
+      }
+      if (!data?.success) {
+        const reasonMap: Record<string, string> = {
+          not_found: 'Booking not found.',
+          cannot_reschedule_status: 'This booking can no longer be rescheduled (work has already started or it is finished/cancelled).',
+          no_workers: 'No worker is available at the new time.',
+          slot_full: 'The new slot is already full — no free worker at that time.',
+        }
+        setRescheduleError(reasonMap[data?.reason] ?? (data?.message || 'Could not reschedule.'))
+        setRescheduling(false)
+        return
+      }
+
+      const newTimeStr = new Date(isoString).toLocaleString('en-IN', {
+        day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+      })
+      await sendNotification(
+        b.customer_id, '📅 Booking Rescheduled',
+        `Your ${b.service_name} has been moved to ${newTimeStr}.`,
+        { booking_id: b.id, type: 'booking_rescheduled' }
+      )
+      if (b.worker_id) {
+        await sendNotification(
+          b.worker_id, '📅 Job Rescheduled',
+          `A job has been moved to ${newTimeStr}. Please check your schedule.`,
+          { booking_id: b.id, type: 'booking_rescheduled' }
+        )
+      }
+
+      setRescheduling(false)
+      onDone()
+    } catch (e: any) {
+      setRescheduleError(e?.message ?? 'Could not reschedule.')
+      setRescheduling(false)
+    }
   }
 
   async function act(status: string) {
@@ -542,6 +605,39 @@ function Drawer({
                     </button>
                   </>
                 )}
+              </div>
+            </div>
+          )}
+
+          {canAssign && (
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
+                Reschedule
+              </p>
+              <div className="rounded-2xl p-4 space-y-3 bg-slate-50 border border-slate-200">
+                <p className="text-[11px] text-slate-500">
+                  Admin-only — the customer cannot change this themselves.
+                  The new time is checked for a genuinely free worker before
+                  it's accepted, exactly like a normal booking.
+                </p>
+                <input
+                  type="datetime-local"
+                  value={newDateTime}
+                  onChange={e => { setNewDateTime(e.target.value); setRescheduleError(null) }}
+                  className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-white border border-slate-200"
+                />
+                {rescheduleError && (
+                  <div className="rounded-xl px-3 py-2 bg-red-50 border border-red-200">
+                    <p className="text-xs font-bold text-red-600">{rescheduleError}</p>
+                  </div>
+                )}
+                <button
+                  onClick={reschedule}
+                  disabled={!newDateTime || rescheduling}
+                  className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+                  style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
+                  {rescheduling ? '…' : '📅 Reschedule + Notify Customer & Worker 🔔'}
+                </button>
               </div>
             </div>
           )}
