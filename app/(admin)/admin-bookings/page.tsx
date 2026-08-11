@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback, Fragment } from 'react'
+import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
 
@@ -88,6 +88,18 @@ function timeToMins(t: string) {
 function localDateStr(d: Date): string {
   const local = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
   return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
+}
+
+// Same 'D MMM YYYY' label format used everywhere in this file for
+// comparing/displaying scheduled dates (matches
+// toLocaleDateString('en-IN', {day:'numeric',month:'short',year:'numeric'})),
+// but built manually from a plain 'yyyy-MM-dd' string (e.g. from a native
+// <input type="date">) so there's no timezone conversion involved — the
+// calendar value is already a calendar date, not an instant in time.
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+function labelFromDateInput(yyyyMmDd: string): string {
+  const [y, m, d] = yyyyMmDd.split('-').map(Number)
+  return `${d} ${MONTH_ABBR[m - 1]} ${y}`
 }
 
 // ── Slot picker time grid ───────────────────────────────────────
@@ -1749,6 +1761,11 @@ export default function AdminBookings() {
   // full picker both stay in sync with the same real restriction
   // try_claim_slot applies for customer bookings.
   const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
+  // Hidden native date input used to power the "pick any date" calendar
+  // button in the date-filter row — kept off-screen and triggered
+  // programmatically via showPicker() so we don't need any extra
+  // date-picker dependency.
+  const dateInputRef = useRef<HTMLInputElement>(null)
   const supabase = createClient()
 
   const slimBookings = bookings
@@ -1994,13 +2011,26 @@ export default function AdminBookings() {
     return matchSearch && matchStatus && profileFilter(b)
   })
 
-  // ── Date tabs: extract unique scheduled dates from filtered bookings ──
-  const allDates = Array.from(new Set(
-    filtered.map(b => {
-      const d = new Date(b.scheduled_at)
-      return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
-    })
-  )).sort((a, b) => new Date(a).getTime() - new Date(b).getTime())
+  // ── Today / Tomorrow labels (same 'D MMM YYYY' format used to tag and
+  // compare every booking's scheduled date throughout this file) ──
+  const todayLabel = new Date().toLocaleDateString('en-IN',
+    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+  const tomorrowLabel = new Date(Date.now() + 86400000).toLocaleDateString('en-IN',
+    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+
+  // Whichever date is active (from Today/Tomorrow or the calendar) that
+  // ISN'T Today or Tomorrow gets shown as its own removable chip, so a
+  // custom pick from the calendar is always visible with a clear (✕) —
+  // without needing to render a button for every date that has ever had
+  // a booking.
+  const isCustomDate = selectedDate !== 'all' && selectedDate !== todayLabel && selectedDate !== tomorrowLabel
+
+  function countForDate(dateLabel: string) {
+    return filtered.filter(b =>
+      new Date(b.scheduled_at).toLocaleDateString('en-IN',
+        { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }) === dateLabel
+    ).length
+  }
 
   // ── Area filter: extract unique areas ──
   const allAreas = Array.from(new Set(filtered.map(b => b.area).filter(a => a && a !== '—'))).sort()
@@ -2158,7 +2188,7 @@ export default function AdminBookings() {
         </div>
       )}
 
-      {/* ── DATE TABS ── */}
+      {/* ── DATE FILTER: All Dates / Today / Tomorrow + calendar picker ── */}
       <div className="mb-4">
         <div className="flex items-center gap-2 overflow-x-auto pb-2">
           {/* All dates tab */}
@@ -2177,35 +2207,90 @@ export default function AdminBookings() {
               {filtered.length}
             </span>
           </button>
-          {/* Per-date tabs */}
-          {allDates.map(date => {
-            const cnt = filtered.filter(b =>
-              new Date(b.scheduled_at).toLocaleDateString('en-IN',
-                { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }) === date
-            ).length
-            const isToday = date === new Date().toLocaleDateString('en-IN',
-              { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
-            const isTmrw = date === new Date(Date.now() + 86400000).toLocaleDateString('en-IN',
-              { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
-            const active = selectedDate === date
-            return (
-              <button key={date}
-                onClick={() => { setSelectedDate(date); setSelectedArea('all') }}
-                className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
-                style={{
-                  background: active ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
-                  color: active ? '#fff' : '#64748B',
-                  border: `1.5px solid ${active ? '#0891B2' : isToday ? '#BAE6FD' : '#E2E8F0'}`,
-                  boxShadow: active ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
-                }}>
-                {isToday ? '🟢 Today' : isTmrw ? '🔵 Tomorrow' : `📅 ${date}`}
-                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
-                  style={{ background: active ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: active ? '#fff' : '#0891B2' }}>
-                  {cnt}
-                </span>
-              </button>
-            )
-          })}
+
+          {/* Today */}
+          <button
+            onClick={() => { setSelectedDate(todayLabel); setSelectedArea('all') }}
+            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
+            style={{
+              background: selectedDate === todayLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+              color: selectedDate === todayLabel ? '#fff' : '#64748B',
+              border: `1.5px solid ${selectedDate === todayLabel ? '#0891B2' : '#BAE6FD'}`,
+              boxShadow: selectedDate === todayLabel ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
+            }}>
+            🟢 Today
+            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
+              style={{ background: selectedDate === todayLabel ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === todayLabel ? '#fff' : '#0891B2' }}>
+              {countForDate(todayLabel)}
+            </span>
+          </button>
+
+          {/* Tomorrow */}
+          <button
+            onClick={() => { setSelectedDate(tomorrowLabel); setSelectedArea('all') }}
+            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
+            style={{
+              background: selectedDate === tomorrowLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+              color: selectedDate === tomorrowLabel ? '#fff' : '#64748B',
+              border: `1.5px solid ${selectedDate === tomorrowLabel ? '#0891B2' : '#E2E8F0'}`,
+              boxShadow: selectedDate === tomorrowLabel ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
+            }}>
+            🔵 Tomorrow
+            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
+              style={{ background: selectedDate === tomorrowLabel ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === tomorrowLabel ? '#fff' : '#0891B2' }}>
+              {countForDate(tomorrowLabel)}
+            </span>
+          </button>
+
+          {/* Calendar picker — pick any other date. A hidden native
+              <input type="date"> does the actual picking; this button
+              just opens it (falls back to a plain click/focus on
+              browsers without showPicker()). */}
+          <div className="relative flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                const el = dateInputRef.current
+                if (!el) return
+                if (typeof (el as any).showPicker === 'function') (el as any).showPicker()
+                else el.focus()
+              }}
+              title="Pick a specific date"
+              className="w-9 h-9 rounded-xl flex items-center justify-center text-sm transition-all"
+              style={{
+                background: isCustomDate ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+                color: isCustomDate ? '#fff' : '#64748B',
+                border: `1.5px solid ${isCustomDate ? '#0891B2' : '#E2E8F0'}`,
+                boxShadow: isCustomDate ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
+              }}>
+              🗓️
+            </button>
+            <input
+              ref={dateInputRef}
+              type="date"
+              onChange={e => {
+                if (!e.target.value) return
+                setSelectedDate(labelFromDateInput(e.target.value))
+                setSelectedArea('all')
+              }}
+              className="absolute inset-0 w-9 h-9 opacity-0 pointer-events-none"
+              tabIndex={-1}
+            />
+          </div>
+
+          {/* Custom-picked date shows as its own removable chip */}
+          {isCustomDate && (
+            <button
+              onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
+              className="flex-shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black whitespace-nowrap text-white"
+              style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)', boxShadow: '0 4px 12px rgba(8,145,178,0.3)' }}>
+              📅 {selectedDate}
+              <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black" style={{ background: 'rgba(255,255,255,0.2)' }}>
+                {countForDate(selectedDate)}
+              </span>
+              <span className="ml-0.5">✕</span>
+            </button>
+          )}
         </div>
 
         {/* Area filter pills (shown under date tabs) */}
