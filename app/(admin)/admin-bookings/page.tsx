@@ -24,22 +24,12 @@ type Booking = {
 type Worker = {
   id: string; name: string; phone: string
   is_available: boolean; is_busy: boolean
-  // Date-specific schedule (replaces the old day-of-week `schedule` JSONB).
-  // Keyed by 'yyyy-MM-dd' -> that date's hours, from worker_schedule_dates.
   scheduleDates: Record<string, { enabled: boolean; start: string; end: string; breaks: { from: string; to: string }[] }> | null
-  // True if this worker has EVER set any date-specific schedule at all.
-  // Used to decide the fallback for dates with no explicit entry — see
-  // isWorkerAvailableAt.
   hasAnyScheduleDates: boolean
 }
 
-// Service catalog entry, used to populate the Phone Booking modal's
-// service picker (admin_create_manual_booking needs a real service id).
 type ServiceOption = { id: string; name: string; duration_minutes: number; base_price: number | null }
 
-// The fixed system placeholder account admin_block_slot ties manual
-// capacity holds to server-side — surfaced here only for display, never
-// sent from the client (the RPC hardcodes it on the DB side).
 const SYSTEM_PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000001'
 
 const STATUS: Record<string, { label: string; color: string; bg: string; icon: string; step: number }> = {
@@ -84,27 +74,17 @@ function timeToMins(t: string) {
   const [h, m] = t.split(':').map(Number); return h * 60 + m
 }
 
-/// Local (Asia/Kolkata) date string 'yyyy-MM-dd' for a given Date.
 function localDateStr(d: Date): string {
   const local = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
   return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
 }
 
-// Same 'D MMM YYYY' label format used everywhere in this file for
-// comparing/displaying scheduled dates (matches
-// toLocaleDateString('en-IN', {day:'numeric',month:'short',year:'numeric'})),
-// but built manually from a plain 'yyyy-MM-dd' string (e.g. from a native
-// <input type="date">) so there's no timezone conversion involved — the
-// calendar value is already a calendar date, not an instant in time.
 const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 function labelFromDateInput(yyyyMmDd: string): string {
   const [y, m, d] = yyyyMmDd.split('-').map(Number)
   return `${d} ${MONTH_ABBR[m - 1]} ${y}`
 }
 
-// ── Slot picker time grid ───────────────────────────────────────
-// Same 30-min slot list (7AM-7PM) the customer Flutter app uses, split
-// into Morning / Afternoon / Evening groups for the grid.
 const TIME_SLOTS = [
   '07:00 AM','07:30 AM','08:00 AM','08:30 AM','09:00 AM','09:30 AM','10:00 AM','10:30 AM','11:00 AM','11:30 AM',
   '12:00 PM','12:30 PM','01:00 PM','01:30 PM','02:00 PM','02:30 PM','03:00 PM','03:30 PM',
@@ -116,9 +96,6 @@ const SLOT_GROUPS: { label: string; slots: string[] }[] = [
   { label: 'Evening',   slots: TIME_SLOTS.slice(18) },
 ]
 
-/// Combines a calendar date with a '07:00 AM'-style slot label into a
-/// concrete Date, using the browser's local time — same assumption the
-/// rest of this admin panel already makes (local = IST).
 function slotToDateTime(date: Date, slot: string): Date {
   const [time, period] = slot.split(' ')
   let [hh, mm] = time.split(':').map(Number)
@@ -147,8 +124,6 @@ function isWorkerAvailableAt(
   const slotEnd   = new Date(slotDt.getTime() + durationMins * 60000)
   const localSlot = new Date(slotDt.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
 
-  // Date-specific schedule check (replaces the old day-of-week model —
-  // matches what the worker app now proposes/admin approves per date).
   const dateStr = localDateStr(slotDt)
   const dayEntry = worker.scheduleDates?.[dateStr]
   if (dayEntry) {
@@ -159,15 +134,8 @@ function isWorkerAvailableAt(
       if (slotMins >= timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
     }
   } else if (worker.hasAnyScheduleDates) {
-    // This worker uses date-specific scheduling but has no entry for this
-    // exact date — treat as unavailable. Once a worker has started setting
-    // explicit dates, silence for a given date means "not scheduled", not
-    // "assume free" — that's the whole point of the date-specific model.
     return false
   }
-  // else: worker has never set ANY date-specific schedule — fall back to
-  // "always available" so newly-onboarded workers aren't silently blocked
-  // from assignment before anyone has asked them to set a schedule.
 
   for (const bk of existingBookings) {
     if (bk.worker_id !== worker.id) continue
@@ -351,15 +319,6 @@ function WorkerOtpDisplay({ workerId }: { workerId: string | null }) {
   )
 }
 
-// ── Slot Picker ──────────────────────────────────────────────
-// Mirrors the customer app's own booking-flow picker: a 7-day date
-// carousel + a Morning/Afternoon/Evening time grid. Availability per slot
-// reuses the SAME isWorkerAvailableAt() logic the rest of this admin panel
-// already relies on (worker date-specific schedule + breaks + existing
-// bookings), plus a worker_holidays check for the selected date and a
-// 30-min minimum-notice cutoff — the same rules the customer app's
-// _loadSlotAvailability applies. Pincode/zone eligibility is the CALLER's
-// job: pass in an already zone-filtered `workers` list.
 function SlotPicker({
   workers, durationMins, existingBookings, value, onChange, emptyHint,
 }: {
@@ -376,8 +335,6 @@ function SlotPicker({
   const [availability, setAvailability] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(false)
 
-  // Which slot label (if any) `value` corresponds to on the currently
-  // selected date — keeps the grid in sync if the parent resets `value`.
   const selectedSlot = (() => {
     if (!value) return ''
     const d = new Date(value)
@@ -429,7 +386,6 @@ function SlotPicker({
 
   return (
     <div className="space-y-3">
-      {/* Date carousel */}
       <div className="flex gap-2 overflow-x-auto pb-1">
         {dates.map((d, i) => {
           const active = localDateStr(d) === localDateStr(selectedDate)
@@ -456,7 +412,6 @@ function SlotPicker({
         })}
       </div>
 
-      {/* Legend + count */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1 text-[10px] text-slate-500">
@@ -471,7 +426,6 @@ function SlotPicker({
         </span>
       </div>
 
-      {/* Time grid, grouped Morning / Afternoon / Evening */}
       {loading ? (
         <div className="py-8 text-center text-xs text-slate-400">Checking worker availability…</div>
       ) : (
@@ -511,18 +465,6 @@ function SlotPicker({
   )
 }
 
-// ── Phone Booking Modal ───────────────────────────────────────
-// Wraps admin_create_manual_booking. Looks up (or lazily creates) the
-// customer by phone, then runs the same real-time availability checks
-// (worker schedule, breaks, pincode zone, holidays) the customer app
-// relies on — via the shared SlotPicker — before writing a normal
-// `pending` booking tagged "[Phone booking created by admin]" with an
-// auto-generated OTP.
-//
-// NOTE: Address is asked BEFORE Date & Time here (unlike the customer
-// app) because the slot picker needs the pincode to know which workers'
-// availability to check — entering it later would show availability
-// against the wrong (unrestricted) worker set.
 function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: {
   services: ServiceOption[]
   workers: Worker[]
@@ -533,15 +475,9 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   const supabase = createClient()
   const [phone, setPhone] = useState('')
   const [name, setName] = useState('')
-  // Multiple services, each with its own quantity — replaces the old
-  // single serviceId+quantity pair. At least one line with a real
-  // service selected is required to submit.
   const [serviceLines, setServiceLines] = useState<{ serviceId: string; quantity: number }[]>([
     { serviceId: '', quantity: 1 },
   ])
-  // Manually entered by admin — the actual amount charged, independent
-  // of whatever the selected services' catalog prices add up to (a
-  // phone-negotiated price, a discount given verbally, etc.).
   const [finalAmount, setFinalAmount] = useState('')
   const [scheduledIso, setScheduledIso] = useState('')
   const [flatNo, setFlatNo] = useState('')
@@ -555,9 +491,6 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<{ bookingId: string; otp: string } | null>(null)
 
-  // Zone (pincode) eligibility — same rule try_claim_slot enforces
-  // server-side for customer bookings, resolved live as the admin types
-  // a pincode. null = unrestricted (every worker eligible).
   const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
   const [zoneChecking, setZoneChecking] = useState(false)
 
@@ -589,9 +522,6 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
     setScheduledIso('')
   }
 
-  // Total duration across every service line — the SlotPicker needs one
-  // combined duration to check availability against, same as how a
-  // multi-item cart booking works in the customer app.
   const durationMins = serviceLines.reduce((sum, line) => {
     const svc = services.find(s => s.id === line.serviceId)
     if (!svc) return sum
@@ -613,8 +543,6 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
       const { data, error: rpcError } = await supabase.rpc('admin_create_manual_booking', {
         p_customer_phone: phone.trim(),
         p_customer_name: name.trim() || null,
-        // Array of {"service_id": "...", "quantity": N} — matches the
-        // updated admin_create_manual_booking signature exactly.
         p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
         p_scheduled_at: scheduledIso,
         p_final_amount: finalAmountNum,
@@ -816,13 +744,6 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   )
 }
 
-// ── Edit Manual Booking Modal ──────────────────────────────────
-// Same shape as PhoneBookingModal, but pre-filled from an EXISTING
-// manual booking and calling admin_edit_manual_booking instead of
-// admin_create_manual_booking. Only ever shown for bookings where
-// b.is_manual_booking is true and status is still pending/accepted —
-// enforced both here (button only renders in that case) AND server-side
-// (the RPC itself re-checks both conditions).
 function EditManualBookingModal({ booking, services, workers, allBookings, onClose, onDone }: {
   booking: Booking
   services: ServiceOption[]
@@ -847,10 +768,6 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
   const [area, setArea] = useState(booking.area ?? '')
   const [city, setCity] = useState(booking.city ?? '')
   const [pincode, setPincode] = useState(booking.pincode ?? '')
-  // Strip the auto-appended admin markers so re-editing doesn't stack
-  // "[Phone booking created by admin] [Phone booking edited by admin]
-  // [Phone booking edited by admin]..." indefinitely — the RPC re-adds
-  // exactly one "[edited by admin]" marker itself on save.
   const [notes, setNotes] = useState(
     (booking.special_instructions ?? '')
       .replace(/\s*\[Phone booking (created|edited) by admin\]/g, '')
@@ -904,9 +821,6 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
     fullAddress.trim() && pincode.trim() &&
     finalAmount.trim() !== '' && finalAmountNum > 0
 
-  // The booking's OWN current slot must never count against itself in
-  // the availability re-check (mirrors admin_reschedule_booking's same
-  // exclusion) — done server-side in the RPC, nothing needed here.
   async function submit() {
     if (!canSubmit) return
     setSubmitting(true)
@@ -1102,14 +1016,6 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
   )
 }
 
-// ── Block Slot Modal ──────────────────────────────────────────
-// Wraps admin_block_slot — reserves a worker's capacity for a window
-// (e.g. while negotiating a phone booking) without a real customer.
-// The hold is linked server-side to the fixed system placeholder
-// account so ordinary availability checks treat the slot as occupied.
-//
-// Date & Time comes AFTER picking the worker + duration here, since the
-// slot picker needs both to know what to check availability against.
 function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
   workers: Worker[]
   allBookings: { worker_id: string; scheduled_at: string }[]
@@ -1245,7 +1151,6 @@ function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
   )
 }
 
-// ── Drawer (unchanged) ─────────────────────────────────────────
 function Drawer({
   b, workers, allBookings, zoneWorkerIds, onClose, onDone, onEditManual
 }: {
@@ -1253,33 +1158,30 @@ function Drawer({
   allBookings: { worker_id: string; scheduled_at: string }[]
   zoneWorkerIds: Set<string> | null
   onClose: () => void; onDone: () => void
-  // Opens the Edit modal for this booking (only ever called when
-  // b.is_manual_booking is true — see the button below).
   onEditManual: () => void
 }) {
   const [selW, setSelW] = useState(b.worker_id ?? '')
   const [busy, setBusy] = useState(false)
-  // Reschedule — admin-only date/time change. Datetime-local inputs work
-  // in the browser's LOCAL time, which for this app is assumed to be IST
-  // (matches every other date/time input already in this admin panel).
   const [newDateTime, setNewDateTime] = useState('')
   const [rescheduling, setRescheduling] = useState(false)
   const [rescheduleError, setRescheduleError] = useState<string | null>(null)
   const supabase = createClient()
   const cfg = STATUS[b.status] ?? STATUS.pending
   const durationMins = b.service_duration || 60
-  // Zone restriction: if this address falls inside a zone that has
-  // explicit worker assignments (zoneWorkerIds != null), only those
-  // workers are offered — mirrors the same rule try_claim_slot enforces
-  // for customer bookings, applied here to admin assignment instead.
-  // A zone with no assignments configured (zoneWorkerIds == null) keeps
-  // the previous behaviour: every schedule-available worker is offered.
   const availableForSlot = workers.filter(w =>
     w.id === b.worker_id ||
     (isWorkerAvailableAt(w, b.scheduled_at, durationMins, allBookings) &&
       (zoneWorkerIds == null || zoneWorkerIds.has(w.id)))
   )
   const canAssign  = ['pending','accepted'].includes(b.status)
+  // Admin-side "Start Work" — the manual-booking equivalent of the
+  // customer entering the worker's OTP in the customer app. Phone
+  // bookings have no customer app session for that step to happen in, so
+  // this is how a manual booking is ever meant to reach in_progress at
+  // all. Requires a worker already assigned (status === 'accepted') and
+  // is only ever offered for is_manual_booking bookings — a normal
+  // customer booking should always go through real OTP verification.
+  const canStartWork = b.is_manual_booking && b.status === 'accepted' && !!b.worker_id
   const totalSec   = b.work_started_at && b.work_ended_at
     ? elapsed(b.work_started_at, b.work_ended_at) : 0
 
@@ -1289,12 +1191,6 @@ function Drawer({
 
   async function assign() {
     if (!selW) return
-    // Safety net: the dropdown already only lists zone-eligible workers,
-    // but the map's click-to-select pins bypass that list entirely (they
-    // set selW directly via onSelectWorker). Re-validate here before ever
-    // writing to the database, so a zone-restricted booking can't be
-    // assigned to an out-of-zone worker just because they were clicked on
-    // the map instead of chosen from the dropdown.
     if (zoneWorkerIds != null && !zoneWorkerIds.has(selW)) {
       alert('This worker is not assigned to cover this pincode. Please choose a worker from the dropdown list, or assign them to this pincode first under Workers → Areas.')
       return
@@ -1311,12 +1207,6 @@ function Drawer({
     setBusy(false); onDone()
   }
 
-  // Admin-only reschedule — restricted to statuses where work hasn't
-  // started yet (canAssign already encodes exactly this: pending/
-  // accepted). Re-validates the NEW time against real worker
-  // availability via the same RPC pattern try_claim_slot uses for
-  // customer bookings — this is NOT a free-form override, a booking
-  // can't be moved onto a slot with no free worker.
   async function reschedule() {
     if (!newDateTime) return
     setRescheduling(true)
@@ -1372,6 +1262,13 @@ function Drawer({
     setBusy(true)
     const now = new Date().toISOString()
     const u: any = { status }
+    // Phone/manual bookings have no customer app open to enter the
+    // worker's OTP — this is the admin-only equivalent of that step,
+    // moving straight from 'accepted' to 'in_progress' and starting the
+    // live timer, exactly as if the OTP had just been verified.
+    if (status === 'in_progress') {
+      u.work_started_at = now
+    }
     if (status === 'completed') {
       u.work_ended_at = now
       u.payment_status = 'paid'
@@ -1382,6 +1279,13 @@ function Drawer({
     }
     if (status === 'cancelled') u.work_ended_at = now
     await supabase.from('bookings').update(u).eq('id', b.id)
+    if (status === 'in_progress') {
+      await sendNotification(
+        b.customer_id, '⚡ Work Started',
+        `Your ${b.service_name} is now in progress.`,
+        { booking_id: b.id, type: 'booking_in_progress' }
+      )
+    }
     if (status === 'completed') {
       await sendNotification(
         b.customer_id, '🎉 Cleaning Complete!',
@@ -1476,7 +1380,30 @@ function Drawer({
             </div>
           )}
 
-          {b.status === 'accepted' && b.worker_id && <OtpStatusBox b={b}/>}
+          {b.status === 'accepted' && b.worker_id && !b.is_manual_booking && <OtpStatusBox b={b}/>}
+
+          {canStartWork && (
+            <div className="rounded-2xl p-4 border bg-cyan-50 border-cyan-200">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-lg">📞</span>
+                <div>
+                  <p className="text-xs font-black uppercase tracking-wider text-cyan-700">Phone Booking</p>
+                  <p className="text-xs text-slate-500">No customer app to enter an OTP — start the job directly</p>
+                </div>
+              </div>
+              <button onClick={() => act('in_progress')} disabled={busy}
+                className="w-full flex items-center gap-3 px-4 py-4 rounded-2xl bg-white border border-cyan-300 hover:bg-cyan-50 transition-all active:scale-[0.98] disabled:opacity-50">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-lg bg-cyan-100 text-cyan-700 flex-shrink-0">
+                  {busy ? '…' : '▶️'}
+                </div>
+                <div className="flex-1 text-left">
+                  <p className="font-black text-sm text-cyan-700">Start Work</p>
+                  <p className="text-[11px] text-slate-400 mt-0.5">Timer starts now · Customer notified 🔔</p>
+                </div>
+                <span className="text-cyan-400 text-lg">›</span>
+              </button>
+            </div>
+          )}
 
           {b.status === 'in_progress' && (
             <button onClick={() => act('completed')} disabled={busy}
@@ -1522,7 +1449,6 @@ function Drawer({
                 </div>
               )}
               <div className="rounded-2xl p-4 space-y-3 bg-slate-50 border border-slate-200">
-                {/* Customer location + nearest LIVE workers */}
                 <AssignMap
                   bookingId={b.id}
                   selectedWorkerId={selW}
@@ -1660,9 +1586,6 @@ function Drawer({
                 </div>
               ))}
             </div>
-            {/* Extra time is a SEPARATE online payment, made when it was
-                added — kept out of "Cash Due" above since it's already
-                settled independently of the main booking payment. */}
             {b.extra_time_mins > 0 && (
               <div className="mt-3 rounded-2xl px-4 py-3 flex items-center gap-3 bg-violet-50 border border-violet-200">
                 <span className="text-lg">⏱️</span>
@@ -1712,14 +1635,6 @@ function Drawer({
   )
 }
 
-// ── Pincode eligibility helper ────────────────────────────────────
-// Mirrors the SAME restriction try_claim_slot enforces server-side for
-// customer bookings, applied here so admin assignment can't offer (or
-// let admin quick-pick) a worker who isn't actually assigned to cover
-// the booking address's pincode. Returns null when there's no
-// restriction — no pincode on file, or that pincode has zero worker
-// assignments — meaning every worker stays eligible, same as before
-// this feature existed.
 async function resolvePincodeWorkerIds(
   supabase: any, pincode: string | null
 ): Promise<Set<string> | null> {
@@ -1736,7 +1651,6 @@ async function resolvePincodeWorkerIds(
   }
 }
 
-// ── Main Page ──────────────────────────────────────────────────
 export default function AdminBookings() {
   const [bookings,  setBookings]  = useState<Booking[]>([])
   const [workers,   setWorkers]   = useState<Worker[]>([])
@@ -1751,20 +1665,10 @@ export default function AdminBookings() {
   const [selectedArea, setSelectedArea] = useState<string>('all')
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
-  // Admin-side phone call / manual capacity-hold modals.
   const [showPhoneModal, setShowPhoneModal] = useState(false)
   const [showBlockModal, setShowBlockModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
-  // Per-booking zone-eligible worker id sets — null means unrestricted.
-  // Computed once per load() for every booking that could still need a
-  // worker assigned, so the table's inline assign row and the Drawer's
-  // full picker both stay in sync with the same real restriction
-  // try_claim_slot applies for customer bookings.
   const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
-  // Hidden native date input used to power the "pick any date" calendar
-  // button in the date-filter row — kept off-screen and triggered
-  // programmatically via showPicker() so we don't need any extra
-  // date-picker dependency.
   const dateInputRef = useRef<HTMLInputElement>(null)
   const supabase = createClient()
 
@@ -1802,7 +1706,6 @@ export default function AdminBookings() {
     const availMap: Record<string,boolean> = {}
     ;(availData ?? []).forEach((w: any) => { availMap[w.user_id] = w.is_available })
 
-    // Group date-specific schedule rows by worker, then by date.
     const scheduleDatesMap: Record<string, Record<string, any>> = {}
     ;(schedDateRows ?? []).forEach((r: any) => {
       if (!scheduleDatesMap[r.worker_id]) scheduleDatesMap[r.worker_id] = {}
@@ -1818,11 +1721,6 @@ export default function AdminBookings() {
     ;(activeJobs ?? []).forEach((b: any) => { if (b.worker_id) busySet.add(b.worker_id) })
 
     if (bd) setBookings(bd.map((b: any) => {
-      // Every service booked in this order. Prefers the snapshotted
-      // booking_items.service_name (stable even if the service is later
-      // renamed/removed), falls back to the live booking_items.services.name
-      // join, and finally falls back to the single bookings.services.name
-      // join for older non-cart bookings that have no booking_items rows.
       const items = (b.booking_items ?? []) as any[]
       const servicesList: BookedService[] = items.length > 0
         ? items.map((it: any) => ({
@@ -1876,11 +1774,6 @@ export default function AdminBookings() {
       }
     }))
 
-    // Resolve zone eligibility for every booking that could still need a
-    // worker assigned or reassigned — same set of statuses the assign UI
-    // (Drawer's canAssign, table's needsW) actually acts on. Bookings
-    // without address coordinates simply resolve to null (unrestricted),
-    // same as if this feature didn't exist for them.
     const needsAssignBookings = (bd ?? []).filter((b: any) =>
       ['pending', 'accepted'].includes(b.status)
     )
@@ -1908,8 +1801,6 @@ export default function AdminBookings() {
 
   useEffect(() => { load() }, [load])
 
-  // Service catalog for the Phone Booking modal — loaded once, doesn't
-  // need to live-update with the realtime bookings subscription below.
   useEffect(() => {
     supabase.from('services').select('id,name,duration_minutes,base_price').order('name')
       .then(({ data }) => {
@@ -1928,13 +1819,9 @@ export default function AdminBookings() {
       })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
-    // subscribe ONCE — depending on `bookings` here re-subscribes on every
-    // change and throws "cannot add postgres_changes callbacks after subscribe()"
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // keep the open drawer in sync with fresh data (by id) without
-  // re-subscribing realtime
   useEffect(() => {
     setSelected(prev => (prev ? (bookings.find(b => b.id === prev.id) ?? prev) : prev))
   }, [bookings])
@@ -2011,18 +1898,11 @@ export default function AdminBookings() {
     return matchSearch && matchStatus && profileFilter(b)
   })
 
-  // ── Today / Tomorrow labels (same 'D MMM YYYY' format used to tag and
-  // compare every booking's scheduled date throughout this file) ──
   const todayLabel = new Date().toLocaleDateString('en-IN',
     { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
   const tomorrowLabel = new Date(Date.now() + 86400000).toLocaleDateString('en-IN',
     { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
 
-  // Whichever date is active (from Today/Tomorrow or the calendar) that
-  // ISN'T Today or Tomorrow gets shown as its own removable chip, so a
-  // custom pick from the calendar is always visible with a clear (✕) —
-  // without needing to render a button for every date that has ever had
-  // a booking.
   const isCustomDate = selectedDate !== 'all' && selectedDate !== todayLabel && selectedDate !== tomorrowLabel
 
   function countForDate(dateLabel: string) {
@@ -2032,10 +1912,8 @@ export default function AdminBookings() {
     ).length
   }
 
-  // ── Area filter: extract unique areas ──
   const allAreas = Array.from(new Set(filtered.map(b => b.area).filter(a => a && a !== '—'))).sort()
 
-  // Apply date + area filters
   const dateAreaFiltered = filtered.filter(b => {
     const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
       { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
@@ -2044,7 +1922,6 @@ export default function AdminBookings() {
     return matchDate && matchArea
   })
 
-  // Group by area within the current date filter
   const groupedByArea: Record<string, typeof filtered> = {}
   dateAreaFiltered.forEach(b => {
     const area = b.area || '—'
@@ -2242,10 +2119,7 @@ export default function AdminBookings() {
             </span>
           </button>
 
-          {/* Calendar picker — pick any other date. A hidden native
-              <input type="date"> does the actual picking; this button
-              just opens it (falls back to a plain click/focus on
-              browsers without showPicker()). */}
+          {/* Calendar picker */}
           <div className="relative flex-shrink-0">
             <button
               type="button"
@@ -2349,7 +2223,6 @@ export default function AdminBookings() {
         <div className="space-y-4">
           {Object.entries(groupedByArea).map(([area, areaBookings]) => (
             <div key={area} className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-              {/* Area header — attractive gradient */}
               {(() => {
                 const liveInArea = areaBookings.filter(b => b.status === 'in_progress').length
                 const pendingInArea = areaBookings.filter(b => b.status === 'pending').length
@@ -2412,7 +2285,6 @@ export default function AdminBookings() {
                 )
               })()}
 
-              {/* Table inside area section */}
               <div className="overflow-x-auto">
                 <table className="w-full text-sm border-collapse">
                   <thead>
@@ -2435,6 +2307,7 @@ export default function AdminBookings() {
                         isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings) &&
                         (zoneIds == null || zoneIds.has(w.id))
                       )
+                      const canQuickStartWork = b.is_manual_booking && b.status === 'accepted' && !!b.worker_id
 
                       return (
                         <Fragment key={b.id}>
@@ -2456,6 +2329,11 @@ export default function AdminBookings() {
                                     {b.services.length > 1 && (
                                       <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200 flex-shrink-0">
                                         +{b.services.length - 1} more
+                                      </span>
+                                    )}
+                                    {b.is_manual_booking && (
+                                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200 flex-shrink-0">
+                                        📞 Phone
                                       </span>
                                     )}
                                     {b.extra_time_mins > 0 && (
@@ -2580,6 +2458,13 @@ export default function AdminBookings() {
                             {/* Actions */}
                             <td className="px-4 py-3.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                               <div className="flex items-center gap-1.5">
+                                {canQuickStartWork && (
+                                  <button onClick={() => setSelected(b)}
+                                    title="Open to start work (phone booking has no customer OTP step)"
+                                    className="px-2.5 py-1 rounded-lg text-[11px] font-black bg-cyan-100 text-cyan-700 border border-cyan-200 hover:bg-cyan-200 transition-all">
+                                    ▶️ Start
+                                  </button>
+                                )}
                                 {b.status === 'in_progress' && (
                                   <button onClick={() => quickAct(b.id,'completed')}
                                     className="px-2.5 py-1 rounded-lg text-[11px] font-black bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-all">
