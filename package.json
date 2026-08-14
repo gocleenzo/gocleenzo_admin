@@ -3,7 +3,7 @@
     "@hookform/resolvers": "^5.4.0",
     "@react-google-maps/api": "^2.20.8",
     "@supabase/ssr": "^0.10.3",
-    "@supabase/supabase-js": "^2.107.0",
+    "@supabase/supabase-js": "^2.112.3",
     "@tailwindcss/postcss": "^4.3.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.3.0",
