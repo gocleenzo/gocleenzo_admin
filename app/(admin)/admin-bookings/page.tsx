@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
+import RecurringPackageBadge from './recurring_package_badge'
 
 type BookedService = { serviceId: string | null; name: string; qty: number; unit_price: number }
 
@@ -2331,11 +2332,12 @@ export default function AdminBookings() {
                                         +{b.services.length - 1} more
                                       </span>
                                     )}
-                                    {b.is_manual_booking && (
+                                                                        {b.is_manual_booking && (
                                       <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200 flex-shrink-0">
                                         📞 Phone
                                       </span>
                                     )}
+                                    <RecurringPackageBadge bookingId={b.id} />
                                     {b.extra_time_mins > 0 && (
                                       <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 flex-shrink-0">
                                         +{b.extra_time_mins}m {b.extra_time_payment_status === 'paid' ? '✓' : '⏳'}
