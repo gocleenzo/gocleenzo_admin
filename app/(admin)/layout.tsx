@@ -10,6 +10,7 @@ const NAV = [
   { href: '/admin-bookings',   emoji: '📋', label: 'Bookings',   color: '#7C3AED' },
   { href: '/admin-workers',    emoji: '👷', label: 'Workers',    color: '#0891B2' },
   { href: '/admin-users',      emoji: '👥', label: 'Users',      color: '#4F46E5' },
+  { href: '/admin-services',   emoji: '🧾', label: 'Services',   color: '#0891B2' },
   { href: '/admin-live-map',   emoji: '📍', label: 'Live Map',   color: '#0D9488' },
   { href: '/admin-coverage',   emoji: '🛰️', label: 'Coverage',   color: '#0891B2' },
   { href: '/admin-areas',      emoji: '🗺️', label: 'Service Areas', color: '#0EA5E9' },
