@@ -4,8 +4,14 @@ import { createClient } from '@/lib/supabase/client'
 
 /* ───────────────────────────── config ─────────────────────────────
    The "complaints" tab now reads from the SUPPORT QUERIES table.
-   If your table is named differently, change SUPPORT_TABLE below.        */
-const SUPPORT_TABLE = 'admin_support_queries'
+   UPDATES must go against the REAL table — admin_support_queries is a
+   read-only VIEW (joins support_queries + users for display), and
+   Postgres correctly refuses UPDATE against a view like that, which is
+   what "cannot update view admin_support_queries" meant. Reads still
+   work fine against the view (harmless, gives us the joined names for
+   free) — only the update calls needed to target the real table.      */
+const SUPPORT_TABLE = 'admin_support_queries'   // used for SELECT (read)
+const SUPPORT_WRITE_TABLE = 'support_queries'   // used for UPDATE (write) — the real table backing the view above
 
 /* ───────────────────────────── types ───────────────────────────── */
 type Complaint = {
@@ -64,6 +70,9 @@ export default function AdminFeedback() {
     async function load() {
       const [cRes, rRes] = await Promise.all([
         // Support queries — select everything, we map flexibly below.
+        // Reading from the VIEW is fine and intentional — it gives us
+        // the joined registered_name/registered_phone from `users` for
+        // free, without a second query.
         supabase.from(SUPPORT_TABLE).select('*'),
         supabase
           .from('reviews')
@@ -114,7 +123,13 @@ export default function AdminFeedback() {
   async function updateComplaint(id: string, status: string) {
     const prev = complaints
     setComplaints(c => c.map(x => x.id === id ? { ...x, status } : x))
-    const { error } = await supabase.from(SUPPORT_TABLE).update({ status }).eq('id', id)
+    // Writes MUST target the real table — admin_support_queries is a
+    // read-only view (SELECT sq.*, u.full_name, u.phone FROM
+    // support_queries sq LEFT JOIN users u ...) and Postgres refuses
+    // UPDATE against a multi-table view like this. support_queries has
+    // every column being written here (status), so this is a direct,
+    // safe swap — no trigger or view change needed.
+    const { error } = await supabase.from(SUPPORT_WRITE_TABLE).update({ status }).eq('id', id)
     if (error) {
       console.error('status update failed:', error.message)
       setComplaints(prev) // revert on failure
