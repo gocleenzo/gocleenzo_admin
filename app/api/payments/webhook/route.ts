@@ -119,10 +119,20 @@ export async function POST(req: NextRequest) {
     }
 
     const supabase = supabaseAdmin()
-    const { data: result, error: rpcError } = await supabase.rpc(
-      'complete_payment_booking_recovery',
-      { p_attempt_ref: attemptRef, p_payment_id: paymentId }
-    )
+
+    // The order's notes carry a `type` field set by the client at
+    // checkout — 'recurring_package' for the weekly-package flow,
+    // absent/other for a normal single booking. This determines which
+    // recovery function and which pending-draft table to check.
+    const orderType = (order.notes?.type as string | undefined) ?? 'booking'
+
+    const { data: result, error: rpcError } = orderType === 'recurring_package'
+      ? await supabase.rpc('complete_recurring_package_recovery', {
+          p_attempt_ref: attemptRef, p_payment_id: paymentId,
+        })
+      : await supabase.rpc('complete_payment_booking_recovery', {
+          p_attempt_ref: attemptRef, p_payment_id: paymentId,
+        })
 
     if (rpcError) {
       console.error('Webhook: complete_payment_booking_recovery RPC error', rpcError)
@@ -152,7 +162,7 @@ export async function POST(req: NextRequest) {
         // it surfaces for manual follow-up rather than being mistaken
         // for an already-completed refund.
         await supabase
-          .from('pending_payment_bookings')
+          .from(orderType === 'recurring_package' ? 'pending_recurring_packages' : 'pending_payment_bookings')
           .update({ status: 'refund_error', updated_at: new Date().toISOString() })
           .eq('attempt_ref', attemptRef)
       }

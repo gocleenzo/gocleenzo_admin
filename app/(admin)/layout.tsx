@@ -8,6 +8,7 @@ import SosWatcher from './sos_watcher'
 const NAV = [
   { href: '/admin-overview',   emoji: '📊', label: 'Overview',   color: '#2563EB' },
   { href: '/admin-bookings',   emoji: '📋', label: 'Bookings',   color: '#7C3AED' },
+  { href: '/admin-recurring',  emoji: '🔁', label: 'Recurring',  color: '#7C3AED' },
   { href: '/admin-workers',    emoji: '👷', label: 'Workers',    color: '#0891B2' },
   { href: '/admin-users',      emoji: '👥', label: 'Users',      color: '#4F46E5' },
   { href: '/admin-services',   emoji: '🧾', label: 'Services',   color: '#0891B2' },
