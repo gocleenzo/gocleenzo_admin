@@ -10,6 +10,16 @@ import { createClient } from '@/lib/supabase/client'
 // this page is purely a dedicated view/management layer on top of data
 // that was already being written correctly by the customer app's
 // checkout flow. Nothing new is stored here that wasn't already there.
+//
+// Fetches customer/worker/service/address SEPARATELY rather than via
+// Supabase's embedded-join syntax (customer:users!customer_id(...),
+// worker:users!worker_id(...)) — that pattern joins the same `users`
+// table twice via two different foreign keys, which Supabase/PostgREST
+// can fail to resolve (silently returning an error or empty result)
+// unless the exact FK constraint names are specified. Fetching flat and
+// joining in JS sidesteps that entirely and can't fail this way — this
+// was the actual cause of the page showing zero packages despite real
+// data existing in the database.
 // ============================================================================
 
 type PackageRow = {
@@ -29,7 +39,7 @@ type PackageRow = {
   status: string
   special_instructions: string | null
   created_at: string
-  // joined
+  // joined (client-side)
   customer_name: string
   customer_phone: string
   worker_name: string
@@ -61,38 +71,60 @@ export default function AdminRecurringPackages() {
   const [packages, setPackages] = useState<PackageRow[]>([])
   const [workers, setWorkers] = useState<Worker[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed' | 'cancelled'>('active')
   const [expanded, setExpanded] = useState<PackageRow | null>(null)
   const supabase = createClient()
 
   const load = useCallback(async () => {
-    const [{ data: pkgs }, { data: wd }] = await Promise.all([
-      supabase
-        .from('recurring_packages')
-        .select(`
-          id, customer_id, worker_id, address_id, service_id, start_date, end_date,
-          standard_time, duration_minutes, price_per_visit, total_visits, total_amount,
-          payment_status, status, special_instructions, created_at,
-          customer:users!customer_id(full_name, phone),
-          worker:users!worker_id(full_name),
-          service:services(name),
-          address:addresses(area)
-        `)
-        .order('created_at', { ascending: false }),
-      supabase.from('users').select('id, full_name, phone').eq('role', 'worker').order('full_name'),
-    ])
+    setLoadError(null)
+
+    const { data: pkgs, error: pkgsError } = await supabase
+      .from('recurring_packages')
+      .select(`
+        id, customer_id, worker_id, address_id, service_id, start_date, end_date,
+        standard_time, duration_minutes, price_per_visit, total_visits, total_amount,
+        payment_status, status, special_instructions, created_at
+      `)
+      .order('created_at', { ascending: false })
+
+    if (pkgsError) {
+      console.error('recurring_packages load error:', pkgsError.message)
+      setLoadError(pkgsError.message)
+      setLoading(false)
+      return
+    }
+
+    const { data: wd } = await supabase
+      .from('users').select('id, full_name, phone').eq('role', 'worker').order('full_name')
 
     if (wd) setWorkers(wd.map((w: any) => ({ id: w.id, name: w.full_name ?? 'Unknown', phone: w.phone ?? '' })))
 
-    if (pkgs) {
-      // Pull day-status counts for all packages in one query rather than
-      // N+1 — grouped client-side since Supabase's JS client doesn't do
-      // GROUP BY directly.
-      const { data: allDays } = await supabase
-        .from('recurring_package_days')
-        .select('package_id, status')
-        .in('package_id', pkgs.map((p: any) => p.id))
+    if (pkgs && pkgs.length > 0) {
+      const userIds = Array.from(new Set(
+        pkgs.flatMap((p: any) => [p.customer_id, p.worker_id]).filter(Boolean)
+      ))
+      const serviceIds = Array.from(new Set(pkgs.map((p: any) => p.service_id).filter(Boolean)))
+      const addressIds = Array.from(new Set(pkgs.map((p: any) => p.address_id).filter(Boolean)))
+
+      const [{ data: users }, { data: allDays }, { data: services }, { data: addresses }] = await Promise.all([
+        userIds.length > 0
+          ? supabase.from('users').select('id, full_name, phone').in('id', userIds)
+          : Promise.resolve({ data: [] as any[] }),
+        supabase.from('recurring_package_days').select('package_id, status')
+          .in('package_id', pkgs.map((p: any) => p.id)),
+        serviceIds.length > 0
+          ? supabase.from('services').select('id, name').in('id', serviceIds)
+          : Promise.resolve({ data: [] as any[] }),
+        addressIds.length > 0
+          ? supabase.from('addresses').select('id, area').in('id', addressIds)
+          : Promise.resolve({ data: [] as any[] }),
+      ])
+
+      const userMap = new Map((users ?? []).map((u: any) => [u.id, u]))
+      const serviceMap = new Map((services ?? []).map((s: any) => [s.id, s]))
+      const addressMap = new Map((addresses ?? []).map((a: any) => [a.id, a]))
 
       const dayCounts: Record<string, { active: number; forfeited: number; completed: number }> = {}
       ;(allDays ?? []).forEach((d: any) => {
@@ -102,32 +134,40 @@ export default function AdminRecurringPackages() {
         else if (d.status === 'completed') dayCounts[d.package_id].completed++
       })
 
-      setPackages(pkgs.map((p: any) => ({
-        id: p.id,
-        customer_id: p.customer_id,
-        worker_id: p.worker_id,
-        address_id: p.address_id,
-        service_id: p.service_id,
-        start_date: p.start_date,
-        end_date: p.end_date,
-        standard_time: p.standard_time,
-        duration_minutes: p.duration_minutes,
-        price_per_visit: p.price_per_visit,
-        total_visits: p.total_visits,
-        total_amount: p.total_amount,
-        payment_status: p.payment_status,
-        status: p.status,
-        special_instructions: p.special_instructions,
-        created_at: p.created_at,
-        customer_name: p.customer?.full_name ?? 'Customer',
-        customer_phone: p.customer?.phone ?? '—',
-        worker_name: p.worker?.full_name ?? 'Unassigned',
-        service_name: p.service?.name ?? 'Service',
-        area: p.address?.area ?? '—',
-        activeDays: dayCounts[p.id]?.active ?? 0,
-        forfeitedDays: dayCounts[p.id]?.forfeited ?? 0,
-        completedDays: dayCounts[p.id]?.completed ?? 0,
-      })))
+      setPackages(pkgs.map((p: any) => {
+        const customer = userMap.get(p.customer_id)
+        const worker = p.worker_id ? userMap.get(p.worker_id) : null
+        const service = serviceMap.get(p.service_id)
+        const address = addressMap.get(p.address_id)
+        return {
+          id: p.id,
+          customer_id: p.customer_id,
+          worker_id: p.worker_id,
+          address_id: p.address_id,
+          service_id: p.service_id,
+          start_date: p.start_date,
+          end_date: p.end_date,
+          standard_time: p.standard_time,
+          duration_minutes: p.duration_minutes,
+          price_per_visit: p.price_per_visit,
+          total_visits: p.total_visits,
+          total_amount: p.total_amount,
+          payment_status: p.payment_status,
+          status: p.status,
+          special_instructions: p.special_instructions,
+          created_at: p.created_at,
+          customer_name: customer?.full_name ?? 'Customer',
+          customer_phone: customer?.phone ?? '—',
+          worker_name: worker?.full_name ?? 'Unassigned',
+          service_name: service?.name ?? 'Service',
+          area: address?.area ?? '—',
+          activeDays: dayCounts[p.id]?.active ?? 0,
+          forfeitedDays: dayCounts[p.id]?.forfeited ?? 0,
+          completedDays: dayCounts[p.id]?.completed ?? 0,
+        }
+      }))
+    } else {
+      setPackages([])
     }
     setLoading(false)
   }, [])
@@ -170,6 +210,12 @@ export default function AdminRecurringPackages() {
           onChange={e => setSearch(e.target.value)}
           className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
       </div>
+
+      {loadError && (
+        <div className="mb-4 rounded-xl px-4 py-3 bg-red-50 border border-red-200">
+          <p className="text-sm font-bold text-red-600">Could not load packages: {loadError}</p>
+        </div>
+      )}
 
       {/* status pills */}
       <div className="flex gap-2 overflow-x-auto pb-3 mb-4">
