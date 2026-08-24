@@ -31,6 +31,24 @@ type Worker = {
 
 type ServiceOption = { id: string; name: string; duration_minutes: number; base_price: number | null }
 
+// ── Saved-address / existing-customer lookup types ───────────────
+type SavedAddress = {
+  id: string
+  label: string | null
+  flat_no: string | null
+  building: string | null
+  area: string | null
+  city: string | null
+  full_address: string | null
+  pincode: string | null
+  is_default: boolean
+}
+type CustomerMatch = {
+  id: string
+  full_name: string | null
+  addresses: SavedAddress[]
+}
+
 const SYSTEM_PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000001'
 
 const STATUS: Record<string, { label: string; color: string; bg: string; icon: string; step: number }> = {
@@ -42,6 +60,18 @@ const STATUS: Record<string, { label: string; color: string; bg: string; icon: s
   cancelled:    { label: 'Cancelled',    color: '#DC2626', bg: '#FEE2E2', icon: '✕',  step: -1 },
 }
 const STEPS = ['pending','accepted','otp_verified','in_progress','completed']
+
+// ── Phone normalization — mirrors normalizePhone() in the
+// firebase-auth edge function and normalize_phone() in SQL, so a
+// number entered here always matches what a real app login resolves
+// to. Kept permissive on partial input (doesn't force +91 while the
+// admin is still typing) — only used for the actual lookup/submit.
+function normalizePhone(raw: string): string {
+  let digits = raw.replace(/\D/g, '')
+  if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2)
+  if (digits.length !== 10) return raw.trim()
+  return `+91${digits}`
+}
 
 async function sendNotification(
   userId: string, title: string, body: string, data?: Record<string, string>
@@ -466,6 +496,67 @@ function SlotPicker({
   )
 }
 
+// ── Existing-customer phone lookup (debounced) ────────────────────
+// Matches PhoneBookingModal's own onus: 'customer' role only, same as
+// admin_create_manual_booking's own lookup. Returns full profile +
+// ALL non-deleted saved addresses (not just default) so the admin can
+// pick whichever one the caller wants delivered to.
+function useCustomerLookup(rawPhone: string) {
+  const supabase = createClient()
+  const [match, setMatch] = useState<CustomerMatch | null>(null)
+  const [checking, setChecking] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const digits = rawPhone.replace(/\D/g, '')
+    if (digits.length < 10) {
+      setMatch(null)
+      setChecking(false)
+      return
+    }
+    const phone = normalizePhone(rawPhone)
+    setChecking(true)
+    const t = setTimeout(async () => {
+      const { data: userRow } = await supabase
+        .from('users')
+        .select('id, full_name')
+        .eq('phone', phone)
+        .eq('role', 'customer')
+        .eq('is_deleted', false)
+        .maybeSingle()
+
+      if (cancelled) return
+
+      if (!userRow) {
+        setMatch(null)
+        setChecking(false)
+        return
+      }
+
+      const { data: addrRows } = await supabase
+        .from('addresses')
+        .select('id,label,flat_no,building,area,city,full_address,pincode,is_default')
+        .eq('user_id', userRow.id)
+        .eq('is_deleted', false)
+        .order('is_default', { ascending: false })
+
+      if (cancelled) return
+
+      setMatch({
+        id: userRow.id,
+        full_name: userRow.full_name,
+        addresses: (addrRows ?? []) as SavedAddress[],
+      })
+      setChecking(false)
+    }, 400)
+
+    return () => { cancelled = true; clearTimeout(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawPhone])
+
+  return { match, checking }
+}
+
 function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: {
   services: ServiceOption[]
   workers: Worker[]
@@ -494,6 +585,61 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
 
   const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
   const [zoneChecking, setZoneChecking] = useState(false)
+
+  // ── Existing-customer auto-fill ─────────────────────────────────
+  const { match: customerMatch, checking: customerChecking } = useCustomerLookup(phone)
+  const [selectedAddressId, setSelectedAddressId] = useState<string>('')
+  const [addingNewAddress, setAddingNewAddress] = useState(false)
+  // Tracks whether the admin has hand-edited the name field themselves
+  // after a match came back, so we don't clobber a deliberate edit if
+  // the debounce re-fires.
+  const nameTouchedRef = useRef(false)
+
+  // When a customer match arrives, auto-fill name (unless the admin
+  // already typed something) and default to their default address
+  // (or their only address) rather than forcing manual entry again.
+  useEffect(() => {
+    if (!customerMatch) {
+      setSelectedAddressId('')
+      setAddingNewAddress(false)
+      return
+    }
+    if (!nameTouchedRef.current && customerMatch.full_name) {
+      setName(customerMatch.full_name)
+    }
+    if (customerMatch.addresses.length > 0) {
+      const def = customerMatch.addresses.find(a => a.is_default) ?? customerMatch.addresses[0]
+      setSelectedAddressId(def.id)
+      setAddingNewAddress(false)
+    } else {
+      setSelectedAddressId('')
+      setAddingNewAddress(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerMatch?.id])
+
+  // Fill the address fields whenever the selected saved address changes
+  useEffect(() => {
+    if (!customerMatch || !selectedAddressId || addingNewAddress) return
+    const addr = customerMatch.addresses.find(a => a.id === selectedAddressId)
+    if (!addr) return
+    setFlatNo(addr.flat_no ?? '')
+    setBuilding(addr.building ?? '')
+    setFullAddress(addr.full_address ?? '')
+    setArea(addr.area ?? '')
+    setCity(addr.city ?? '')
+    setPincode(addr.pincode ?? '')
+    setScheduledIso('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAddressId, addingNewAddress])
+
+  // Clear address fields when switching into "add new address" mode
+  function startNewAddress() {
+    setAddingNewAddress(true)
+    setSelectedAddressId('')
+    setFlatNo(''); setBuilding(''); setFullAddress(''); setArea(''); setCity(''); setPincode('')
+    setScheduledIso('')
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -542,7 +688,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
     setError(null)
     try {
       const { data, error: rpcError } = await supabase.rpc('admin_create_manual_booking', {
-        p_customer_phone: phone.trim(),
+        p_customer_phone: normalizePhone(phone),
         p_customer_name: name.trim() || null,
         p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
         p_scheduled_at: scheduledIso,
@@ -574,6 +720,12 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
       setError(e?.message ?? 'Could not create the booking.')
       setSubmitting(false)
     }
+  }
+
+  function addrLabel(a: SavedAddress): string {
+    const main = a.label?.trim() || a.area || 'Address'
+    const bits = [a.full_address || a.area, a.city].filter(Boolean).join(', ')
+    return bits ? `${main} — ${bits}` : main
   }
 
   return (
@@ -611,14 +763,33 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
             <div>
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Customer</p>
               <div className="grid grid-cols-2 gap-3">
-                <input type="tel" placeholder="Phone number *" value={phone} onChange={e => setPhone(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="Name (if new customer)" value={name} onChange={e => setName(e.target.value)}
+                <div className="relative">
+                  <input type="tel" placeholder="Phone number *" value={phone}
+                    onChange={e => setPhone(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                  {customerChecking && (
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-400">…</span>
+                  )}
+                </div>
+                <input type="text" placeholder="Name (if new customer)" value={name}
+                  onChange={e => { nameTouchedRef.current = true; setName(e.target.value) }}
                   className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
               </div>
-              <p className="text-[11px] text-slate-400 mt-1.5">
-                We'll match an existing account by phone, or create a lightweight profile automatically.
-              </p>
+
+              {customerMatch ? (
+                <div className="mt-2 px-3 py-2 rounded-xl bg-green-50 border border-green-200">
+                  <p className="text-[11px] text-green-700 font-semibold">
+                    ✓ Existing customer{customerMatch.full_name ? ` — ${customerMatch.full_name}` : ''}
+                    {customerMatch.addresses.length > 0
+                      ? ` · ${customerMatch.addresses.length} saved address${customerMatch.addresses.length === 1 ? '' : 'es'}`
+                      : ' · no saved addresses yet'}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  We'll match an existing account by phone, or create a lightweight profile automatically.
+                </p>
+              )}
             </div>
 
             <div>
@@ -654,9 +825,6 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
                   </div>
                 ))}
               </div>
-              <p className="text-[11px] text-slate-400 mt-2">
-                We'll match an existing account by phone, or create a lightweight profile automatically.
-              </p>
             </div>
 
             <div>
@@ -673,24 +841,65 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
             </div>
 
             <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Address</p>
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="Building / Society" value={building} onChange={e => setBuilding(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Address</p>
+                {customerMatch && customerMatch.addresses.length > 0 && !addingNewAddress && (
+                  <button type="button" onClick={startNewAddress}
+                    className="text-[11px] font-bold text-cyan-700 hover:text-cyan-800">
+                    + Add new address
+                  </button>
+                )}
+                {customerMatch && addingNewAddress && customerMatch.addresses.length > 0 && (
+                  <button type="button"
+                    onClick={() => {
+                      setAddingNewAddress(false)
+                      const def = customerMatch.addresses.find(a => a.is_default) ?? customerMatch.addresses[0]
+                      setSelectedAddressId(def.id)
+                    }}
+                    className="text-[11px] font-bold text-slate-500 hover:text-slate-700">
+                    ← Use a saved address
+                  </button>
+                )}
               </div>
-              <input type="text" placeholder="Full address *" value={fullAddress} onChange={e => setFullAddress(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 mb-3"/>
-              <div className="grid grid-cols-3 gap-3">
-                <input type="text" placeholder="Area" value={area} onChange={e => setArea(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="City" value={city} onChange={e => setCity(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="Pincode *" value={pincode}
-                  onChange={e => { setPincode(e.target.value); setScheduledIso('') }}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-              </div>
+
+              {customerMatch && customerMatch.addresses.length > 0 && !addingNewAddress ? (
+                <div className="mb-3">
+                  <select value={selectedAddressId} onChange={e => setSelectedAddressId(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                    {customerMatch.addresses.map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.is_default ? '★ ' : ''}{addrLabel(a)}
+                      </option>
+                    ))}
+                  </select>
+                  {fullAddress && (
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      📍 {[flatNo, building].filter(Boolean).join(', ')}{(flatNo || building) ? ' · ' : ''}{fullAddress}
+                      {pincode ? ` — ${pincode}` : ''}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                    <input type="text" placeholder="Building / Society" value={building} onChange={e => setBuilding(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                  </div>
+                  <input type="text" placeholder="Full address *" value={fullAddress} onChange={e => setFullAddress(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 mb-3"/>
+                  <div className="grid grid-cols-3 gap-3">
+                    <input type="text" placeholder="Area" value={area} onChange={e => setArea(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                    <input type="text" placeholder="City" value={city} onChange={e => setCity(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                    <input type="text" placeholder="Pincode *" value={pincode}
+                      onChange={e => { setPincode(e.target.value); setScheduledIso('') }}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                  </div>
+                </>
+              )}
             </div>
 
             <div>
@@ -829,7 +1038,7 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
     try {
       const { data, error: rpcError } = await supabase.rpc('admin_edit_manual_booking', {
         p_booking_id: booking.id,
-        p_customer_phone: phone.trim(),
+        p_customer_phone: normalizePhone(phone),
         p_customer_name: name.trim() || null,
         p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
         p_scheduled_at: scheduledIso,
@@ -1175,13 +1384,6 @@ function Drawer({
       (zoneWorkerIds == null || zoneWorkerIds.has(w.id)))
   )
   const canAssign  = ['pending','accepted'].includes(b.status)
-  // Admin-side "Start Work" — the manual-booking equivalent of the
-  // customer entering the worker's OTP in the customer app. Phone
-  // bookings have no customer app session for that step to happen in, so
-  // this is how a manual booking is ever meant to reach in_progress at
-  // all. Requires a worker already assigned (status === 'accepted') and
-  // is only ever offered for is_manual_booking bookings — a normal
-  // customer booking should always go through real OTP verification.
   const canStartWork = b.is_manual_booking && b.status === 'accepted' && !!b.worker_id
   const totalSec   = b.work_started_at && b.work_ended_at
     ? elapsed(b.work_started_at, b.work_ended_at) : 0
@@ -1263,10 +1465,6 @@ function Drawer({
     setBusy(true)
     const now = new Date().toISOString()
     const u: any = { status }
-    // Phone/manual bookings have no customer app open to enter the
-    // worker's OTP — this is the admin-only equivalent of that step,
-    // moving straight from 'accepted' to 'in_progress' and starting the
-    // live timer, exactly as if the OTP had just been verified.
     if (status === 'in_progress') {
       u.work_started_at = now
     }
@@ -2069,7 +2267,6 @@ export default function AdminBookings() {
       {/* ── DATE FILTER: All Dates / Today / Tomorrow + calendar picker ── */}
       <div className="mb-4">
         <div className="flex items-center gap-2 overflow-x-auto pb-2">
-          {/* All dates tab */}
           <button
             onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
             className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
@@ -2086,7 +2283,6 @@ export default function AdminBookings() {
             </span>
           </button>
 
-          {/* Today */}
           <button
             onClick={() => { setSelectedDate(todayLabel); setSelectedArea('all') }}
             className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
@@ -2103,7 +2299,6 @@ export default function AdminBookings() {
             </span>
           </button>
 
-          {/* Tomorrow */}
           <button
             onClick={() => { setSelectedDate(tomorrowLabel); setSelectedArea('all') }}
             className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
@@ -2120,7 +2315,6 @@ export default function AdminBookings() {
             </span>
           </button>
 
-          {/* Calendar picker */}
           <div className="relative flex-shrink-0">
             <button
               type="button"
@@ -2153,7 +2347,6 @@ export default function AdminBookings() {
             />
           </div>
 
-          {/* Custom-picked date shows as its own removable chip */}
           {isCustomDate && (
             <button
               onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
@@ -2168,7 +2361,6 @@ export default function AdminBookings() {
           )}
         </div>
 
-        {/* Area filter pills (shown under date tabs) */}
         {allAreas.length > 1 && (
           <div className="flex items-center gap-2 overflow-x-auto pt-2">
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex-shrink-0">Area:</span>
@@ -2206,7 +2398,6 @@ export default function AdminBookings() {
         )}
       </div>
 
-      {/* ── AREA GROUPED TABLE ── */}
       {dateAreaFiltered.length === 0 ? (
         <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center shadow-sm">
           <p className="text-4xl mb-3">
@@ -2316,10 +2507,8 @@ export default function AdminBookings() {
                             className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
                             onClick={() => setSelected(b)}
                             style={{ opacity: isCancelled ? 0.7 : 1 }}>
-                            {/* Service / Customer */}
                             <td className="px-4 py-3.5">
                               <div className="flex items-center gap-2.5">
-                                {/* Status indicator dot */}
                                 <div className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center text-base"
                                   style={{ background: cfg.bg, border: `1px solid ${cfg.color}30` }}>
                                   {isLive ? <span className="animate-pulse">{cfg.icon}</span> : cfg.icon}
@@ -2356,7 +2545,6 @@ export default function AdminBookings() {
                                 </div>
                               </div>
                             </td>
-                            {/* Schedule */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               <div className="flex items-center gap-1.5 mb-0.5">
                                 <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
@@ -2371,7 +2559,6 @@ export default function AdminBookings() {
                                   { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
                               </p>
                             </td>
-                            {/* Location */}
                             <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
                               <div className="flex items-center gap-1.5">
                                 <div className="min-w-0">
@@ -2424,14 +2611,12 @@ export default function AdminBookings() {
                                 </div>
                               </div>
                             </td>
-                            {/* Status */}
                             <td className="px-4 py-3.5">
                               <span className="text-[11px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
                                 style={{ background: cfg.bg, color: cfg.color }}>
                                 {cfg.icon} {cfg.label}
                               </span>
                             </td>
-                            {/* Worker */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               {b.worker !== 'Unassigned'
                                 ? <div className="flex items-center gap-1.5">
@@ -2443,13 +2628,11 @@ export default function AdminBookings() {
                                   </div>
                                 : <span className="text-[11px] text-amber-600 font-bold bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Unassigned</span>}
                             </td>
-                            {/* Amount */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               <span className={`text-[13px] font-black ${isCancelled ? 'text-red-400 line-through' : 'text-cyan-700'}`}>
                                 ₹{b.final_amount.toLocaleString('en-IN')}
                               </span>
                             </td>
-                            {/* Timer */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               {isLive && b.work_started_at
                                 ? <LiveTimer start={b.work_started_at} end={null} color="#0891B2"/>
@@ -2457,7 +2640,6 @@ export default function AdminBookings() {
                                   ? <span className="font-mono font-bold text-[12px] text-green-700">{durShort(totalSec)}</span>
                                   : <span className="text-slate-300 text-xs">—</span>}
                             </td>
-                            {/* Actions */}
                             <td className="px-4 py-3.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                               <div className="flex items-center gap-1.5">
                                 {canQuickStartWork && (
@@ -2485,7 +2667,6 @@ export default function AdminBookings() {
                             </td>
                           </tr>
 
-                          {/* Inline assign row */}
                           {needsW && (
                             <tr className="border-b border-slate-50 bg-amber-50/40">
                               <td colSpan={8} className="px-4 py-2" onClick={e => e.stopPropagation()}>
@@ -2525,7 +2706,6 @@ export default function AdminBookings() {
         </div>
       )}
 
-      {/* Quick location + nearby workers popup (from the row Map button) */}
       {mapFor && (
         <>
           <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" onClick={() => setMapFor(null)} />

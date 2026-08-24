@@ -47,8 +47,17 @@ const STATUS: Record<string, { label: string; color: string; bg: string; icon: s
 
 type SortKey = 'orders' | 'spent' | 'recent'
 
+// Helper: build the best available one-line address string for a customer
+function formatAddress(c: Pick<CustomerRow, 'default_full_address' | 'default_area' | 'default_city' | 'default_pincode'>): string | null {
+  if (c.default_full_address) return c.default_full_address
+  const parts = [c.default_area, c.default_city, c.default_pincode].filter(Boolean)
+  return parts.length > 0 ? parts.join(', ') : null
+}
+
 // ── Drawer: full profile + order history ────────────────────────
 function UserDrawer({ user, onClose }: { user: CustomerRow; onClose: () => void }) {
+  const address = formatAddress(user)
+
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
@@ -108,19 +117,21 @@ function UserDrawer({ user, onClose }: { user: CustomerRow; onClose: () => void 
           </div>
 
           {/* Default address */}
-          {(user.default_full_address || user.default_area) && (
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Default Address</p>
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Default Address</p>
+            {address ? (
               <div className="rounded-2xl px-4 py-3 bg-amber-50 border border-amber-200">
-                <p className="text-sm text-slate-700">
-                  📍 {user.default_full_address || `${user.default_area}, ${user.default_city}`}
-                </p>
+                <p className="text-sm text-slate-700">📍 {address}</p>
                 {user.default_pincode && (
                   <p className="text-xs text-slate-400 mt-1">Pincode: {user.default_pincode}</p>
                 )}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="rounded-2xl px-4 py-3 bg-slate-50 border border-slate-200">
+                <p className="text-sm text-slate-400">No saved address yet</p>
+              </div>
+            )}
+          </div>
 
           {/* Order history */}
           <div>
@@ -271,7 +282,13 @@ export default function AdminUsers() {
 
   const filtered = customers.filter(c => {
     const q = search.toLowerCase()
-    return c.full_name.toLowerCase().includes(q) || c.phone.includes(q) || (c.email ?? '').toLowerCase().includes(q)
+    const addr = formatAddress(c)?.toLowerCase() ?? ''
+    return (
+      c.full_name.toLowerCase().includes(q) ||
+      c.phone.includes(q) ||
+      (c.email ?? '').toLowerCase().includes(q) ||
+      addr.includes(q)
+    )
   })
 
   const sorted = [...filtered].sort((a, b) => {
@@ -309,7 +326,7 @@ export default function AdminUsers() {
             <p className="text-xs text-slate-400 font-medium">{totalCustomers} customers · {activeCustomers} with orders</p>
           </div>
         </div>
-        <input type="text" placeholder="Search name, phone, email…" value={search} onChange={e => setSearch(e.target.value)}
+        <input type="text" placeholder="Search name, phone, email, address…" value={search} onChange={e => setSearch(e.target.value)}
           className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
       </div>
 
@@ -361,62 +378,73 @@ export default function AdminUsers() {
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50/50">
-                  {['Customer','Area','Orders','Total Spent','Last Order',''].map(c => (
+                  {['Customer','Address','Orders','Total Spent','Last Order',''].map(c => (
                     <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {sorted.map(c => (
-                  <tr key={c.id}
-                    className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
-                    onClick={() => setSelected(c)}>
-                    {/* Customer */}
-                    <td className="px-4 py-3.5">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0"
-                          style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-                          {c.full_name?.[0]?.toUpperCase() ?? '?'}
+                {sorted.map(c => {
+                  const address = formatAddress(c)
+                  return (
+                    <tr key={c.id}
+                      className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
+                      onClick={() => setSelected(c)}>
+                      {/* Customer */}
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-xs font-black flex-shrink-0"
+                            style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+                            {c.full_name?.[0]?.toUpperCase() ?? '?'}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-black text-slate-800 text-[13px] truncate max-w-[160px]">{c.full_name}</p>
+                            <a href={`tel:${c.phone}`} onClick={e => e.stopPropagation()}
+                              className="text-[11px] text-cyan-600 font-bold hover:underline">{c.phone}</a>
+                          </div>
                         </div>
-                        <div className="min-w-0">
-                          <p className="font-black text-slate-800 text-[13px] truncate max-w-[160px]">{c.full_name}</p>
-                          <a href={`tel:${c.phone}`} onClick={e => e.stopPropagation()}
-                            className="text-[11px] text-cyan-600 font-bold hover:underline">{c.phone}</a>
-                        </div>
-                      </div>
-                    </td>
-                    {/* Area */}
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      {c.default_area
-                        ? <p className="text-[12px] font-bold text-slate-700">📍 {c.default_area}</p>
-                        : <span className="text-[11px] text-slate-300">—</span>}
-                      {c.default_city && <p className="text-[10px] text-slate-400">{c.default_city}</p>}
-                    </td>
-                    {/* Orders */}
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      <span className="text-[13px] font-black text-slate-700">{c.totalOrders}</span>
-                      {c.totalOrders > 0 && (
-                        <p className="text-[10px] text-slate-400">{c.completedOrders} completed</p>
-                      )}
-                    </td>
-                    {/* Total spent */}
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      <span className="text-[13px] font-black text-cyan-700">₹{c.totalSpent.toLocaleString('en-IN')}</span>
-                    </td>
-                    {/* Last order */}
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      {c.lastOrderDate
-                        ? <span className="text-[12px] text-slate-600 font-semibold">
-                            {new Date(c.lastOrderDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                          </span>
-                        : <span className="text-[11px] text-slate-300">Never</span>}
-                    </td>
-                    {/* Chevron */}
-                    <td className="px-4 py-3.5 text-right">
-                      <span className="text-slate-300">›</span>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      {/* Address */}
+                      <td className="px-4 py-3.5 max-w-[240px]">
+                        {address ? (
+                          <>
+                            <p className="text-[12px] font-bold text-slate-700 truncate" title={address}>
+                              📍 {address}
+                            </p>
+                            {c.default_pincode && (
+                              <p className="text-[10px] text-slate-400">PIN {c.default_pincode}</p>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-[11px] text-slate-300">No address saved</span>
+                        )}
+                      </td>
+                      {/* Orders */}
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        <span className="text-[13px] font-black text-slate-700">{c.totalOrders}</span>
+                        {c.totalOrders > 0 && (
+                          <p className="text-[10px] text-slate-400">{c.completedOrders} completed</p>
+                        )}
+                      </td>
+                      {/* Total spent */}
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        <span className="text-[13px] font-black text-cyan-700">₹{c.totalSpent.toLocaleString('en-IN')}</span>
+                      </td>
+                      {/* Last order */}
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        {c.lastOrderDate
+                          ? <span className="text-[12px] text-slate-600 font-semibold">
+                              {new Date(c.lastOrderDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                            </span>
+                          : <span className="text-[11px] text-slate-300">Never</span>}
+                      </td>
+                      {/* Chevron */}
+                      <td className="px-4 py-3.5 text-right">
+                        <span className="text-slate-300">›</span>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
