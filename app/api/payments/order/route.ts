@@ -42,17 +42,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid amount' }, { status: 400 })
     }
 
+    // Razorpay hard-caps `receipt` at 40 characters — anything longer
+    // is REJECTED by their API (order creation fails outright, which
+    // surfaced to the client only as a generic "Failed to create
+    // order" 500 before this fix logged the real reason below). A
+    // caller-built receipt like `extra_time_<uuid>_<timestamp>` is
+    // ~62 chars, well over the limit, so it's truncated here as a
+    // safety net regardless of what any caller sends.
+    const safeReceipt = receipt.slice(0, 40)
+
     const order = await razorpay.orders.create({
       amount,   // already in paise
       currency,
-      receipt,
+      receipt: safeReceipt,
       notes,
     })
 
     // Flutter expects the key "order_id" (not "orderId")
     return NextResponse.json({ order_id: order.id, amount: order.amount })
-  } catch (err) {
-    console.error('Razorpay order error:', err)
-    return NextResponse.json({ error: 'Failed to create order' }, { status: 500 })
+  } catch (err: any) {
+    // Razorpay SDK errors carry the actual reason in err.error (e.g.
+    // { code, description, field }) — log that specifically, not just
+    // the generic error object, so failures like this are diagnosable
+    // from Vercel logs instead of only ever showing a bare 500 to the
+    // client.
+    console.error('Razorpay order error:', err?.error ?? err)
+    return NextResponse.json(
+      { error: 'Failed to create order', detail: err?.error?.description ?? String(err) },
+      { status: 500 }
+    )
   }
 }

@@ -1288,6 +1288,195 @@ function AreasTab({ workerId, supabase }: { workerId: string; supabase: any }) {
 }
 
 
+// ═══════════════════════════════════════════════════════════════
+// PAY RATES TAB — per-worker base/order/overtime hourly rate
+// overrides. Reads/writes worker_pay_rates directly via Supabase —
+// no API route needed, matching the pattern AreasTab already uses
+// in this file. Any field left blank uses the system default rate
+// (shown as placeholder text) rather than forcing every worker to
+// have every rate explicitly set.
+// ═══════════════════════════════════════════════════════════════
+
+// Mirrors the SQL fallbacks in cleenzo_rate_base_per_hour() (₹50),
+// cleenzo_rate_order_per_hour() (₹32), cleenzo_rate_overtime_per_hour()
+// (₹0) — shown as placeholder text so the admin can see what rate is
+// currently in effect even when this worker has no override set.
+const DEFAULT_RATES = {
+  base: 50,
+  order: 32,
+  overtime: 0,
+}
+
+function PayRatesTab({ workerId, supabase }: { workerId: string; supabase: any }) {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  // Empty string = "no override, use default" — kept distinct from '0'
+  // (an admin might deliberately want ₹0/hr for one of these, e.g. to
+  // pause order incentive for a specific worker without deleting the row).
+  const [baseRate, setBaseRate] = useState('')
+  const [orderRate, setOrderRate] = useState('')
+  const [overtimeRate, setOvertimeRate] = useState('')
+  const [hasRow, setHasRow] = useState(false)
+
+  async function load() {
+    setLoading(true); setErr(null)
+    try {
+      const { data, error } = await supabase
+        .from('worker_pay_rates')
+        .select('base_rate_per_hour, order_rate_per_hour, overtime_rate_per_hour')
+        .eq('worker_id', workerId)
+        .maybeSingle()
+      if (error) { setErr(error.message); setLoading(false); return }
+      if (data) {
+        setHasRow(true)
+        setBaseRate(data.base_rate_per_hour != null ? String(data.base_rate_per_hour) : '')
+        setOrderRate(data.order_rate_per_hour != null ? String(data.order_rate_per_hour) : '')
+        setOvertimeRate(data.overtime_rate_per_hour != null ? String(data.overtime_rate_per_hour) : '')
+      } else {
+        setHasRow(false)
+        setBaseRate(''); setOrderRate(''); setOvertimeRate('')
+      }
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not load pay rates')
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [workerId])
+
+  function parseRateInput(v: string): number | null {
+    const t = v.trim()
+    if (t === '') return null // explicit "use default"
+    const n = Number(t)
+    return Number.isFinite(n) && n >= 0 ? n : NaN
+  }
+
+  async function save() {
+    const base = parseRateInput(baseRate)
+    const order = parseRateInput(orderRate)
+    const overtime = parseRateInput(overtimeRate)
+    if (Number.isNaN(base) || Number.isNaN(order) || Number.isNaN(overtime)) {
+      setErr('Rates must be non-negative numbers, or left blank to use the default.')
+      return
+    }
+    setSaving(true); setErr(null); setSaved(false)
+    try {
+      const { error } = await supabase.from('worker_pay_rates').upsert({
+        worker_id: workerId,
+        base_rate_per_hour: base,
+        order_rate_per_hour: order,
+        overtime_rate_per_hour: overtime,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'worker_id' })
+      if (error) { setErr(error.message); setSaving(false); return }
+      setHasRow(true)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not save pay rates')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function resetToDefaults() {
+    setSaving(true); setErr(null); setSaved(false)
+    try {
+      const { error } = await supabase.from('worker_pay_rates').delete().eq('worker_id', workerId)
+      if (error) { setErr(error.message); setSaving(false); return }
+      setHasRow(false)
+      setBaseRate(''); setOrderRate(''); setOvertimeRate('')
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) return <div className="p-8 text-center text-slate-400 text-sm">Loading pay rates…</div>
+
+  const rateField = (
+    label: string,
+    value: string,
+    setValue: (v: string) => void,
+    defaultVal: number,
+    hint: string,
+    color: string,
+  ) => (
+    <div className="rounded-xl border border-slate-200 p-4">
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-sm font-black text-slate-800">{label}</p>
+        <span className="text-[10px] font-bold text-slate-400">Default: ₹{defaultVal}/hr</span>
+      </div>
+      <p className="text-[11px] text-slate-400 mb-2">{hint}</p>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-bold text-slate-400">₹</span>
+        <input
+          type="number" min={0} step="0.5"
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          placeholder={String(defaultVal)}
+          className="flex-1 px-3 py-2 rounded-lg border border-slate-200 text-sm font-black outline-none focus:border-current"
+          style={{ color }}
+        />
+        <span className="text-xs text-slate-400">/hr</span>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="p-5 space-y-4">
+      <div className="rounded-xl bg-violet-50 border border-violet-200 px-3 py-2.5">
+        <p className="text-[11px] text-violet-700 font-semibold">
+          ⚙️ Custom rates for this worker only. Leave a field blank to use the
+          platform default shown next to it. These rates apply to all future
+          earnings calculations for this worker — past payout requests are
+          unaffected.
+        </p>
+      </div>
+
+      {err && (
+        <div className="rounded-xl bg-red-50 border border-red-200 p-3">
+          <p className="text-sm font-bold text-red-700">{err}</p>
+        </div>
+      )}
+
+      {rateField('Base pay rate', baseRate, setBaseRate, DEFAULT_RATES.base,
+        'Paid per scheduled hour, regardless of orders completed.', '#2563EB')}
+
+      {rateField('Order incentive rate', orderRate, setOrderRate, DEFAULT_RATES.order,
+        'Additional pay per scheduled hour, on top of base pay.', '#0891B2')}
+
+      {rateField('Overtime bonus rate', overtimeRate, setOvertimeRate, DEFAULT_RATES.overtime,
+        "Paid per hour worked BEYOND this worker's scheduled hours that day — automatically covers both a shift running long and any customer-paid Extra Time. Default is ₹0 (no bonus) until set here.", '#D97706')}
+
+      {saved && (
+        <div className="rounded-xl bg-green-50 border border-green-200 px-3 py-2">
+          <p className="text-xs font-bold text-green-700">✓ Saved</p>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <button onClick={save} disabled={saving}
+          className="flex-1 py-3 rounded-xl font-black text-white text-sm disabled:opacity-40"
+          style={{ background: '#0891B2' }}>
+          {saving ? 'Saving…' : 'Save rates'}
+        </button>
+        {hasRow && (
+          <button onClick={resetToDefaults} disabled={saving}
+            className="px-4 py-3 rounded-xl font-bold text-slate-600 text-sm bg-slate-100 disabled:opacity-40">
+            Reset to defaults
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
 // ═══════════════════════════════════════════════════════════════════
 // ScheduleDateRequestTab — worker-initiated DATE-SPECIFIC schedule requests
 // Reads/writes worker_schedule_date_requests + worker_schedule_dates
@@ -1889,7 +2078,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
   const todayMins    = todayNetMins(w.todaySchedule)
   const st           = statusOf(w)
 
-  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'hours'|'jobs'|'areas'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
+  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'hours'|'jobs'|'areas'|'payrates'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
   const [jobsShown, setJobsShown] = useState(10)
 
   useEffect(() => {
@@ -1904,6 +2093,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     { key: 'hours'    as const, label: 'Hours',    icon: '⏱' },
     { key: 'jobs'     as const, label: 'Jobs',     icon: '≡' },
     { key: 'areas'    as const, label: 'Areas',    icon: '📍' },
+    { key: 'payrates' as const, label: 'Pay Rates', icon: '⚙️' },
     { key: 'payouts'  as const, label: 'Payouts',  icon: '💸' },
     { key: 'earnings' as const, label: 'Earnings', icon: '₹' },
     { key: 'referrals'as const, label: 'Referrals',icon: '🎁' },
@@ -1985,10 +2175,10 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
       )}
 
       {/* ── Tabs ── */}
-      <div className="flex gap-1 px-4 pt-3 border-b border-slate-100">
+      <div className="flex gap-1 px-4 pt-3 border-b border-slate-100 overflow-x-auto">
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
-            className="relative px-3 py-2 text-xs font-bold transition-colors"
+            className="relative px-3 py-2 text-xs font-bold transition-colors flex-shrink-0 whitespace-nowrap"
             style={{ color: tab === t.key ? avatarBg : '#94A3B8' }}>
             {t.label}
             {tab === t.key && <span className="absolute left-2 right-2 -bottom-px h-0.5 rounded-full" style={{ background: avatarBg }}/>}
@@ -2134,6 +2324,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
 
         {/* ── UNIFIED TABS ── */}
         {tab === 'areas' && <AreasTab workerId={w.id} supabase={createClient()} />}
+        {tab === 'payrates' && <PayRatesTab workerId={w.id} supabase={createClient()} />}
         {tab === 'payouts' && <PayoutsTab workerId={w.id} />}
         {tab === 'earnings' && <EarningsTab workerId={w.id} />}
         {tab === 'referrals' && <ReferralsTab workerId={w.id} />}

@@ -31,7 +31,6 @@ type Worker = {
 
 type ServiceOption = { id: string; name: string; duration_minutes: number; base_price: number | null }
 
-// ── Saved-address / existing-customer lookup types ───────────────
 type SavedAddress = {
   id: string
   label: string | null
@@ -61,11 +60,6 @@ const STATUS: Record<string, { label: string; color: string; bg: string; icon: s
 }
 const STEPS = ['pending','accepted','otp_verified','in_progress','completed']
 
-// ── Phone normalization — mirrors normalizePhone() in the
-// firebase-auth edge function and normalize_phone() in SQL, so a
-// number entered here always matches what a real app login resolves
-// to. Kept permissive on partial input (doesn't force +91 while the
-// admin is still typing) — only used for the actual lookup/submit.
 function normalizePhone(raw: string): string {
   let digits = raw.replace(/\D/g, '')
   if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2)
@@ -496,11 +490,6 @@ function SlotPicker({
   )
 }
 
-// ── Existing-customer phone lookup (debounced) ────────────────────
-// Matches PhoneBookingModal's own onus: 'customer' role only, same as
-// admin_create_manual_booking's own lookup. Returns full profile +
-// ALL non-deleted saved addresses (not just default) so the admin can
-// pick whichever one the caller wants delivered to.
 function useCustomerLookup(rawPhone: string) {
   const supabase = createClient()
   const [match, setMatch] = useState<CustomerMatch | null>(null)
@@ -586,18 +575,11 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
   const [zoneChecking, setZoneChecking] = useState(false)
 
-  // ── Existing-customer auto-fill ─────────────────────────────────
   const { match: customerMatch, checking: customerChecking } = useCustomerLookup(phone)
   const [selectedAddressId, setSelectedAddressId] = useState<string>('')
   const [addingNewAddress, setAddingNewAddress] = useState(false)
-  // Tracks whether the admin has hand-edited the name field themselves
-  // after a match came back, so we don't clobber a deliberate edit if
-  // the debounce re-fires.
   const nameTouchedRef = useRef(false)
 
-  // When a customer match arrives, auto-fill name (unless the admin
-  // already typed something) and default to their default address
-  // (or their only address) rather than forcing manual entry again.
   useEffect(() => {
     if (!customerMatch) {
       setSelectedAddressId('')
@@ -618,7 +600,6 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerMatch?.id])
 
-  // Fill the address fields whenever the selected saved address changes
   useEffect(() => {
     if (!customerMatch || !selectedAddressId || addingNewAddress) return
     const addr = customerMatch.addresses.find(a => a.id === selectedAddressId)
@@ -633,7 +614,6 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAddressId, addingNewAddress])
 
-  // Clear address fields when switching into "add new address" mode
   function startNewAddress() {
     setAddingNewAddress(true)
     setSelectedAddressId('')
@@ -1868,6 +1848,7 @@ export default function AdminBookings() {
   const [showBlockModal, setShowBlockModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
+  const [pincodeParentArea, setPincodeParentArea] = useState<Record<string, string>>({})
   const dateInputRef = useRef<HTMLInputElement>(null)
   const supabase = createClient()
 
@@ -1875,13 +1856,90 @@ export default function AdminBookings() {
     .filter(b => ['pending','accepted','in_progress'].includes(b.status))
     .map(b => ({ worker_id: b.worker_id ?? '', scheduled_at: b.scheduled_at }))
 
+  // Strips a trailing directional suffix from an area name so
+  // "Vile Parle East" / "Vile Parle West" both collapse to "Vile Parle"
+  // automatically, with zero manual setup. Covers three ways a
+  // direction can show up at the end of an address's area text:
+  //   1. English words: East/West/North/South (incl. "North East").
+  //   2. Hindi/Marathi words in Devanagari: पूर्व/पश्चिम/उत्तर/दक्षिण
+  //      (same words in both languages).
+  //   3. The ENGLISH direction word merely transliterated into
+  //      Devanagari letters — e.g. "वेस्ट" is not the Hindi word for
+  //      West (that's पश्चिम), it's "West" spelled phonetically in
+  //      Devanagari script, which is common in real customer-entered
+  //      addresses (see "बोरिवली वेस्ट"). Missing this form was why
+  //      that specific case wasn't merging.
+  // All matches are anchored to the END of the string only, so a name
+  // that merely CONTAINS one of these words elsewhere is untouched
+  // (e.g. "Eastern Express Highway").
+  function stripDirectionalSuffix(name: string): string {
+    return name
+      // English words
+      .replace(/\s+(north\s*east|north\s*west|south\s*east|south\s*west|north|south|east|west)\s*$/i, '')
+      // Hindi/Marathi Devanagari words (incl. उत्तर-पूर्व style combos)
+      .replace(/[\s-]+(उत्तर[\s-]*पूर्व|उत्तर[\s-]*पश्चिम|दक्षिण[\s-]*पूर्व|दक्षिण[\s-]*पश्चिम|पूर्व|पश्चिम|उत्तर|दक्षिण)\s*$/, '')
+      // English direction words transliterated INTO Devanagari script
+      // (वेस्ट=West, ईस्ट=East, नॉर्थ=North, साउथ=South) — different
+      // from the true Hindi words above.
+      .replace(/[\s-]+(नॉर्थ[\s-]*ईस्ट|नॉर्थ[\s-]*वेस्ट|साउथ[\s-]*ईस्ट|साउथ[\s-]*वेस्ट|ईस्ट|वेस्ट|नॉर्थ|साउथ)\s*$/, '')
+      .trim()
+  }
+
+  // Canonical-name aliases: maps a Devanagari (Hindi/Marathi) area name
+  // to the SAME area's English name, so "बोरिवली" and "Borivali" merge
+  // into one group instead of showing as two separate sections just
+  // because they're written in different scripts. Stripping the
+  // directional suffix alone can't fix this — "बोरिवली" and "Borivali"
+  // remain different strings even after suffix-stripping, since they're
+  // not spelling variants of each other, they're two different scripts
+  // for the same word.
+  //
+  // This list only needs the areas actually seen in the data — add a
+  // new line here whenever a new Devanagari/English pair shows up as
+  // separate sections that should be one. Keys should be the STRIPPED
+  // (no direction suffix) Devanagari form; matching is exact, so keep
+  // spelling/spacing consistent with how it actually appears.
+  const AREA_NAME_ALIASES: Record<string, string> = {
+    'बोरिवली': 'Borivali',
+    'दहिसर': 'Dahisar',
+    'विले पार्ले': 'Vile Parle',
+    'अंधेरी': 'Andheri',
+    'मालाड': 'Malad',
+    'कांदिवली': 'Kandivali',
+    'गोरेगांव': 'Goregaon',
+    'जोगेश्वरी': 'Jogeshwari',
+    'बांद्रा': 'Bandra',
+  }
+
+  // Resolves a booking to its consolidated group name, in priority
+  // order:
+  //   1. An explicit manual override set on the pincode in Service
+  //      Areas ("Group under") — wins whenever present, for any case
+  //      the automatic rules below get wrong.
+  //   2. Strip a trailing direction suffix (English, Hindi, or
+  //      transliterated-English-in-Devanagari — see
+  //      stripDirectionalSuffix above).
+  //   3. If what's left is a KNOWN Devanagari area name, translate it
+  //      to its English canonical form via AREA_NAME_ALIASES, so it
+  //      merges with the English-named bookings for the same place.
+  //      Names not in the list are left as-is (still grouped correctly
+  //      among themselves, just not merged across scripts).
+  function resolveGroupName(b: Booking): string {
+    const manualOverride = b.pincode ? pincodeParentArea[b.pincode] : undefined
+    if (manualOverride) return manualOverride
+    const base = b.area || '—'
+    if (base === '—') return base
+    const stripped = stripDirectionalSuffix(base) || base
+    return AREA_NAME_ALIASES[stripped] ?? stripped
+  }
+
   const load = useCallback(async () => {
     const todayStr = (() => {
       const d = new Date()
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     })()
 
-    const [{ data: bd }, { data: wd }, { data: availData }, { data: activeJobs }, { data: schedDateRows }] =
+    const [{ data: bd }, { data: wd }, { data: availData }, { data: activeJobs }, { data: schedDateRows }, { data: areaRows }] =
       await Promise.all([
         supabase.from('bookings').select(
           `id,status,final_amount,base_price,discount_amount,scheduled_at,created_at,
@@ -1900,6 +1958,7 @@ export default function AdminBookings() {
         supabase.from('worker_schedule_dates')
           .select('worker_id,date,enabled,start_time,end_time,breaks')
           .gte('date', todayStr),
+        supabase.from('service_areas').select('pincode,area,parent_area').eq('is_active', true),
       ])
 
     const availMap: Record<string,boolean> = {}
@@ -1918,6 +1977,22 @@ export default function AdminBookings() {
 
     const busySet = new Set<string>()
     ;(activeJobs ?? []).forEach((b: any) => { if (b.worker_id) busySet.add(b.worker_id) })
+
+    // Only stores an entry when a REAL manual "Group under" value was
+    // set in Service Areas — deliberately does NOT fall back to
+    // a.area here. If it did, every pincode would always have a
+    // "manual override" (its own area name), which would permanently
+    // block the automatic East/West/North/South stripping in
+    // resolveGroupName() from ever running. Leaving ungrouped pincodes
+    // out of this map entirely is what lets the automatic rule kick in
+    // for them.
+    const parentAreaMap: Record<string, string> = {}
+    ;(areaRows ?? []).forEach((a: any) => {
+      if (!a.pincode) return
+      const manual = a.parent_area && String(a.parent_area).trim()
+      if (manual) parentAreaMap[a.pincode] = manual
+    })
+    setPincodeParentArea(parentAreaMap)
 
     if (bd) setBookings(bd.map((b: any) => {
       const items = (b.booking_items ?? []) as any[]
@@ -2101,8 +2176,10 @@ export default function AdminBookings() {
     { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
   const tomorrowLabel = new Date(Date.now() + 86400000).toLocaleDateString('en-IN',
     { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+  const dayAfterLabel = new Date(Date.now() + 2 * 86400000).toLocaleDateString('en-IN',
+    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
 
-  const isCustomDate = selectedDate !== 'all' && selectedDate !== todayLabel && selectedDate !== tomorrowLabel
+  const isCustomDate = selectedDate !== 'all' && selectedDate !== todayLabel && selectedDate !== tomorrowLabel && selectedDate !== dayAfterLabel
 
   function countForDate(dateLabel: string) {
     return filtered.filter(b =>
@@ -2111,21 +2188,21 @@ export default function AdminBookings() {
     ).length
   }
 
-  const allAreas = Array.from(new Set(filtered.map(b => b.area).filter(a => a && a !== '—'))).sort()
+  const allAreas = Array.from(new Set(filtered.map(b => resolveGroupName(b)).filter(a => a && a !== '—'))).sort()
 
   const dateAreaFiltered = filtered.filter(b => {
     const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
       { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
     const matchDate = selectedDate === 'all' || dateStr === selectedDate
-    const matchArea = selectedArea === 'all' || b.area === selectedArea
+    const matchArea = selectedArea === 'all' || resolveGroupName(b) === selectedArea
     return matchDate && matchArea
   })
 
   const groupedByArea: Record<string, typeof filtered> = {}
   dateAreaFiltered.forEach(b => {
-    const area = b.area || '—'
-    if (!groupedByArea[area]) groupedByArea[area] = []
-    groupedByArea[area].push(b)
+    const group = resolveGroupName(b)
+    if (!groupedByArea[group]) groupedByArea[group] = []
+    groupedByArea[group].push(b)
   })
 
   const liveCount      = bookings.filter(b => liveStatuses.includes(b.status)).length
@@ -2315,6 +2392,22 @@ export default function AdminBookings() {
             </span>
           </button>
 
+          <button
+            onClick={() => { setSelectedDate(dayAfterLabel); setSelectedArea('all') }}
+            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
+            style={{
+              background: selectedDate === dayAfterLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+              color: selectedDate === dayAfterLabel ? '#fff' : '#64748B',
+              border: `1.5px solid ${selectedDate === dayAfterLabel ? '#0891B2' : '#E2E8F0'}`,
+              boxShadow: selectedDate === dayAfterLabel ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
+            }}>
+            🟣 Day After
+            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
+              style={{ background: selectedDate === dayAfterLabel ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === dayAfterLabel ? '#fff' : '#0891B2' }}>
+              {countForDate(dayAfterLabel)}
+            </span>
+          </button>
+
           <div className="relative flex-shrink-0">
             <button
               type="button"
@@ -2379,7 +2472,7 @@ export default function AdminBookings() {
                 const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
                   { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
                 const matchDate = selectedDate === 'all' || dateStr === selectedDate
-                return matchDate && b.area === area
+                return matchDate && resolveGroupName(b) === area
               }).length
               return (
                 <button key={area}

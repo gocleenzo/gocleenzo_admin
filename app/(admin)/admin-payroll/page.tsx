@@ -41,6 +41,9 @@ type Payout = {
   order: number
   travel: number
   amount: number
+  original_amount: number | null
+  amount_adjusted_by_admin: boolean
+  adjustment_reason: string | null
   status: string
   method: string | null
   reference: string | null
@@ -88,7 +91,6 @@ export default function PayrollPage() {
   const [tab, setTab] = useState<'earnings' | 'claims' | 'referrals' | 'payouts'>('earnings')
   const [pendingCount, setPendingCount] = useState(0)
 
-  // small badge: number of payout requests awaiting action
   useEffect(() => {
     let on = true
     async function n() {
@@ -149,7 +151,6 @@ function EarningsTab() {
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Worker | null>(null)
 
-  // extra money sources (referral + tier) for the paid/pending summary
   const [refPaid, setRefPaid] = useState(0)
   const [refPend, setRefPend] = useState(0)
   const [tierPaid, setTierPaid] = useState(0)
@@ -173,7 +174,6 @@ function EarningsTab() {
     }
   }, [range])
 
-  // load referral + tier + claims + payout totals (all workers) for the summary
   const loadExtras = useCallback(async () => {
     try {
       const [refRes, tierRes, claimRes, poRes] = await Promise.all([
@@ -222,7 +222,6 @@ function EarningsTab() {
 
   return (
     <div>
-      {/* ── Paid vs Pending money summary (all four sources) ── */}
       <div className="grid grid-cols-2 gap-3 mb-4">
         <div className="rounded-xl p-4" style={{ background: 'linear-gradient(135deg,#ECFDF5,#D1FAE5)' }}>
           <p className="text-[10px] font-black uppercase tracking-wider text-green-600">Total paid out</p>
@@ -489,7 +488,7 @@ function ClaimsTab() {
   )
 }
 
-// ─────────────────────────── REFERRALS (moved from Refer & Earn page) ───────────────────────────
+// ─────────────────────────── REFERRALS ───────────────────────────
 const REF_STATUS: Record<string, { bg: string; fg: string; label: string }> = {
   joined:   { bg: '#f1f5f9', fg: '#64748b', label: 'Joined' },
   earned:   { bg: '#fef3c7', fg: '#b45309', label: 'Earned' },
@@ -621,6 +620,7 @@ const PO_STATUS: Record<string, { bg: string; fg: string; label: string }> = {
   paid:       { bg: '#dcfce7', fg: '#15803d', label: 'Paid' },
   rejected:   { bg: '#fee2e2', fg: '#b91c1c', label: 'Rejected' },
 }
+const PO_STATUS_ORDER: Array<keyof typeof PO_STATUS> = ['requested', 'approved', 'processing', 'paid', 'rejected']
 
 function PayoutsTab() {
   const [filter, setFilter] = useState<'requested' | 'approved' | 'processing' | 'paid' | 'rejected' | 'all'>('requested')
@@ -628,6 +628,17 @@ function PayoutsTab() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [detail, setDetail] = useState<Payout | null>(null)
+
+  // Editable-amount inline state
+  const [amountDraft, setAmountDraft] = useState('')
+  const [amountReason, setAmountReason] = useState('')
+  const [editingAmount, setEditingAmount] = useState(false)
+  const [amountError, setAmountError] = useState<string | null>(null)
+
+  // Free status-change controls
+  const [statusDraft, setStatusDraft] = useState<string>('')
+  const [statusReason, setStatusReason] = useState('')
+  const [statusError, setStatusError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -640,22 +651,98 @@ function PayoutsTab() {
 
   useEffect(() => { load() }, [load])
 
-  async function act(id: string, action: 'approve' | 'reject' | 'processing' | 'paid') {
-    let body: any = { id, action }
+  function openDetail(r: Payout) {
+    setDetail(r)
+    setEditingAmount(false)
+    setAmountDraft(String(r.amount))
+    setAmountReason('')
+    setAmountError(null)
+    setStatusDraft(r.status)
+    setStatusReason('')
+    setStatusError(null)
+  }
+
+  async function saveAmount(id: string) {
+    const amountNum = Number(amountDraft)
+    if (!Number.isFinite(amountNum) || amountNum < 0) {
+      setAmountError('Enter a valid non-negative amount.')
+      return
+    }
+    if (!amountReason.trim()) {
+      setAmountError('A reason is required when changing the amount.')
+      return
+    }
+    setBusy(id)
+    setAmountError(null)
+    try {
+      const res = await fetch('/api/payroll/payouts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, action: 'update_amount', amount: amountNum, reason: amountReason.trim() }),
+      })
+      const json = await res.json()
+      if (!res.ok) { setAmountError(json?.error ?? 'Could not save the amount.'); return }
+      await load()
+      setEditingAmount(false)
+      setAmountReason('')
+      setDetail(prev => prev ? {
+        ...prev,
+        amount: amountNum,
+        amount_adjusted_by_admin: true,
+        adjustment_reason: amountReason.trim(),
+        original_amount: prev.original_amount ?? prev.amount,
+      } : prev)
+    } finally { setBusy(null) }
+  }
+
+  async function saveStatus(id: string, currentStatus: string) {
+    if (!statusDraft || statusDraft === currentStatus) return
+    if (statusDraft === 'rejected' && !statusReason.trim()) {
+      setStatusError('A reason is required to reject a payout.')
+      return
+    }
+    let method: string | null = null
+    let reference: string | null = null
+    if (statusDraft === 'paid') {
+      method = window.prompt('Payment method (upi / bank / cash):', 'upi') || null
+      reference = window.prompt('Reference / txn id:') || null
+    }
+    setBusy(id)
+    setStatusError(null)
+    try {
+      const res = await fetch('/api/payroll/payouts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, action: 'set_status', status: statusDraft, reason: statusReason.trim() || null, method, reference }),
+      })
+      const json = await res.json()
+      if (!res.ok) { setStatusError(json?.error ?? 'Could not change status.'); return }
+      await load()
+      setDetail(null)
+    } finally { setBusy(null) }
+  }
+
+  async function quickAct(id: string, action: 'approve' | 'reject' | 'processing' | 'paid') {
+    let body: any = { id, action: 'set_status' }
+    const statusMap = { approve: 'approved', reject: 'rejected', processing: 'processing', paid: 'paid' } as const
+    body.status = statusMap[action]
     if (action === 'reject') {
       body.reason = window.prompt('Reason for rejection:') || null
+      if (!body.reason) return
     }
     if (action === 'paid') {
-      const method = window.prompt('Payment method (upi / bank / cash):', 'upi') || null
-      const reference = window.prompt('Reference / txn id:') || null
-      body.method = method; body.reference = reference
+      body.method = window.prompt('Payment method (upi / bank / cash):', 'upi') || null
+      body.reference = window.prompt('Reference / txn id:') || null
     }
     setBusy(id)
     try {
-      await fetch('/api/payroll/payouts', {
+      const res = await fetch('/api/payroll/payouts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}))
+        alert(json?.error ?? 'Could not update this payout.')
+        return
+      }
       await load()
       setDetail(null)
     } finally { setBusy(null) }
@@ -698,7 +785,7 @@ function PayoutsTab() {
                   return (
                     <tr key={r.id} className="hover:bg-slate-50/60">
                       <td className="px-4 py-2.5">
-                        <button onClick={() => setDetail(r)} className="text-left">
+                        <button onClick={() => openDetail(r)} className="text-left">
                           <span className="font-bold text-slate-800 hover:text-cyan-700">{r.name}</span>
                           <span className="block text-[11px] text-slate-400">{r.phone}</span>
                         </button>
@@ -706,7 +793,12 @@ function PayoutsTab() {
                       <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">
                         {fmtDate(r.from)} – {fmtDate(r.to)}
                       </td>
-                      <td className="px-3 py-2.5 text-right font-black text-slate-900">{inr(r.amount)}</td>
+                      <td className="px-3 py-2.5 text-right">
+                        <span className="font-black text-slate-900">{inr(r.amount)}</span>
+                        {r.amount_adjusted_by_admin && (
+                          <span className="block text-[10px] font-bold text-violet-600">Adjusted</span>
+                        )}
+                      </td>
                       <td className="px-3 py-2.5">
                         <span className="inline-block px-2 py-0.5 rounded-full text-[11px] font-bold"
                           style={{ background: s.bg, color: s.fg }}>{s.label}</span>
@@ -715,19 +807,19 @@ function PayoutsTab() {
                         <div className="flex gap-1.5 justify-end">
                           {r.status === 'requested' && (
                             <>
-                              <ActBtn label="Approve" color="#2563eb" busy={busy === r.id} onClick={() => act(r.id, 'approve')} />
-                              <ActBtn label="Reject" color="#dc2626" busy={busy === r.id} onClick={() => act(r.id, 'reject')} />
+                              <ActBtn label="Approve" color="#2563eb" busy={busy === r.id} onClick={() => quickAct(r.id, 'approve')} />
+                              <ActBtn label="Reject" color="#dc2626" busy={busy === r.id} onClick={() => quickAct(r.id, 'reject')} />
                             </>
                           )}
                           {r.status === 'approved' && (
-                            <ActBtn label="Mark processing" color="#4338ca" busy={busy === r.id} onClick={() => act(r.id, 'processing')} />
+                            <ActBtn label="Mark processing" color="#4338ca" busy={busy === r.id} onClick={() => quickAct(r.id, 'processing')} />
                           )}
                           {r.status === 'processing' && (
-                            <ActBtn label="Mark paid" color="#15803d" busy={busy === r.id} onClick={() => act(r.id, 'paid')} />
+                            <ActBtn label="Mark paid" color="#15803d" busy={busy === r.id} onClick={() => quickAct(r.id, 'paid')} />
                           )}
-                          {(r.status === 'paid' || r.status === 'rejected') && (
-                            <button onClick={() => setDetail(r)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600">View</button>
-                          )}
+                          <button onClick={() => openDetail(r)} className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600">
+                            {r.status === 'paid' || r.status === 'rejected' ? 'View' : 'Edit'}
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -739,7 +831,6 @@ function PayoutsTab() {
         </div>
       )}
 
-      {/* detail drawer with breakdown for cross-check */}
       {detail && (
         <div className="fixed inset-0 z-[9998] flex justify-end" onClick={() => setDetail(null)}>
           <div className="absolute inset-0 bg-black/40" />
@@ -752,11 +843,69 @@ function PayoutsTab() {
               <button onClick={() => setDetail(null)} className="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 font-bold">✕</button>
             </div>
 
-            <div className="rounded-2xl p-5 mb-4 text-white" style={{ background: 'linear-gradient(135deg,#0e7490,#06b6d4)' }}>
-              <p className="text-sm opacity-90">Requested amount</p>
-              <p className="text-3xl font-black mt-1">{inr(detail.amount)}</p>
-              <p className="text-xs opacity-80 mt-1">{fmtDate(detail.from)} – {fmtDate(detail.to)}</p>
+            <div className="rounded-2xl p-5 mb-2 text-white" style={{ background: 'linear-gradient(135deg,#0e7490,#06b6d4)' }}>
+              <div className="flex items-center justify-between">
+                <p className="text-sm opacity-90">Payout amount</p>
+                {!editingAmount && (
+                  <button
+                    onClick={() => { setEditingAmount(true); setAmountDraft(String(detail.amount)); setAmountReason(''); setAmountError(null) }}
+                    className="text-xs font-bold underline underline-offset-2 opacity-90 hover:opacity-100"
+                  >
+                    Edit
+                  </button>
+                )}
+              </div>
+
+              {editingAmount ? (
+                <div className="mt-2 space-y-2">
+                  <input
+                    type="number" min={0} step="0.01"
+                    value={amountDraft}
+                    onChange={(e) => setAmountDraft(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg text-slate-900 text-lg font-black outline-none"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Reason for changing the amount (required)"
+                    value={amountReason}
+                    onChange={(e) => setAmountReason(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg text-slate-900 text-xs outline-none"
+                  />
+                  {amountError && <p className="text-xs bg-red-500/20 rounded px-2 py-1">{amountError}</p>}
+                  <div className="flex gap-2">
+                    <button
+                      disabled={busy === detail.id}
+                      onClick={() => saveAmount(detail.id)}
+                      className="flex-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-cyan-700 disabled:opacity-50"
+                    >
+                      {busy === detail.id ? 'Saving…' : 'Save amount'}
+                    </button>
+                    <button
+                      onClick={() => { setEditingAmount(false); setAmountError(null) }}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold bg-white/20"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p className="text-3xl font-black mt-1">{inr(detail.amount)}</p>
+                  <p className="text-xs opacity-80 mt-1">{fmtDate(detail.from)} – {fmtDate(detail.to)}</p>
+                </>
+              )}
             </div>
+
+            {detail.amount_adjusted_by_admin && !editingAmount && (
+              <div className="rounded-xl bg-violet-50 border border-violet-200 px-3 py-2 mb-4">
+                <p className="text-[11px] font-bold text-violet-700">
+                  ✎ Adjusted by admin{detail.original_amount != null ? ` — originally ${inr(detail.original_amount)}` : ''}
+                </p>
+                {detail.adjustment_reason && (
+                  <p className="text-[11px] text-violet-600 mt-0.5 italic">{detail.adjustment_reason}</p>
+                )}
+              </div>
+            )}
 
             <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">Breakdown (cross-check)</p>
             <div className="space-y-2 mb-4">
@@ -769,20 +918,55 @@ function PayoutsTab() {
             {detail.method && <p className="text-sm text-slate-600">Paid via <b>{detail.method}</b>{detail.reference ? ` · ${detail.reference}` : ''}</p>}
             {detail.reject_reason && <p className="text-sm text-red-600">Rejected: {detail.reject_reason}</p>}
 
-            {/* actions */}
-            <div className="mt-5 flex flex-wrap gap-2">
-              {detail.status === 'requested' && (
-                <>
-                  <ActBtn label="Approve" color="#2563eb" busy={busy === detail.id} onClick={() => act(detail.id, 'approve')} wide />
-                  <ActBtn label="Reject" color="#dc2626" busy={busy === detail.id} onClick={() => act(detail.id, 'reject')} wide />
-                </>
+            <div className="mt-5 pt-4 border-t border-slate-100">
+              <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">Change status</p>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {PO_STATUS_ORDER.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => { setStatusDraft(s); setStatusError(null) }}
+                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all"
+                    style={{
+                      background: statusDraft === s ? PO_STATUS[s].bg : '#fff',
+                      color: statusDraft === s ? PO_STATUS[s].fg : '#64748b',
+                      borderColor: statusDraft === s ? PO_STATUS[s].fg + '40' : '#E2E8F0',
+                    }}
+                  >
+                    {PO_STATUS[s].label}
+                  </button>
+                ))}
+              </div>
+              {statusDraft === 'rejected' && (
+                <input
+                  type="text"
+                  placeholder="Reason for rejection (required)"
+                  value={statusReason}
+                  onChange={(e) => setStatusReason(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 text-xs outline-none mb-2"
+                />
               )}
-              {detail.status === 'approved' && (
-                <ActBtn label="Mark processing" color="#4338ca" busy={busy === detail.id} onClick={() => act(detail.id, 'processing')} wide />
+              {statusDraft !== 'rejected' && statusDraft !== detail.status && (
+                <input
+                  type="text"
+                  placeholder="Note about this change (optional)"
+                  value={statusReason}
+                  onChange={(e) => setStatusReason(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-200 text-xs outline-none mb-2"
+                />
               )}
-              {detail.status === 'processing' && (
-                <ActBtn label="Mark paid" color="#15803d" busy={busy === detail.id} onClick={() => act(detail.id, 'paid')} wide />
-              )}
+              {statusError && <p className="text-xs text-red-600 mb-2">{statusError}</p>}
+              <button
+                disabled={busy === detail.id || statusDraft === detail.status}
+                onClick={() => saveStatus(detail.id, detail.status)}
+                className="w-full px-3 py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40"
+                style={{ background: '#0891B2' }}
+              >
+                {busy === detail.id ? '…' : statusDraft === detail.status ? 'No change' : `Move to ${PO_STATUS[statusDraft as keyof typeof PO_STATUS]?.label ?? statusDraft}`}
+              </button>
+              <p className="text-[10px] text-slate-400 mt-2">
+                Status can be moved to any step directly — e.g. to correct a mistaken action —
+                not only the usual next step in the sequence.
+              </p>
             </div>
           </div>
         </div>
