@@ -1,80 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { GoogleAuth } from 'google-auth-library'
+import { sendFcmNotification } from '../fcm'
 
-async function getFcmAccessToken(): Promise<string | null> {
-  try {
-    const raw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY ?? '{}'
-    const serviceAccount = JSON.parse(raw)
-    if (!serviceAccount.project_id) return null
-    const auth = new GoogleAuth({
-      credentials: serviceAccount,
-      scopes: ['https://www.googleapis.com/auth/firebase.messaging'],
-    })
-    const client = await auth.getClient()
-    const tokenRes = await client.getAccessToken()
-    return tokenRes.token ?? null
-  } catch (err) {
-    console.error('Error getting FCM access token:', err)
-    return null
-  }
-}
-
-async function sendFcmNotification(
-  fcmToken: string,
-  title: string,
-  body: string,
-  data?: Record<string, string>
-): Promise<boolean> {
-  try {
-    const raw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY ?? '{}'
-    const serviceAccount = JSON.parse(raw)
-    if (!serviceAccount.project_id) return false
-
-    const accessToken = await getFcmAccessToken()
-    if (!accessToken) return false
-
-    const res = await fetch(
-      `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          message: {
-            token: fcmToken,
-            notification: { title, body },
-            data: data ?? {},
-            android: {
-              priority: 'high',
-              notification: {
-                sound: 'default',
-                click_action: 'FLUTTER_NOTIFICATION_CLICK',
-              },
-            },
-            apns: {
-              payload: { aps: { sound: 'default', badge: 1 } },
-            },
-          },
-        }),
-      }
-    )
-
-    if (!res.ok) {
-      const err = await res.json()
-      console.error('FCM send error:', err)
-      return false
-    }
-
-    console.log('FCM notification sent successfully')
-    return true
-  } catch (err) {
-    console.error('FCM error:', err)
-    return false
-  }
-}
+// Single-user, immediate notification — used by order-status triggers
+// elsewhere in the app. Unchanged behavior from before; now just calls
+// the shared sendFcmNotification helper (see ../fcm.ts) instead of a
+// local copy, so this and /api/notifications/dispatch can never
+// silently diverge in how a push actually gets sent.
 
 export async function POST(req: NextRequest) {
   try {
@@ -109,7 +41,6 @@ export async function POST(req: NextRequest) {
         booking_id: data?.booking_id ?? null,
         is_read:    false,
       })
-      console.log('Notification saved to DB')
     } catch (dbErr) {
       console.error('Failed to save notification to DB:', dbErr)
       // Don't fail the whole request if DB save fails
