@@ -24,6 +24,7 @@ type Service = {
   base_price: number | null
   original_price: number | null
   duration_minutes: number | null
+  cart_type: string | null   // ← new: 'tiered' | 'fixed' | 'hourly'
   price_1bhk: number | null
   price_2bhk: number | null
   price_3bhk: number | null
