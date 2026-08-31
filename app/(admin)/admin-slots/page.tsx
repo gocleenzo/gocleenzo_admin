@@ -31,8 +31,6 @@ const DURATION_OPTIONS = [
   { label: '60 min', value: 60 },
   { label: '90 min', value: 90 },
   { label: '120 min', value: 120 },
-  { label: '150 min', value: 150 },
-  { label: '180 min', value: 180 },
 ]
 
 function pretty12h(hhmm: string): string {
@@ -113,6 +111,39 @@ export default function AdminSlotsPage() {
 
   useEffect(() => { loadGrid() }, [loadGrid])
 
+  // ── Live updates ──────────────────────────────────────────────
+  // Two mechanisms, matching the same "stay current without a manual
+  // refresh" behavior the customer app's own slot picker has:
+  //   1. Realtime subscription — ANY change to the bookings table
+  //      (a new booking placed, one cancelled, a worker assigned, etc.)
+  //      immediately re-runs loadGrid(). Scoped to all of `bookings`
+  //      rather than filtered to this one pincode/date, since a booking
+  //      change anywhere could still affect THIS grid indirectly (e.g.
+  //      a worker's holiday/schedule change isn't itself a bookings-row
+  //      event, but a booking change is the far more common case this
+  //      page cares about) — filtering client-side would need every
+  //      possible cause covered, so it's simpler and safe to just
+  //      re-check on any bookings change and let loadGrid's own query
+  //      do the real filtering.
+  //   2. A 30-second periodic refresh as a fallback safety net, in case
+  //      a realtime event is ever missed (dropped connection, etc.) —
+  //      same interval the customer app's own screens use for their
+  //      periodic re-renders.
+  useEffect(() => {
+    const channel = supabase
+      .channel('admin-slots-bookings')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' },
+        () => { loadGrid() })
+      .subscribe()
+
+    const interval = setInterval(() => { loadGrid() }, 30000)
+
+    return () => {
+      supabase.removeChannel(channel)
+      clearInterval(interval)
+    }
+  }, [supabase, loadGrid])
+
   const availableCount = grid.filter(s => s.available).length
   const selectedAreaLabel = areas.find(a => a.pincode === selectedPincode)?.label ?? selectedPincode
 
@@ -125,6 +156,10 @@ export default function AdminSlotsPage() {
           <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">Slots</h1>
           <p className="text-xs text-slate-400 font-medium">Area-wise free slot availability</p>
         </div>
+        <span className="ml-auto flex items-center gap-1.5 text-[11px] font-bold text-cyan-700 bg-cyan-50 border border-cyan-200 px-3 py-1.5 rounded-full">
+          <span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse" />
+          Live
+        </span>
       </div>
 
       {/* Controls */}
