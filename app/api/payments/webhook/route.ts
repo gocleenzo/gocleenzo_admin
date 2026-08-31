@@ -18,11 +18,22 @@ import { NextRequest, NextResponse } from 'next/server'
 //   1. Verify this request genuinely came from Razorpay (HMAC signature
 //      over the RAW request body, using a separate Webhook Secret — NOT
 //      the same as RAZORPAY_KEY_SECRET used for order/payment API calls).
-//   2. On a payment.captured event, look up which booking ATTEMPT this
-//      payment belongs to (via the order's `receipt`, which the app
-//      already sets to its `attempt_ref` when creating the order) AND
-//      what TYPE of payment it was (via the order's `notes.type`, set
-//      by whichever screen created the order).
+//   2. On a payment.captured event, figure out which booking ATTEMPT this
+//      payment belongs to and what TYPE of payment it was. TWO possible
+//      sources for that, checked in order:
+//        a) payment.entity.notes — set directly when the payment
+//           originated from a PAYMENT LINK (see /api/payments/payment-link),
+//           since Razorpay attaches the link's notes straight onto the
+//           resulting payment object. This is the "someone else, on a
+//           different phone, paid via a Razorpay-hosted link" path.
+//        b) order.notes / order.receipt — the ORIGINAL path, for payments
+//           made through the in-app Razorpay checkout SDK, where the app
+//           itself created the order first via /api/payments/order and
+//           set notes.type + receipt=attempt_ref on it directly.
+//      Both paths converge on the exact same `type` + `attempt_ref` /
+//      `booking_id` shape, so everything downstream (which recovery RPC
+//      to call, refund-on-failure, etc.) is IDENTICAL regardless of which
+//      device/flow the money actually came from.
 //   3. Route to the matching recovery function:
 //        - 'booking'          -> complete_payment_booking_recovery
 //        - 'recurring_package'-> complete_recurring_package_recovery
@@ -34,7 +45,11 @@ import { NextRequest, NextResponse } from 'next/server'
 // IMPORTANT SETUP STEPS (do these once, outside of code):
 //   a) In Razorpay Dashboard -> Settings -> Webhooks, add a webhook
 //      pointing to https://gocleenzo-admin.vercel.app/api/payments/webhook
-//      and select the "payment.captured" event.
+//      and select BOTH the "payment.captured" event AND the
+//      "payment_link.paid" event — a payment made via a Payment Link
+//      still fires payment.captured too, but enabling payment_link.paid
+//      as well is a safe, harmless belt-and-suspenders addition (this
+//      handler treats both event names identically, see below).
 //   b) Razorpay will show you a Webhook Secret when you create it — set
 //      that value as RAZORPAY_WEBHOOK_SECRET in your environment (this is
 //      DIFFERENT from RAZORPAY_KEY_SECRET already used elsewhere).
@@ -50,7 +65,9 @@ import { NextRequest, NextResponse } from 'next/server'
 //      either, which this webhook cannot recover (see the `!orderId`
 //      check below). "Orderless" checkout (amount-only, no order_id)
 //      is what caused extra-time payments to be unrecoverable before
-//      this was fixed — always create a real order first.
+//      this was fixed — always create a real order first. Payment
+//      Links are exempt from this — Razorpay auto-creates the
+//      underlying order for you when a link is created.
 // ============================================================================
 
 const razorpay = new Razorpay({
@@ -95,10 +112,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  // Only act on captured payments — ignore every other event type
-  // (order.paid, refund.processed, etc.) that Razorpay may also send to
-  // this same endpoint depending on what's selected in the dashboard.
-  if (payload?.event !== 'payment.captured') {
+  // Accept both event names — a Payment Link payment fires
+  // 'payment_link.paid' in addition to the normal 'payment.captured', and
+  // in both cases the actual payment entity lives at the same
+  // payload.payload.payment.entity path. Everything else this endpoint
+  // might receive (order.paid, refund.processed, etc., depending on what
+  // else is selected in the dashboard) is ignored.
+  if (payload?.event !== 'payment.captured' && payload?.event !== 'payment_link.paid') {
     return NextResponse.json({ received: true, ignored: true })
   }
 
@@ -109,36 +129,49 @@ export async function POST(req: NextRequest) {
   if (!paymentId || !orderId) {
     // See setup note (d) above — this means whatever screen triggered
     // this payment opened Razorpay checkout WITHOUT first creating a
-    // real order via /api/payments/order. There is nothing this
-    // webhook can recover without an order_id to look notes/receipt
-    // up on. Fix the client flow rather than this endpoint.
-    console.error('Webhook: payment.captured event missing payment id or order id', payload)
+    // real order via /api/payments/order (or, for a Payment Link, that
+    // Razorpay somehow didn't attach an order_id, which shouldn't
+    // normally happen). There is nothing this webhook can recover
+    // without an order_id to look notes/receipt up on.
+    console.error('Webhook: payment event missing payment id or order id', payload)
     return NextResponse.json({ received: true, error: 'Malformed payload' })
   }
 
   try {
-    const order = await razorpay.orders.fetch(orderId)
-
-    // The order's notes carry a `type` field set by the client at
-    // checkout — 'recurring_package' for the weekly-package flow,
-    // 'extra_time' for an in-progress booking's extra-time add-on,
-    // absent/other for a normal single booking. This determines which
-    // recovery function (and which identifying field on the order) to use.
-    const orderType = (order.notes?.type as string | undefined) ?? 'booking'
-
     const supabase = supabaseAdmin()
+
+    // ── Identify this payment: Payment Link notes first, order second ──
+    // A Payment-Link-originated payment carries its own notes directly on
+    // the PAYMENT object (set at link-creation time in
+    // /api/payments/payment-link) — checking that first means we often
+    // don't even need to fetch the order at all for that path. Normal
+    // in-app checkout payments have no useful notes on the payment
+    // itself, so this falls through to fetching the order exactly as
+    // before.
+    const paymentNotes = (payment?.notes ?? {}) as Record<string, string>
+    let orderType   = paymentNotes.type as string | undefined
+    let attemptRef  = paymentNotes.attempt_ref as string | undefined
+    let bookingIdFromNotes = paymentNotes.booking_id as string | undefined
+
+    if (!orderType) {
+      const order = await razorpay.orders.fetch(orderId)
+      orderType = (order.notes?.type as string | undefined) ?? 'booking'
+      attemptRef = attemptRef ?? (order.receipt as string | undefined)
+      bookingIdFromNotes = bookingIdFromNotes ?? (order.notes?.booking_id as string | undefined)
+    }
 
     if (orderType === 'extra_time') {
       // Extra-time payments don't use the pending_payment_bookings
       // draft-table pattern the other two flows do — the booking
       // ALREADY EXISTS (it's mid-service), we're just confirming its
-      // extra-time fields. Identified by notes.booking_id, set by the
-      // Flutter app when creating the order (see
-      // BookingDetailScreen._startExtraTimePayment).
-      const bookingId = order.notes?.booking_id as string | undefined
+      // extra-time fields. Identified by booking_id, set either in the
+      // order's notes (in-app checkout) or the payment's notes (payment
+      // link) — see BookingDetailScreen._startExtraTimePayment and
+      // _sendExtraTimePaymentLink respectively.
+      const bookingId = bookingIdFromNotes
 
       if (!bookingId) {
-        console.warn(`Webhook: extra_time order ${orderId} has no notes.booking_id — nothing to recover`)
+        console.warn(`Webhook: extra_time payment ${paymentId} has no booking_id in notes — nothing to recover`)
         return NextResponse.json({ received: true, action: 'no_booking_id' })
       }
 
@@ -158,15 +191,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ received: true, action: result?.action })
     }
 
-    // ── 'booking' / 'recurring_package' — original attempt_ref flow ──
-    // The order's `receipt` field is exactly the `attempt_ref` the app
-    // set when it originally created this order — this is how we find
-    // which booking attempt this payment belongs to, without needing to
-    // add anything extra to the order-creation call itself.
-    const attemptRef = order.receipt
-
+    // ── 'booking' / 'recurring_package' — attempt_ref flow ──
+    // attempt_ref is either straight from the payment's own notes
+    // (payment link) or the order's receipt field (in-app checkout,
+    // where the app set receipt=attempt_ref when creating the order).
     if (!attemptRef) {
-      console.warn(`Webhook: order ${orderId} has no receipt/attempt_ref — nothing to recover`)
+      console.warn(`Webhook: payment ${paymentId} (order ${orderId}) has no attempt_ref — nothing to recover`)
       return NextResponse.json({ received: true, action: 'no_attempt_ref' })
     }
 
