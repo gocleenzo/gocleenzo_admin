@@ -17,6 +17,14 @@ type LiveWorker = {
   is_available: boolean
   is_busy: boolean
   schedule: WeekSchedule | null
+  // NEW — a genuine time-overlap check against THIS booking's own
+  // scheduled window (see live_workers_for_booking() SQL), separate
+  // from is_busy (which only ever meant "in_progress right now").
+  // Warn-only: never filters a worker out of the list or blocks
+  // selection — admin can still choose a conflicted worker if they
+  // know something the system doesn't.
+  has_time_conflict: boolean
+  conflict_detail: string | null
 }
 type Customer = { lat: number; lng: number; area: string; city: string }
 
@@ -29,6 +37,7 @@ function workerStatus(w: LiveWorker): { key: string; color: string; label: strin
 
 const SELECTED_COLOR = '#2563EB'
 const CUSTOMER_COLOR = '#DC2626'
+const CONFLICT_COLOR = '#DC2626'
 
 // Attractive Google Maps style
 const MAP_STYLES: google.maps.MapTypeStyle[] = [
@@ -160,6 +169,7 @@ export default function AssignMap({
           <circle cx="20" cy="19" r="11" fill="white" opacity="0.95"/>
           <text x="20" y="24" text-anchor="middle" font-size="13" font-weight="900" fill="${color}">${i + 1}</text>
           ${selected ? `<circle cx="33" cy="7" r="7" fill="#22C55E"/><text x="33" y="11" text-anchor="middle" font-size="9" fill="white">✓</text>` : ''}
+          ${w.has_time_conflict ? `<circle cx="7" cy="7" r="7" fill="${CONFLICT_COLOR}"/><text x="7" y="11" text-anchor="middle" font-size="10" fill="white" font-weight="900">!</text>` : ''}
         </svg>
       `
 
@@ -185,6 +195,7 @@ export default function AssignMap({
           </div>
           ${ago ? `<div style="margin-top:4px;font-size:10px;color:#94A3B8">Updated ${ago}</div>` : ''}
           ${w.is_verified ? `<div style="margin-top:4px;font-size:10px;color:#059669;font-weight:700">✓ Verified worker</div>` : ''}
+          ${w.has_time_conflict ? `<div style="margin-top:6px;padding:4px 8px;background:#FEE2E2;border-radius:6px;font-size:10px;font-weight:700;color:#DC2626">⚠️ ${w.conflict_detail ?? 'Already booked for another job at this time'}</div>` : ''}
         </div>
       `
 
@@ -193,7 +204,7 @@ export default function AssignMap({
         m = new google.maps.Marker({
           position: { lat: w.current_lat, lng: w.current_lng },
           map, icon,
-          title: `${w.full_name} — ${st.label} — ${w.distance_km.toFixed(1)} km`,
+          title: `${w.full_name} — ${st.label} — ${w.distance_km.toFixed(1)} km${w.has_time_conflict ? ' — ⚠️ time conflict' : ''}`,
           zIndex: selected ? 100 : 10,
           animation: google.maps.Animation.DROP,
         })
@@ -374,6 +385,9 @@ export default function AssignMap({
         <span className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-full border-2 border-white shadow-sm" style={{ background: SELECTED_COLOR }}/> Selected
         </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-full border-2 border-white shadow-sm flex items-center justify-center text-[8px] font-black text-white" style={{ background: CONFLICT_COLOR }}>!</span> Time conflict
+        </span>
         <button onClick={load}
           className="ml-auto flex items-center gap-1 text-[10px] font-bold text-cyan-600 hover:text-cyan-700 transition-colors">
           ↻ Refresh
@@ -409,7 +423,9 @@ export default function AssignMap({
               className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-all ${
                 selected
                   ? 'bg-blue-50 border-l-2 border-blue-500'
-                  : 'hover:bg-slate-50 border-l-2 border-transparent'
+                  : w.has_time_conflict
+                    ? 'bg-red-50/40 hover:bg-red-50 border-l-2 border-transparent'
+                    : 'hover:bg-slate-50 border-l-2 border-transparent'
               }`}>
               {/* Rank badge */}
               <div className="w-7 h-7 rounded-xl flex items-center justify-center text-[11px] font-black flex-shrink-0 shadow-sm"
@@ -431,6 +447,7 @@ export default function AssignMap({
                     {w.full_name}
                   </p>
                   {w.is_verified && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 flex-shrink-0">✓ Verified</span>}
+                  {w.has_time_conflict && <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 flex-shrink-0">⚠️ Conflict</span>}
                 </div>
                 <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
                   <span style={{ color: st.color, fontWeight: 700 }}>{st.emoji} {st.label}</span>
@@ -438,6 +455,11 @@ export default function AssignMap({
                   <span>{w.phone}</span>
                   {ago && <><span className="text-slate-300">·</span><span>{ago}</span></>}
                 </p>
+                {w.has_time_conflict && w.conflict_detail && (
+                  <p className="text-[10.5px] font-semibold text-red-600 mt-0.5">
+                    ⚠️ {w.conflict_detail}
+                  </p>
+                )}
               </div>
               {/* Distance */}
               <div className="text-right flex-shrink-0">

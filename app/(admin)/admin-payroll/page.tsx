@@ -364,7 +364,7 @@ function EarningsTab() {
             </div>
             <div className="space-y-2">
               <BreakRow label="Base pay" sub={`₹50/hr × ${selected.shiftHours.toFixed(2)}h shift`} amt={selected.base} color="#2563eb" />
-              <BreakRow label="Order incentive" sub={`₹32/hr × ${selected.orderHours.toFixed(2)}h on orders`} amt={selected.order} color="#0891b2" />
+                <BreakRow label="Order incentive" sub={`₹32/hr × ${selected.orderHours.toFixed(2)}h booked service (incl. extra time)`} amt={selected.order} color="#0891b2" />
               <BreakRow label="Travel incentive" sub={`${selected.travelDays} day(s) approved`} amt={selected.travel} color="#d97706" />
             </div>
             <p className="text-[11px] text-slate-400 mt-4">For this worker&apos;s full paid/pending money split across all sources, open their profile in Workers → Earnings tab.</p>
@@ -910,7 +910,7 @@ function PayoutsTab() {
             <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">Breakdown (cross-check)</p>
             <div className="space-y-2 mb-4">
               <BreakRow label="Base pay" sub="₹50/hr × scheduled hours" amt={detail.base} color="#2563eb" />
-              <BreakRow label="Order incentive" sub="₹32/hr on completed orders" amt={detail.order} color="#0891b2" />
+                            <BreakRow label="Order incentive" sub="₹32/hr × booked service duration + extra time (not scheduled hours)" amt={detail.order} color="#0891b2" />
               <BreakRow label="Travel incentive" sub="approved claims" amt={detail.travel} color="#d97706" />
             </div>
 
