@@ -40,6 +40,142 @@ function isBhkPriced(s: Service): boolean {
   return s.price_1bhk != null || s.price_2bhk != null || s.price_3bhk != null
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Service Areas section — inside EditServiceModal. A service with
+// ZERO pincodes assigned is unavailable in EVERY area (opposite
+// default from worker_pincodes) — this section makes that state
+// visible and lets an admin manage which pincodes this specific
+// service is actually offered in.
+// ═══════════════════════════════════════════════════════════════
+function ServiceAreasSection({ serviceId, supabase }: { serviceId: string; supabase: any }) {
+  const [pincodes, setPincodes] = useState<{ id: string; pincode: string }[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [input, setInput] = useState('')
+  const [adding, setAdding] = useState(false)
+
+  async function load() {
+    setLoading(true); setErr(null)
+    try {
+      const { data, error } = await supabase
+        .from('service_pincodes')
+        .select('id, pincode')
+        .eq('service_id', serviceId)
+        .order('pincode', { ascending: true })
+      if (error) { setErr(error.message); setLoading(false); return }
+      setPincodes(data ?? [])
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not load service areas')
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [serviceId])
+
+  function normalizePincode(raw: string): string | null {
+    const trimmed = raw.trim()
+    if (!/^\d{6}$/.test(trimmed)) return null
+    return trimmed
+  }
+
+  async function addPincode() {
+    const clean = normalizePincode(input)
+    if (!clean) { setErr('Enter a valid 6-digit pincode'); return }
+    if (pincodes.some(p => p.pincode === clean)) {
+      setErr('This pincode is already enabled for this service')
+      return
+    }
+    setAdding(true); setErr(null)
+    try {
+      const { data, error } = await supabase
+        .from('service_pincodes')
+        .insert({ service_id: serviceId, pincode: clean })
+        .select('id, pincode')
+        .single()
+      if (error) { setErr(error.message); setAdding(false); return }
+      setPincodes(prev => [...prev, data].sort((a, b) => a.pincode.localeCompare(b.pincode)))
+      setInput('')
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not add pincode')
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  async function removePincode(id: string) {
+    setBusy(id); setErr(null)
+    try {
+      const { error } = await supabase.from('service_pincodes').delete().eq('id', id)
+      if (error) { setErr(error.message); setBusy(null); return }
+      setPincodes(prev => prev.filter(p => p.id !== id))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (loading) return <div className="py-6 text-center text-slate-400 text-sm">Loading areas…</div>
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-xl px-3 py-2.5"
+        style={{
+          background: pincodes.length === 0 ? '#FEF2F2' : '#ECFEFF',
+          border: `1px solid ${pincodes.length === 0 ? '#FECACA' : '#CFFAFE'}`,
+        }}>
+        <p className="text-[11px] font-semibold" style={{ color: pincodes.length === 0 ? '#DC2626' : '#0891B2' }}>
+          {pincodes.length === 0
+            ? '⚠️ No pincodes enabled — this service is currently unavailable to every customer.'
+            : `📍 Available in ${pincodes.length} pincode${pincodes.length === 1 ? '' : 's'} — customers outside these areas won't see this service.`}
+        </p>
+      </div>
+
+      {err && (
+        <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+          <p className="text-xs font-bold text-red-600">{err}</p>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          onKeyDown={e => { if (e.key === 'Enter') addPincode() }}
+          placeholder="e.g. 400056"
+          inputMode="numeric"
+          maxLength={6}
+          className="flex-1 px-4 py-2.5 rounded-xl text-sm font-mono font-bold text-slate-800 outline-none bg-slate-50 border border-slate-200 placeholder-slate-300 focus:border-cyan-400"
+        />
+        <button
+          onClick={addPincode}
+          disabled={adding || input.length !== 6}
+          className="px-4 py-2.5 rounded-xl text-sm font-black text-white disabled:opacity-40"
+          style={{ background: '#0891B2' }}
+        >
+          {adding ? '…' : '+ Add'}
+        </button>
+      </div>
+
+      {pincodes.length > 0 && (
+        <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 max-h-48 overflow-y-auto">
+          {pincodes.map(p => (
+            <div key={p.id} className="flex items-center justify-between px-3 py-2">
+              <span className="text-sm font-mono font-bold text-slate-800">{p.pincode}</span>
+              <button
+                disabled={busy === p.id}
+                onClick={() => removePincode(p.id)}
+                className="text-slate-400 hover:text-red-600 text-xs px-2 disabled:opacity-50"
+              >
+                {busy === p.id ? '…' : '✕ Remove'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function AdminServices() {
   const [services, setServices] = useState<Service[]>([])
   const [loading, setLoading] = useState(true)
@@ -372,6 +508,13 @@ function EditServiceModal({ service, onClose, onSaved }: {
               )}
             </>
           )}
+
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
+              Service Areas
+            </p>
+            <ServiceAreasSection serviceId={service.id} supabase={supabase} />
+          </div>
 
           <div className="flex items-center justify-between px-4 py-3 rounded-xl bg-slate-50 border border-slate-200">
             <div>

@@ -150,6 +150,14 @@ function EarningsTab() {
   const [grand, setGrand] = useState<Grand | null>(null)
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Worker | null>(null)
+  // Bonus (referral + tier, earned+paid, lifetime) keyed by worker_id —
+  // computed ONCE for every worker in the current list, right after
+  // `workers` loads. Reused both for the new "Bonus" table column AND
+  // the detail drawer, so a worker with no referral/tier reward shows
+  // nothing in either place, and there's only one round of fetches
+  // instead of a separate one every time a row is clicked.
+  const [bonusByWorker, setBonusByWorker] = useState<Record<string, number>>({})
+  const [bonusLoading, setBonusLoading] = useState(false)
 
   const [refPaid, setRefPaid] = useState(0)
   const [refPend, setRefPend] = useState(0)
@@ -211,6 +219,56 @@ function EarningsTab() {
   useEffect(() => { load() }, [load])
   useEffect(() => { loadExtras() }, [loadExtras])
 
+  // Fetch referral+tier bonus for EVERY worker in the current list, once,
+  // right after `workers` loads — not per row click. Each worker's
+  // referral/tier rows are fetched in parallel via the existing
+  // worker_id-filtered endpoints; a worker with zero earned+paid
+  // referral/tier amount simply doesn't appear in the resulting map
+  // (checked with `?? 0` everywhere it's read), so they show nothing
+  // in the new Bonus column or the drawer — only workers who've
+  // actually earned one get a value.
+  useEffect(() => {
+    if (workers.length === 0) { setBonusByWorker({}); return }
+    let cancelled = false
+    setBonusLoading(true)
+    ;(async () => {
+      try {
+        const entries = await Promise.all(workers.map(async (w) => {
+          try {
+            const [refRes, tierRes] = await Promise.all([
+              fetch(`/api/referrals?status=all&worker_id=${w.worker_id}`, { cache: 'no-store' })
+                .then(r => r.json()).catch(() => null),
+              fetch(`/api/tiers?status=all&worker_id=${w.worker_id}`, { cache: 'no-store' })
+                .then(r => r.json()).catch(() => null),
+            ])
+            const refs = refRes?.referrals ?? refRes?.rows ?? []
+            const refTotal = refs
+              .filter((r: any) => r.status === 'earned' || r.status === 'paid')
+              .reduce((s: number, r: any) => s + Number(r.amount ?? 0), 0)
+
+            const tiers = tierRes?.rewards ?? tierRes?.rows ?? []
+            const tierTotal = tiers
+              .filter((t: any) => t.status === 'earned' || t.status === 'paid')
+              .reduce((s: number, t: any) => s + Number(t.amount ?? 0), 0)
+
+            return [w.worker_id, refTotal + tierTotal] as const
+          } catch {
+            return [w.worker_id, 0] as const
+          }
+        }))
+        if (cancelled) return
+        const map: Record<string, number> = {}
+        for (const [id, amt] of entries) {
+          if (amt > 0) map[id] = amt
+        }
+        setBonusByWorker(map)
+      } finally {
+        if (!cancelled) setBonusLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [workers])
+
   function choosePreset(p: 'week' | 'month' | 'custom') {
     setPreset(p)
     if (p === 'week') setRange(weekRange())
@@ -238,7 +296,7 @@ function EarningsTab() {
         </div>
         {[
           ['Base + Order pay', poPaidBO, poPendBO, '#0891B2'],
-          ['Travel expense', travelPaid, travelPend, '#D97706'],
+          ['Travel allowance', travelPaid, travelPend, '#D97706'],
           ['Refer & Earn', refPaid, refPend, '#7C3AED'],
           ['Tier bonus', tierPaid, tierPend, '#059669'],
         ].map(([label, paid, pend, color]) => (
@@ -311,33 +369,46 @@ function EarningsTab() {
                 <th className="px-3 py-2.5 font-bold text-right">Base</th>
                 <th className="px-3 py-2.5 font-bold text-right">Order</th>
                 <th className="px-3 py-2.5 font-bold text-right">Travel</th>
+                <th className="px-3 py-2.5 font-bold text-right">Bonus</th>
                 <th className="px-4 py-2.5 font-bold text-right">Total</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
-                <tr><td colSpan={5} className="px-4 py-10 text-center text-slate-400">Loading…</td></tr>
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-400">Loading…</td></tr>
               ) : workers.length === 0 ? (
-                <tr><td colSpan={5} className="px-4 py-10 text-center text-slate-400">No workers found.</td></tr>
+                <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-400">No workers found.</td></tr>
               ) : (
-                workers.map((w) => (
-                  <tr key={w.worker_id} onClick={() => setSelected(w)}
-                    className="hover:bg-cyan-50/50 cursor-pointer transition-colors">
-                    <td className="px-4 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-800">{w.name}</span>
-                        {w.verified && <span title="Verified" className="text-cyan-600">✓</span>}
-                      </div>
-                      <span className="text-[11px] text-slate-400">
-                        {w.shiftHours.toFixed(1)}h shift · {w.orderHours.toFixed(1)}h orders
-                      </span>
-                    </td>
-                    <td className="px-3 py-2.5 text-right text-slate-600">{inr(w.base)}</td>
-                    <td className="px-3 py-2.5 text-right text-slate-600">{inr(w.order)}</td>
-                    <td className="px-3 py-2.5 text-right text-slate-600">{inr(w.travel)}</td>
-                    <td className="px-4 py-2.5 text-right font-black text-slate-900">{inr(w.total)}</td>
-                  </tr>
-                ))
+                workers.map((w) => {
+                  const bonus = bonusByWorker[w.worker_id] ?? 0
+                  return (
+                    <tr key={w.worker_id} onClick={() => setSelected(w)}
+                      className="hover:bg-cyan-50/50 cursor-pointer transition-colors">
+                      <td className="px-4 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-slate-800">{w.name}</span>
+                          {w.verified && <span title="Verified" className="text-cyan-600">✓</span>}
+                        </div>
+                        <span className="text-[11px] text-slate-400">
+                          {w.shiftHours.toFixed(1)}h shift · {w.orderHours.toFixed(1)}h orders
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5 text-right text-slate-600">{inr(w.base)}</td>
+                      <td className="px-3 py-2.5 text-right text-slate-600">{inr(w.order)}</td>
+                      <td className="px-3 py-2.5 text-right text-slate-600">{inr(w.travel)}</td>
+                      <td className="px-3 py-2.5 text-right">
+                        {bonusLoading ? (
+                          <span className="text-slate-300">…</span>
+                        ) : bonus > 0 ? (
+                          <span className="font-bold text-violet-600">{inr(bonus)}</span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-black text-slate-900">{inr(w.total + bonus)}</td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>
@@ -359,15 +430,24 @@ function EarningsTab() {
             </div>
             <div className="rounded-2xl p-5 mb-4 text-white" style={{ background: 'linear-gradient(135deg,#0e7490,#06b6d4)' }}>
               <p className="text-sm opacity-90">Total earnings</p>
-              <p className="text-3xl font-black mt-1">{inr(selected.total)}</p>
+              <p className="text-3xl font-black mt-1">
+                {inr(selected.total + (bonusByWorker[selected.worker_id] ?? 0))}
+              </p>
               <p className="text-xs opacity-80 mt-1">{range.from} → {range.to}</p>
             </div>
             <div className="space-y-2">
               <BreakRow label="Base pay" sub={`₹50/hr × ${selected.shiftHours.toFixed(2)}h shift`} amt={selected.base} color="#2563eb" />
-                <BreakRow label="Order incentive" sub={`₹32/hr × ${selected.orderHours.toFixed(2)}h booked service (incl. extra time)`} amt={selected.order} color="#0891b2" />
-              <BreakRow label="Travel incentive" sub={`${selected.travelDays} day(s) approved`} amt={selected.travel} color="#d97706" />
+              <BreakRow label="Order incentive" sub={`₹32/hr × ${selected.orderHours.toFixed(2)}h booked service (incl. extra time)`} amt={selected.order} color="#0891b2" />
+              <BreakRow label="Travel allowance" sub={`Automatic — ${selected.travelDays} scheduled day(s) completed`} amt={selected.travel} color="#d97706" />
+              {bonusLoading ? (
+                <div className="rounded-xl border border-slate-200 p-3 text-center text-xs text-slate-400">
+                  Loading bonus…
+                </div>
+              ) : (bonusByWorker[selected.worker_id] ?? 0) > 0 && (
+                <BreakRow label="Bonus" sub="Refer & Earn + Tier bonus (earned + paid)" amt={bonusByWorker[selected.worker_id]} color="#7c3aed" />
+              )}
             </div>
-            <p className="text-[11px] text-slate-400 mt-4">For this worker&apos;s full paid/pending money split across all sources, open their profile in Workers → Earnings tab.</p>
+            <p className="text-[11px] text-slate-400 mt-4">Travel allowance is now automatic — no claim submission needed. The Bonus amount shown here covers this worker&apos;s full lifetime earned+paid referral and tier total, not just this date range.</p>
           </div>
         </div>
       )}
@@ -911,7 +991,7 @@ function PayoutsTab() {
             <div className="space-y-2 mb-4">
               <BreakRow label="Base pay" sub="₹50/hr × scheduled hours" amt={detail.base} color="#2563eb" />
                             <BreakRow label="Order incentive" sub="₹32/hr × booked service duration + extra time (not scheduled hours)" amt={detail.order} color="#0891b2" />
-              <BreakRow label="Travel incentive" sub="approved claims" amt={detail.travel} color="#d97706" />
+              <BreakRow label="Travel allowance" sub="automatic — no claim submission" amt={detail.travel} color="#d97706" />
             </div>
 
             {detail.note && <p className="text-sm text-slate-600 mb-3">Note: <span className="italic">{detail.note}</span></p>}

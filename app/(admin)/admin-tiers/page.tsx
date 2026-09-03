@@ -74,7 +74,7 @@ export default function AdminTiersPage() {
     <div className="p-4 md:p-6 max-w-6xl mx-auto">
       <div className="mb-5">
         <h1 className="text-2xl font-black text-slate-900">Worker Tiers</h1>
-        <p className="text-sm text-slate-500">Set thresholds &amp; bonuses, and pay tier rewards</p>
+        <p className="text-sm text-slate-500">Set thresholds &amp; bonuses, and confirm tier rewards</p>
       </div>
 
       {/* config editor */}
@@ -108,11 +108,11 @@ export default function AdminTiersPage() {
       {/* totals */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
         <div className="rounded-xl bg-white border border-slate-200 p-4">
-          <p className="text-[11px] font-bold text-slate-400 uppercase">Bonuses to pay</p>
+          <p className="text-[11px] font-bold text-slate-400 uppercase">Bonuses to confirm</p>
           <p className="text-xl font-black text-green-600 mt-1">{inr(totals.earned)}</p>
         </div>
         <div className="rounded-xl bg-white border border-slate-200 p-4">
-          <p className="text-[11px] font-bold text-slate-400 uppercase">Total paid</p>
+          <p className="text-[11px] font-bold text-slate-400 uppercase">Total confirmed</p>
           <p className="text-xl font-black text-blue-600 mt-1">{inr(totals.paid)}</p>
         </div>
         <div className="rounded-xl bg-white border border-slate-200 p-4">
@@ -178,7 +178,7 @@ export default function AdminTiersPage() {
                           <div className="flex gap-1.5 justify-end">
                             <button disabled={busy === r.id} onClick={() => act(r.id, 'pay')}
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50" style={{ background: '#16a34a' }}>
-                              Mark paid
+                              Confirm
                             </button>
                             <button disabled={busy === r.id} onClick={() => act(r.id, 'reject')}
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50" style={{ background: '#dc2626' }}>
