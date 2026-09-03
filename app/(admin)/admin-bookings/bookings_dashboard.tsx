@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
 import RecurringPackageBadge from './recurring_package_badge'
+import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 
 type BookedService = { serviceId: string | null; name: string; qty: number; unit_price: number }
 
@@ -41,6 +42,8 @@ type SavedAddress = {
   full_address: string | null
   pincode: string | null
   is_default: boolean
+  latitude: number | null
+  longitude: number | null
 }
 type CustomerMatch = {
   id: string
@@ -524,7 +527,7 @@ function useCustomerLookup(rawPhone: string) {
 
       const { data: addrRows } = await supabase
         .from('addresses')
-        .select('id,label,flat_no,building,area,city,full_address,pincode,is_default')
+        .select('id,label,flat_no,building,area,city,full_address,pincode,is_default,latitude,longitude')
         .eq('user_id', userRow.id)
         .eq('is_deleted', false)
         .order('is_default', { ascending: false })
@@ -567,6 +570,8 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   const [area, setArea] = useState('')
   const [city, setCity] = useState('')
   const [pincode, setPincode] = useState('')
+  const [latitude, setLatitude] = useState<number | null>(null)
+  const [longitude, setLongitude] = useState<number | null>(null)
   const [notes, setNotes] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -610,6 +615,8 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
     setArea(addr.area ?? '')
     setCity(addr.city ?? '')
     setPincode(addr.pincode ?? '')
+    setLatitude(addr.latitude ?? null)
+    setLongitude(addr.longitude ?? null)
     setScheduledIso('')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAddressId, addingNewAddress])
@@ -618,7 +625,17 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
     setAddingNewAddress(true)
     setSelectedAddressId('')
     setFlatNo(''); setBuilding(''); setFullAddress(''); setArea(''); setCity(''); setPincode('')
+    setLatitude(null); setLongitude(null)
     setScheduledIso('')
+  }
+
+  function handleMapPick(picked: PickedAddress) {
+    setLatitude(picked.lat)
+    setLongitude(picked.lng)
+    if (picked.fullAddress) setFullAddress(picked.fullAddress)
+    if (picked.area) setArea(picked.area)
+    if (picked.city) setCity(picked.city)
+    if (picked.pincode) setPincode(picked.pincode)
   }
 
   useEffect(() => {
@@ -680,6 +697,8 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
         p_city: city.trim() || null,
         p_pincode: pincode.trim(),
         p_special_instructions: notes.trim() || null,
+        p_latitude: latitude,
+        p_longitude: longitude,
       })
       if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
       if (!data?.success) {
@@ -861,6 +880,13 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
                 </div>
               ) : (
                 <>
+                  <div className="mb-3">
+                    <AddressMapPicker
+                      onPick={handleMapPick}
+                      initialLat={latitude}
+                      initialLng={longitude}
+                    />
+                  </div>
                   <div className="grid grid-cols-2 gap-3 mb-3">
                     <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
                       className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
@@ -958,6 +984,8 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
   const [area, setArea] = useState(booking.area ?? '')
   const [city, setCity] = useState(booking.city ?? '')
   const [pincode, setPincode] = useState(booking.pincode ?? '')
+  const [latitude, setLatitude] = useState<number | null>(booking.latitude ?? null)
+  const [longitude, setLongitude] = useState<number | null>(booking.longitude ?? null)
   const [notes, setNotes] = useState(
     (booking.special_instructions ?? '')
       .replace(/\s*\[Phone booking (created|edited) by admin\]/g, '')
@@ -969,6 +997,15 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
 
   const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
   const [zoneChecking, setZoneChecking] = useState(false)
+
+  function handleMapPick(picked: PickedAddress) {
+    setLatitude(picked.lat)
+    setLongitude(picked.lng)
+    if (picked.fullAddress) setFullAddress(picked.fullAddress)
+    if (picked.area) setArea(picked.area)
+    if (picked.city) setCity(picked.city)
+    if (picked.pincode) setPincode(picked.pincode)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -1030,6 +1067,8 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
         p_city: city.trim() || null,
         p_pincode: pincode.trim(),
         p_special_instructions: notes.trim() || null,
+        p_latitude: latitude,
+        p_longitude: longitude,
       })
       if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
       if (!data?.success) {
@@ -1137,6 +1176,13 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
 
             <div>
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Address</p>
+              <div className="mb-3">
+                <AddressMapPicker
+                  onPick={handleMapPick}
+                  initialLat={latitude}
+                  initialLng={longitude}
+                />
+              </div>
               <div className="grid grid-cols-2 gap-3 mb-3">
                 <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
                   className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
@@ -1586,11 +1632,6 @@ function Drawer({
 
           {b.status === 'in_progress' && (
             <button onClick={() => {
-              // Marking complete is effectively irreversible-feeling —
-              // it stops the timer, marks payment as paid, AND sends the
-              // customer a "Cleaning Complete" notification immediately.
-              // A stray tap here previously had zero confirmation before
-              // any of that fired.
               if (!window.confirm(
                 `Mark "${b.service_name}" for ${b.customer} as complete?\n\n` +
                 'This will stop the timer, mark payment as paid, and notify the customer immediately.'
@@ -1809,11 +1850,6 @@ function Drawer({
                   <span className="text-sm text-slate-800 font-medium">{r.value}</span>
                 </div>
               ))}
-              {/* Full address — was previously squeezed into a single
-                  "area, city" line above, which dropped the flat/building
-                  number, street, and pincode entirely. Shown here as its
-                  own wrapping block since a full address is often too
-                  long for a single-line label/value row. */}
               <div className="pt-2 mt-1 border-t border-slate-200">
                 <span className="text-xs text-slate-400 block mb-1">Full Address</span>
                 <p className="text-sm text-slate-800 font-medium leading-relaxed">
@@ -1904,49 +1940,14 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     .filter(b => ['pending','accepted','in_progress'].includes(b.status))
     .map(b => ({ worker_id: b.worker_id ?? '', scheduled_at: b.scheduled_at }))
 
-  // Strips a trailing directional suffix from an area name so
-  // "Vile Parle East" / "Vile Parle West" both collapse to "Vile Parle"
-  // automatically, with zero manual setup. Covers three ways a
-  // direction can show up at the end of an address's area text:
-  //   1. English words: East/West/North/South (incl. "North East").
-  //   2. Hindi/Marathi words in Devanagari: पूर्व/पश्चिम/उत्तर/दक्षिण
-  //      (same words in both languages).
-  //   3. The ENGLISH direction word merely transliterated into
-  //      Devanagari letters — e.g. "वेस्ट" is not the Hindi word for
-  //      West (that's पश्चिम), it's "West" spelled phonetically in
-  //      Devanagari script, which is common in real customer-entered
-  //      addresses (see "बोरिवली वेस्ट"). Missing this form was why
-  //      that specific case wasn't merging.
-  // All matches are anchored to the END of the string only, so a name
-  // that merely CONTAINS one of these words elsewhere is untouched
-  // (e.g. "Eastern Express Highway").
   function stripDirectionalSuffix(name: string): string {
     return name
-      // English words
       .replace(/\s+(north\s*east|north\s*west|south\s*east|south\s*west|north|south|east|west)\s*$/i, '')
-      // Hindi/Marathi Devanagari words (incl. उत्तर-पूर्व style combos)
       .replace(/[\s-]+(उत्तर[\s-]*पूर्व|उत्तर[\s-]*पश्चिम|दक्षिण[\s-]*पूर्व|दक्षिण[\s-]*पश्चिम|पूर्व|पश्चिम|उत्तर|दक्षिण)\s*$/, '')
-      // English direction words transliterated INTO Devanagari script
-      // (वेस्ट=West, ईस्ट=East, नॉर्थ=North, साउथ=South) — different
-      // from the true Hindi words above.
       .replace(/[\s-]+(नॉर्थ[\s-]*ईस्ट|नॉर्थ[\s-]*वेस्ट|साउथ[\s-]*ईस्ट|साउथ[\s-]*वेस्ट|ईस्ट|वेस्ट|नॉर्थ|साउथ)\s*$/, '')
       .trim()
   }
 
-  // Canonical-name aliases: maps a Devanagari (Hindi/Marathi) area name
-  // to the SAME area's English name, so "बोरिवली" and "Borivali" merge
-  // into one group instead of showing as two separate sections just
-  // because they're written in different scripts. Stripping the
-  // directional suffix alone can't fix this — "बोरिवली" and "Borivali"
-  // remain different strings even after suffix-stripping, since they're
-  // not spelling variants of each other, they're two different scripts
-  // for the same word.
-  //
-  // This list only needs the areas actually seen in the data — add a
-  // new line here whenever a new Devanagari/English pair shows up as
-  // separate sections that should be one. Keys should be the STRIPPED
-  // (no direction suffix) Devanagari form; matching is exact, so keep
-  // spelling/spacing consistent with how it actually appears.
   const AREA_NAME_ALIASES: Record<string, string> = {
     'बोरिवली': 'Borivali',
     'दहिसर': 'Dahisar',
@@ -1959,19 +1960,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     'बांद्रा': 'Bandra',
   }
 
-  // Resolves a booking to its consolidated group name, in priority
-  // order:
-  //   1. An explicit manual override set on the pincode in Service
-  //      Areas ("Group under") — wins whenever present, for any case
-  //      the automatic rules below get wrong.
-  //   2. Strip a trailing direction suffix (English, Hindi, or
-  //      transliterated-English-in-Devanagari — see
-  //      stripDirectionalSuffix above).
-  //   3. If what's left is a KNOWN Devanagari area name, translate it
-  //      to its English canonical form via AREA_NAME_ALIASES, so it
-  //      merges with the English-named bookings for the same place.
-  //      Names not in the list are left as-is (still grouped correctly
-  //      among themselves, just not merged across scripts).
   function resolveGroupName(b: Booking): string {
     const manualOverride = b.pincode ? pincodeParentArea[b.pincode] : undefined
     if (manualOverride) return manualOverride
@@ -1987,13 +1975,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     })()
 
-    // Month-scope filter — restricts to bookings whose SCHEDULED date
-    // falls within the current calendar month (not created_at — a
-    // booking created in July for an August 5th slot belongs to
-    // August's operational view, which is what "this month's bookings"
-    // means for a page an admin actually works from day to day). The
-    // 'all' scope (admin-bookings, unchanged route) applies no filter
-    // at all, exactly matching the previous single-page behavior.
     let bookingsQuery = supabase.from('bookings').select(
       `id,status,final_amount,base_price,discount_amount,scheduled_at,created_at,
        otp,worker_id,payment_status,special_instructions,work_started_at,work_ended_at,booking_duration_minutes,
@@ -2044,14 +2025,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     const busySet = new Set<string>()
     ;(activeJobs ?? []).forEach((b: any) => { if (b.worker_id) busySet.add(b.worker_id) })
 
-    // Only stores an entry when a REAL manual "Group under" value was
-    // set in Service Areas — deliberately does NOT fall back to
-    // a.area here. If it did, every pincode would always have a
-    // "manual override" (its own area name), which would permanently
-    // block the automatic East/West/North/South stripping in
-    // resolveGroupName() from ever running. Leaving ungrouped pincodes
-    // out of this map entirely is what lets the automatic rule kick in
-    // for them.
     const parentAreaMap: Record<string, string> = {}
     ;(areaRows ?? []).forEach((a: any) => {
       if (!a.pincode) return
@@ -2270,12 +2243,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     if (!groupedByArea[group]) groupedByArea[group] = []
     groupedByArea[group].push(b)
   })
-  // Sort each area's bookings by scheduled time ascending (9:00 AM
-  // before 10:00 AM, etc.) — bookings arrive from the DB ordered by
-  // created_at (newest first), which has nothing to do with WHEN the
-  // job is actually scheduled, so a worker/admin scanning one area's
-  // list would see times out of order. This is purely a display-order
-  // fix; it doesn't touch created_at or any other field.
   Object.keys(groupedByArea).forEach(group => {
     groupedByArea[group] = [...groupedByArea[group]].sort(
       (a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
@@ -2346,7 +2313,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         </div>
       </div>
 
-      {/* Profile tabs */}
       <div className="grid grid-cols-3 gap-3 mb-4">
         {[
           { key: 'live',      icon: '⚡', label: 'Live / Active', count: liveCount, rev: liveRevenue, revLabel: 'ongoing',
@@ -2392,7 +2358,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         })}
       </div>
 
-      {/* Status pills */}
       {profile === 'all' && (
         <div className="flex gap-2 overflow-x-auto pb-3 mb-3">
           {Object.entries(STATUS).map(([k, v]) => {
@@ -2434,7 +2399,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         </div>
       )}
 
-      {/* ── DATE FILTER: All Dates / Today / Tomorrow + calendar picker ── */}
       <div className="mb-4">
         <div className="flex items-center gap-2 overflow-x-auto pb-2">
           <button
@@ -2643,7 +2607,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                       <button
                         onClick={e => {
                           e.stopPropagation()
-                          const firstBooking = areaBookings[0]
                           const shareText = areaBookings.map(b => {
                             const addr = [b.flat_no, b.building, b.full_address || b.area].filter(Boolean).join(', ')
                             const link = b.latitude && b.longitude
