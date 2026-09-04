@@ -572,6 +572,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   const [pincode, setPincode] = useState('')
   const [latitude, setLatitude] = useState<number | null>(null)
   const [longitude, setLongitude] = useState<number | null>(null)
+  const [paymentMethod, setPaymentMethod] = useState<'cod' | 'online'>('cod')
   const [notes, setNotes] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -696,9 +697,10 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
         p_area: area.trim() || null,
         p_city: city.trim() || null,
         p_pincode: pincode.trim(),
-        p_special_instructions: notes.trim() || null,
+                p_special_instructions: notes.trim() || null,
         p_latitude: latitude,
         p_longitude: longitude,
+        p_payment_method: paymentMethod,
       })
       if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
       if (!data?.success) {
@@ -833,10 +835,36 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
               <input type="number" min={0} placeholder="Amount to charge — entered manually"
                 value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
                 className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-              <p className="text-[11px] text-slate-400 mt-1.5">
+                            <p className="text-[11px] text-slate-400 mt-1.5">
                 Entered by hand — independent of the selected services' catalog
                 prices (covers phone-negotiated pricing).
               </p>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Payment</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button type="button" onClick={() => setPaymentMethod('cod')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{
+                    background:  paymentMethod === 'cod' ? '#ECFEFF' : '#F8FAFC',
+                    color:       paymentMethod === 'cod' ? '#0891B2' : '#64748B',
+                    borderColor: paymentMethod === 'cod' ? '#0891B2' : '#E2E8F0',
+                  }}>
+                  💵 Cash on Delivery
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Worker collects cash later</p>
+                </button>
+                <button type="button" onClick={() => setPaymentMethod('online')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{
+                    background:  paymentMethod === 'online' ? '#ECFDF5' : '#F8FAFC',
+                    color:       paymentMethod === 'online' ? '#059669' : '#64748B',
+                    borderColor: paymentMethod === 'online' ? '#059669' : '#E2E8F0',
+                  }}>
+                  📱 Online (QR)
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Customer already paid — marks as paid</p>
+                </button>
+              </div>
             </div>
 
             <div>
@@ -984,8 +1012,11 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
   const [area, setArea] = useState(booking.area ?? '')
   const [city, setCity] = useState(booking.city ?? '')
   const [pincode, setPincode] = useState(booking.pincode ?? '')
-  const [latitude, setLatitude] = useState<number | null>(booking.latitude ?? null)
+    const [latitude, setLatitude] = useState<number | null>(booking.latitude ?? null)
   const [longitude, setLongitude] = useState<number | null>(booking.longitude ?? null)
+  const [paymentMethod, setPaymentMethod] = useState<'cod' | 'online'>(
+    booking.payment_status === 'paid' ? 'online' : 'cod'
+  )
   const [notes, setNotes] = useState(
     (booking.special_instructions ?? '')
       .replace(/\s*\[Phone booking (created|edited) by admin\]/g, '')
@@ -1069,6 +1100,7 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
         p_special_instructions: notes.trim() || null,
         p_latitude: latitude,
         p_longitude: longitude,
+        p_payment_method: paymentMethod,
       })
       if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
       if (!data?.success) {
@@ -1170,8 +1202,34 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
                 Final Amount (₹)
               </p>
-              <input type="number" min={0} value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
+                            <input type="number" min={0} value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
                 className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Payment</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button type="button" onClick={() => setPaymentMethod('cod')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{
+                    background:  paymentMethod === 'cod' ? '#ECFEFF' : '#F8FAFC',
+                    color:       paymentMethod === 'cod' ? '#0891B2' : '#64748B',
+                    borderColor: paymentMethod === 'cod' ? '#0891B2' : '#E2E8F0',
+                  }}>
+                  💵 Cash on Delivery
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Worker collects cash later</p>
+                </button>
+                <button type="button" onClick={() => setPaymentMethod('online')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{
+                    background:  paymentMethod === 'online' ? '#ECFDF5' : '#F8FAFC',
+                    color:       paymentMethod === 'online' ? '#059669' : '#64748B',
+                    borderColor: paymentMethod === 'online' ? '#059669' : '#E2E8F0',
+                  }}>
+                  📱 Online (QR)
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Customer already paid — marks as paid</p>
+                </button>
+              </div>
             </div>
 
             <div>

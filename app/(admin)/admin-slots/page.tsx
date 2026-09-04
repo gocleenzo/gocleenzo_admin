@@ -31,6 +31,11 @@ const DURATION_OPTIONS = [
   { label: '60 min', value: 60 },
   { label: '90 min', value: 90 },
   { label: '120 min', value: 120 },
+  { label: '150 min', value: 150 },
+  { label: '180 min', value: 180 },
+  { label: '240 min', value: 240 },
+  { label: '300 min', value: 300 },
+  { label: '360 min', value: 360 },
 ]
 
 function pretty12h(hhmm: string): string {
