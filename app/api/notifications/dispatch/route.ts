@@ -11,6 +11,13 @@ import { sendFcmNotification } from '../fcm'
 // admin-facing schedule route above only creates/lists/cancels rows —
 // nothing gets sent until THIS runs.
 //
+// UPDATED for multi-device support — resolveRecipients now returns
+// one entry per DEVICE (a customer with two logged-in devices appears
+// twice), so every device actually gets pushed. The scheduled_notif's
+// own 'notifications' DB row is still only inserted ONCE per user
+// (tracked separately below), so a two-device customer doesn't see a
+// duplicated entry in their in-app notification list.
+//
 // TRIGGERING THIS PERIODICALLY (do this once, outside of code):
 //   Vercel Cron Jobs — add to vercel.json:
 //     { "crons": [{ "path": "/api/notifications/dispatch", "schedule": "* * * * *" }] }
@@ -38,50 +45,48 @@ function supabaseAdmin() {
   )
 }
 
-async function resolveRecipients(
+// Returns one row PER DEVICE (token), each still carrying its owning
+// user_id so the caller can dedupe the in-app notifications insert
+// per user while still pushing to every device.
+async function resolveRecipientDevices(
   supabase: ReturnType<typeof supabaseAdmin>,
   targetType: string,
   targetValue: string | null
-): Promise<{ id: string; fcm_token: string }[]> {
-  if (targetType === 'user') {
-    const { data } = await supabase
-      .from('users')
-      .select('id, fcm_token')
-      .eq('id', targetValue!)
-      .not('fcm_token', 'is', null)
-    return (data ?? []) as { id: string; fcm_token: string }[]
-  }
+): Promise<{ user_id: string; token_row_id: string; token: string }[]> {
+  let userIds: string[] = []
 
-  if (targetType === 'area') {
+  if (targetType === 'user') {
+    userIds = [targetValue!]
+  } else if (targetType === 'area') {
     // Every customer with a saved (non-deleted) address in this pincode.
-    // Distinct on user id — a customer with two addresses in the same
-    // pincode should still only get ONE notification.
     const { data } = await supabase
       .from('addresses')
-      .select('user_id, users!inner(id, fcm_token)')
+      .select('user_id')
       .eq('pincode', targetValue!)
       .eq('is_deleted', false)
-      .not('users.fcm_token', 'is', null)
-    const seen = new Set<string>()
-    const out: { id: string; fcm_token: string }[] = []
-    for (const row of (data ?? []) as any[]) {
-      const u = row.users
-      if (!u?.id || seen.has(u.id)) continue
-      seen.add(u.id)
-      out.push({ id: u.id, fcm_token: u.fcm_token })
-    }
-    return out
+    userIds = Array.from(new Set((data ?? []).map((r: any) => r.user_id).filter(Boolean)))
+  } else {
+    // 'all' — every customer. Scoped to role='customer' so this never
+    // accidentally pushes to worker/admin accounts sharing this table.
+    const { data } = await supabase
+      .from('users')
+      .select('id')
+      .eq('role', 'customer')
+    userIds = (data ?? []).map((r: any) => r.id)
   }
 
-  // 'all' — every customer with a saved token. Scoped to role='customer'
-  // so this never accidentally pushes to worker/admin accounts that
-  // happen to share the same users table.
-  const { data } = await supabase
-    .from('users')
-    .select('id, fcm_token')
-    .eq('role', 'customer')
-    .not('fcm_token', 'is', null)
-  return (data ?? []) as { id: string; fcm_token: string }[]
+  if (userIds.length === 0) return []
+
+  const { data: tokenRows } = await supabase
+    .from('user_fcm_tokens')
+    .select('id, user_id, token')
+    .in('user_id', userIds)
+
+  return (tokenRows ?? []).map((r: any) => ({
+    user_id: r.user_id,
+    token_row_id: r.id,
+    token: r.token,
+  }))
 }
 
 export async function POST(req: NextRequest) {
@@ -112,28 +117,41 @@ export async function POST(req: NextRequest) {
 
   for (const notif of due ?? []) {
     try {
-      const recipients = await resolveRecipients(
+      const devices = await resolveRecipientDevices(
         supabase, notif.target_type, notif.target_value)
 
       let successCount = 0
-      for (const r of recipients) {
-        const sent = await sendFcmNotification(
-          r.fcm_token, notif.title, notif.body,
+      const deadRowIds: string[] = []
+      const notifiedUserIds = new Set<string>() // dedupe the in-app row per user
+
+      for (const d of devices) {
+        const result = await sendFcmNotification(
+          d.token, notif.title, notif.body,
           { type: 'admin_broadcast', notification_id: notif.id })
-        if (sent) {
+
+        if (result.tokenInvalid) deadRowIds.push(d.token_row_id)
+
+        if (result.success) {
           successCount++
-          try {
-            await supabase.from('notifications').insert({
-              user_id: r.id,
-              title:   notif.title,
-              body:    notif.body,
-              type:    'admin_broadcast',
-              is_read: false,
-            })
-          } catch (dbErr) {
-            console.error('Dispatch: failed saving in-app notification row', dbErr)
+          if (!notifiedUserIds.has(d.user_id)) {
+            notifiedUserIds.add(d.user_id)
+            try {
+              await supabase.from('notifications').insert({
+                user_id: d.user_id,
+                title:   notif.title,
+                body:    notif.body,
+                type:    'admin_broadcast',
+                is_read: false,
+              })
+            } catch (dbErr) {
+              console.error('Dispatch: failed saving in-app notification row', dbErr)
+            }
           }
         }
+      }
+
+      if (deadRowIds.length > 0) {
+        await supabase.from('user_fcm_tokens').delete().in('id', deadRowIds)
       }
 
       await supabase
@@ -141,11 +159,19 @@ export async function POST(req: NextRequest) {
         .update({
           status: 'sent',
           sent_at: new Date().toISOString(),
-          recipients_count: successCount,
+          // Recipients count now reflects distinct USERS notified
+          // (not raw device sends) — matches what an admin actually
+          // means by "how many customers got this".
+          recipients_count: notifiedUserIds.size,
         })
         .eq('id', notif.id)
 
-      results.push({ id: notif.id, sent: successCount, total: recipients.length })
+      results.push({
+        id: notif.id,
+        users_notified: notifiedUserIds.size,
+        devices_sent: successCount,
+        devices_pruned: deadRowIds.length,
+      })
     } catch (err: any) {
       console.error(`Dispatch: notification ${notif.id} failed`, err)
       await supabase

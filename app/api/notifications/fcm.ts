@@ -23,19 +23,26 @@ export async function getFcmAccessToken(): Promise<string | null> {
   }
 }
 
+// UPDATED return shape — { success, tokenInvalid }. Previously just a
+// boolean. Now callers (send/route.ts, dispatch/route.ts) can tell
+// the difference between "FCM is temporarily down" (worth possibly
+// retrying) and "this specific token is dead/unregistered" (worth
+// deleting from user_fcm_tokens so it stops being tried forever —
+// this matters more now that a customer can have several device
+// rows, some of which may be stale uninstalls).
 export async function sendFcmNotification(
   fcmToken: string,
   title: string,
   body: string,
   data?: Record<string, string>
-): Promise<boolean> {
+): Promise<{ success: boolean; tokenInvalid: boolean }> {
   try {
     const raw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY ?? '{}'
     const serviceAccount = JSON.parse(raw)
-    if (!serviceAccount.project_id) return false
+    if (!serviceAccount.project_id) return { success: false, tokenInvalid: false }
 
     const accessToken = await getFcmAccessToken()
-    if (!accessToken) return false
+    if (!accessToken) return { success: false, tokenInvalid: false }
 
     const res = await fetch(
       `https://fcm.googleapis.com/v1/projects/${serviceAccount.project_id}/messages:send`,
@@ -68,12 +75,17 @@ export async function sendFcmNotification(
     if (!res.ok) {
       const err = await res.json()
       console.error('FCM send error:', err)
-      return false
+      const errorCode = err?.error?.details?.find(
+        (d: any) => d['@type']?.includes('FcmError')
+      )?.errorCode
+      const tokenInvalid =
+        errorCode === 'UNREGISTERED' || errorCode === 'INVALID_ARGUMENT'
+      return { success: false, tokenInvalid }
     }
 
-    return true
+    return { success: true, tokenInvalid: false }
   } catch (err) {
     console.error('FCM error:', err)
-    return false
+    return { success: false, tokenInvalid: false }
   }
 }
