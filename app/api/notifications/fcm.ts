@@ -23,13 +23,9 @@ export async function getFcmAccessToken(): Promise<string | null> {
   }
 }
 
-// UPDATED return shape — { success, tokenInvalid }. Previously just a
-// boolean. Now callers (send/route.ts, dispatch/route.ts) can tell
-// the difference between "FCM is temporarily down" (worth possibly
-// retrying) and "this specific token is dead/unregistered" (worth
-// deleting from user_fcm_tokens so it stops being tried forever —
-// this matters more now that a customer can have several device
-// rows, some of which may be stale uninstalls).
+// UPDATED return shape — { success, tokenInvalid }. Callers can tell
+// the difference between "FCM is temporarily down" and "this token is
+// dead/unregistered" (worth deleting from user_fcm_tokens).
 export async function sendFcmNotification(
   fcmToken: string,
   title: string,
@@ -61,7 +57,18 @@ export async function sendFcmNotification(
               priority: 'high',
               notification: {
                 sound: 'default',
-                click_action: 'FLUTTER_NOTIFICATION_CLICK',
+                // REMOVED: click_action: 'FLUTTER_NOTIFICATION_CLICK'.
+                // This custom action requires a matching intent-filter
+                // in AndroidManifest.xml that was never actually added
+                // — without it, Android can fail to resolve ANY
+                // activity to launch when the notification is tapped,
+                // which silently does nothing (no crash, no error,
+                // just nothing happens — exactly the reported symptom).
+                // Removing it lets Android fall back to the app's
+                // default launcher intent, which
+                // getInitialMessage()/onMessageOpenedApp in
+                // notification_service.dart already correctly listen
+                // for — no manifest changes needed.
               },
             },
             apns: {
