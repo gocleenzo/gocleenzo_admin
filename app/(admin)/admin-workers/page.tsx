@@ -2541,7 +2541,7 @@ export default function AdminWorkers() {
     const [{ data: users }, { data: wRows }, { data: bkng }, { data: active }, { data: todayRows }] = await Promise.all([
       supabase.from('users').select('id,full_name,phone,email,created_at,is_active').eq('role','worker'),
       supabase.from('workers').select('user_id,is_available,is_verified,joined_at,worker_otp,location_updated_at'),
-      supabase.from('bookings').select('worker_id,status,final_amount,scheduled_at,work_started_at,work_ended_at,work_duration_seconds,services(name),addresses(area)').order('created_at', { ascending: false }),
+      supabase.from('bookings').select('worker_id,status,final_amount,scheduled_at,work_started_at,work_ended_at,work_duration_seconds,service_duration_minutes,extra_time_mins,booking_duration_minutes,services(name,duration_minutes),addresses(area)').order('created_at', { ascending: false }),
       supabase.from('bookings').select('worker_id,work_started_at,services(name)').eq('status','in_progress'),
       supabase.from('worker_schedule_dates').select('worker_id,enabled,start_time,end_time,breaks').eq('date', todayStr),
     ]) as any[]
