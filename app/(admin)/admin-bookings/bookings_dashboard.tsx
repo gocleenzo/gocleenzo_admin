@@ -358,7 +358,7 @@ function SlotPicker({
   emptyHint?: string
 }) {
   const supabase = createClient()
-  const dates = nextDays(7)
+  const dates = nextDays(30)
   const [selectedDate, setSelectedDate] = useState<Date>(dates[0])
   const [availability, setAvailability] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(false)
