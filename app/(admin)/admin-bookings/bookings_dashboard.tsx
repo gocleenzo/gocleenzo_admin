@@ -291,7 +291,7 @@ function OtpStatusBox({ b }: { b: Booking }) {
         <div>
           <p className="text-[10px] text-slate-400 mb-0.5">Worker's Permanent OTP</p>
           {otpLoading
-            ? <p className="text-sm text-slate-400">Loading…</p>
+            ? <p className="text-sm text-slate-400">Loading...</p>
             : workerOtp
               ? <p className="font-mono font-black text-2xl text-violet-700 tracking-widest">{workerOtp}</p>
               : <p className="text-sm font-bold text-red-500">⚠️ Not set — Workers → Edit</p>
@@ -337,7 +337,7 @@ function WorkerOtpDisplay({ workerId }: { workerId: string | null }) {
     <div className="rounded-2xl p-4 text-center bg-violet-50 border border-violet-200">
       <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Worker OTP</p>
       {loading
-        ? <p className="text-slate-400 text-sm">…</p>
+        ? <p className="text-slate-400 text-sm">...</p>
         : workerOtp
           ? <><p className="text-3xl font-black font-mono tracking-widest text-violet-600">{workerOtp}</p>
               <p className="text-[10px] text-slate-400 mt-1">Worker tells this to customer</p></>
@@ -450,12 +450,12 @@ function SlotPicker({
           </span>
         </div>
         <span className="text-[10px] text-slate-400">
-          {loading ? 'Checking…' : `${availableCount} slot${availableCount === 1 ? '' : 's'} available`}
+          {loading ? 'Checking...' : `${availableCount} slot${availableCount === 1 ? '' : 's'} available`}
         </span>
       </div>
 
       {loading ? (
-        <div className="py-8 text-center text-xs text-slate-400">Checking worker availability…</div>
+        <div className="py-8 text-center text-xs text-slate-400">Checking worker availability...</div>
       ) : (
         <div className="space-y-3">
           {SLOT_GROUPS.map(group => (
@@ -769,7 +769,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
                     onChange={e => setPhone(e.target.value)}
                     className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
                   {customerChecking && (
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-400">…</span>
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-400">...</span>
                   )}
                 </div>
                 <input type="text" placeholder="Name (if new customer)" value={name}
@@ -807,7 +807,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
                     <select value={line.serviceId}
                       onChange={e => updateServiceLine(idx, { serviceId: e.target.value })}
                       className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
-                      <option value="">Select service…</option>
+                      <option value="">Select service...</option>
                       {services.map(s => (
                         <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
                       ))}
@@ -939,7 +939,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
             <div>
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
               {zoneChecking && (
-                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode…</p>
+                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode...</p>
               )}
               {!zoneChecking && zoneWorkerIds != null && (
                 <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
@@ -966,7 +966,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
             <div>
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Notes (optional)</p>
               <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
-                placeholder="Anything the worker should know…"
+                placeholder="Anything the worker should know..."
                 className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 resize-none"/>
             </div>
 
@@ -979,7 +979,553 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
             <button onClick={submit} disabled={!canSubmit || submitting}
               className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
               style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-              {submitting ? '…' : '📞 Create Phone Booking'}
+              {submitting ? '...' : '📞 Create Phone Booking'}
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RecurringPhoneBookingModal — admin equivalent of the customer
+// app's recurring_booking_screen.dart, for creating a 7-day weekly
+// package over the phone. Reuses the SAME customer/address UI
+// blocks as PhoneBookingModal, and the SAME isWorkerAvailableAt()
+// helper + already-loaded workers/allBookings data this file
+// already uses for single-day slot checking — all availability
+// checks here are done CLIENT-SIDE as a UX preview, exactly like
+// every other slot picker in this admin app. The real, authoritative
+// gate is admin_create_recurring_package() on the server, which
+// re-verifies everything independently before actually creating
+// anything (same "preview vs source of truth" split used throughout
+// this codebase).
+// ═══════════════════════════════════════════════════════════════
+
+function timeSlotTo24h(slot: string): string {
+  const [time, period] = slot.split(' ')
+  let [hh, mm] = time.split(':').map(Number)
+  if (period === 'PM' && hh !== 12) hh += 12
+  if (period === 'AM' && hh === 12) hh = 0
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+}
+
+function addDaysToDate(d: Date, n: number): Date {
+  const r = new Date(d)
+  r.setDate(r.getDate() + n)
+  return r
+}
+
+function prettyDayDate(d: Date): string {
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  return `${days[d.getDay()]}, ${d.getDate()} ${months[d.getMonth()]}`
+}
+
+type DayPlan = { day: number; date: Date; time24: string; isOverride: boolean }
+
+function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, onDone }: {
+  services: ServiceOption[]
+  workers: Worker[]
+  allBookings: { worker_id: string; scheduled_at: string }[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const supabase = createClient()
+  const [phone, setPhone] = useState('')
+  const [name, setName] = useState('')
+  const [serviceId, setServiceId] = useState('')
+  const [pricePerVisit, setPricePerVisit] = useState('')
+  const [platformFee] = useState(10)
+  const [flatNo, setFlatNo] = useState('')
+  const [building, setBuilding] = useState('')
+  const [fullAddress, setFullAddress] = useState('')
+  const [area, setArea] = useState('')
+  const [city, setCity] = useState('')
+  const [pincode, setPincode] = useState('')
+  const [latitude, setLatitude] = useState<number | null>(null)
+  const [longitude, setLongitude] = useState<number | null>(null)
+  const [paymentMethod, setPaymentMethod] = useState<'cod' | 'online'>('cod')
+  const [notes, setNotes] = useState('')
+
+  const [startDate, setStartDate] = useState<Date>(() => {
+    const d = new Date(); d.setHours(0,0,0,0); return d
+  })
+  const [standardSlot, setStandardSlot] = useState('')
+  const [dayOverrides, setDayOverrides] = useState<Record<number, string>>({})
+  const [checked, setChecked] = useState(false)
+
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<{ packageId: string } | null>(null)
+
+  const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
+  const [zoneChecking, setZoneChecking] = useState(false)
+
+  const { match: customerMatch, checking: customerChecking } = useCustomerLookup(phone)
+  const [selectedAddressId, setSelectedAddressId] = useState<string>('')
+  const [addingNewAddress, setAddingNewAddress] = useState(false)
+  const nameTouchedRef = useRef(false)
+
+  useEffect(() => {
+    if (!customerMatch) { setSelectedAddressId(''); setAddingNewAddress(false); return }
+    if (!nameTouchedRef.current && customerMatch.full_name) setName(customerMatch.full_name)
+    if (customerMatch.addresses.length > 0) {
+      const def = customerMatch.addresses.find(a => a.is_default) ?? customerMatch.addresses[0]
+      setSelectedAddressId(def.id); setAddingNewAddress(false)
+    } else {
+      setSelectedAddressId(''); setAddingNewAddress(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerMatch?.id])
+
+  useEffect(() => {
+    if (!customerMatch || !selectedAddressId || addingNewAddress) return
+    const addr = customerMatch.addresses.find(a => a.id === selectedAddressId)
+    if (!addr) return
+    setFlatNo(addr.flat_no ?? ''); setBuilding(addr.building ?? '')
+    setFullAddress(addr.full_address ?? ''); setArea(addr.area ?? '')
+    setCity(addr.city ?? ''); setPincode(addr.pincode ?? '')
+    setLatitude(addr.latitude ?? null); setLongitude(addr.longitude ?? null)
+    resetAvailability()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAddressId, addingNewAddress])
+
+  function startNewAddress() {
+    setAddingNewAddress(true); setSelectedAddressId('')
+    setFlatNo(''); setBuilding(''); setFullAddress(''); setArea(''); setCity(''); setPincode('')
+    setLatitude(null); setLongitude(null)
+    resetAvailability()
+  }
+
+  function handleMapPick(picked: PickedAddress) {
+    setLatitude(picked.lat); setLongitude(picked.lng)
+    if (picked.fullAddress) setFullAddress(picked.fullAddress)
+    if (picked.area) setArea(picked.area)
+    if (picked.city) setCity(picked.city)
+    if (picked.pincode) setPincode(picked.pincode)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    const t = setTimeout(async () => {
+      const p = pincode.trim()
+      if (!p) { if (!cancelled) { setZoneWorkerIds(null); setZoneChecking(false) }; return }
+      setZoneChecking(true)
+      const ids = await resolvePincodeWorkerIds(supabase, p)
+      if (!cancelled) { setZoneWorkerIds(ids); setZoneChecking(false) }
+    }, 400)
+    return () => { cancelled = true; clearTimeout(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pincode])
+
+  const filteredWorkers = zoneWorkerIds == null ? workers : workers.filter(w => zoneWorkerIds.has(w.id))
+
+  const selectedService = services.find(s => s.id === serviceId)
+  const durationMins = selectedService?.duration_minutes ?? 60
+
+  useEffect(() => {
+    if (selectedService && !pricePerVisit) {
+      setPricePerVisit(selectedService.base_price != null ? String(selectedService.base_price) : '')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceId])
+
+  function resetAvailability() {
+    setChecked(false)
+    setDayOverrides({})
+  }
+
+  const sevenDays = Array.from({ length: 7 }, (_, i) => addDaysToDate(startDate, i))
+
+  const conflicts: number[] = (() => {
+    if (!checked || !standardSlot) return []
+    const std24 = timeSlotTo24h(standardSlot)
+    const out: number[] = []
+    sevenDays.forEach((d, idx) => {
+      const day = idx + 1
+      const dt = new Date(d)
+      const [hh, mm] = std24.split(':').map(Number)
+      dt.setHours(hh, mm, 0, 0)
+      const anyFree = filteredWorkers.some(w =>
+        isWorkerAvailableAt(w, dt.toISOString(), durationMins, allBookings))
+      if (!anyFree) out.push(day)
+    })
+    return out
+  })()
+
+  function checkAvailability() {
+    if (!standardSlot) return
+    setChecked(true)
+    setDayOverrides({})
+  }
+
+  function freeSlotsForDay(day: number): Record<string, boolean> {
+    const d = sevenDays[day - 1]
+    const map: Record<string, boolean> = {}
+    for (const slot of TIME_SLOTS) {
+      const dt = slotToDateTime(d, slot)
+      map[slot] = filteredWorkers.some(w =>
+        isWorkerAvailableAt(w, dt.toISOString(), durationMins, allBookings))
+    }
+    return map
+  }
+
+  const dayPlans: DayPlan[] = sevenDays.map((d, idx) => {
+    const day = idx + 1
+    const isConflict = conflicts.includes(day)
+    const overrideSlot = dayOverrides[day]
+    const time24 = isConflict && overrideSlot
+      ? timeSlotTo24h(overrideSlot)
+      : timeSlotTo24h(standardSlot || '09:00 AM')
+    return { day, date: d, time24, isOverride: isConflict && !!overrideSlot }
+  })
+
+  const allConflictsResolved = conflicts.every(day => !!dayOverrides[day])
+
+  const overridesVerified: boolean | null = (() => {
+    if (!checked) return null
+    if (conflicts.length === 0) return true
+    if (!allConflictsResolved) return null
+    return filteredWorkers.some(w =>
+      dayPlans.every(plan => {
+        const dt = new Date(plan.date)
+        const [hh, mm] = plan.time24.split(':').map(Number)
+        dt.setHours(hh, mm, 0, 0)
+        return isWorkerAvailableAt(w, dt.toISOString(), durationMins, allBookings)
+      })
+    )
+  })()
+
+  const packageSubtotal = (Number(pricePerVisit) || 0) * 7
+  const totalAmount = packageSubtotal + platformFee
+
+  const canSubmit = phone.trim().length >= 10 && serviceId && pricePerVisit.trim() !== '' &&
+    Number(pricePerVisit) > 0 && fullAddress.trim() && pincode.trim() &&
+    checked && allConflictsResolved && overridesVerified === true
+
+  async function submit() {
+    if (!canSubmit) return
+    setSubmitting(true); setError(null)
+    try {
+      const overridesPayload = conflicts.map(day => ({
+        day, time: timeSlotTo24h(dayOverrides[day]),
+      }))
+      const { data, error: rpcError } = await supabase.rpc('admin_create_recurring_package', {
+        p_customer_name: name.trim() || null,
+        p_customer_phone: normalizePhone(phone),
+        p_flat_no: flatNo.trim() || null,
+        p_building: building.trim() || null,
+        p_area: area.trim() || null,
+        p_city: city.trim() || null,
+        p_pincode: pincode.trim(),
+        p_full_address: fullAddress.trim(),
+        p_service_id: serviceId,
+        p_start_date: localDateStr(startDate),
+        p_time: timeSlotTo24h(standardSlot),
+        p_duration_mins: durationMins,
+        p_price_per_visit: Number(pricePerVisit),
+        p_total_amount: totalAmount,
+        p_day_overrides: overridesPayload,
+        p_special_instructions: notes.trim() || null,
+        p_latitude: latitude,
+        p_longitude: longitude,
+        p_payment_method: paymentMethod,
+      })
+      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
+      if (!data?.success) {
+        const reasonMap: Record<string, string> = {
+          no_worker_all_days: 'No single professional can cover all 7 days with this combination of times. Try different times.',
+        }
+        setError(reasonMap[data?.reason] ?? (data?.message || 'Could not create the package.'))
+        setSubmitting(false)
+        return
+      }
+      setResult({ packageId: data.package_id })
+      setSubmitting(false)
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not create the package.')
+      setSubmitting(false)
+    }
+  }
+
+  function addrLabel(a: SavedAddress): string {
+    const main = a.label?.trim() || a.area || 'Address'
+    const bits = [a.full_address || a.area, a.city].filter(Boolean).join(', ')
+    return bits ? `${main} — ${bits}` : main
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <div>
+            <h2 className="text-lg font-black text-slate-800">🔁 Recurring Package (Phone)</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Create a 7-visit weekly package for a customer who called in</p>
+          </div>
+          <button onClick={onClose}
+            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+        </div>
+
+        {result ? (
+          <div className="px-6 py-6 space-y-4">
+            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
+              <p className="text-3xl mb-2">✅</p>
+              <p className="font-black text-slate-800">Recurring package created</p>
+              <p className="text-xs text-slate-500 mt-1 font-mono">#{result.packageId.slice(0,8).toUpperCase()}</p>
+              <p className="text-xs text-slate-500 mt-2">All 7 visits have been booked with the same professional.</p>
+            </div>
+            <button onClick={onDone}
+              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Customer</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="relative">
+                  <input type="tel" placeholder="Phone number *" value={phone}
+                    onChange={e => setPhone(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                  {customerChecking && <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-400">...</span>}
+                </div>
+                <input type="text" placeholder="Name (if new customer)" value={name}
+                  onChange={e => { nameTouchedRef.current = true; setName(e.target.value) }}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+              {customerMatch && (
+                <div className="mt-2 px-3 py-2 rounded-xl bg-green-50 border border-green-200">
+                  <p className="text-[11px] text-green-700 font-semibold">
+                    ✓ Existing customer{customerMatch.full_name ? ` — ${customerMatch.full_name}` : ''}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Service (single service for the whole package)</p>
+              <select value={serviceId} onChange={e => { setServiceId(e.target.value); resetAvailability() }}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                <option value="">Select service...</option>
+                {services.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Price per visit (₹)</p>
+              <input type="number" min={0} placeholder="Price per single visit" value={pricePerVisit}
+                onChange={e => setPricePerVisit(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              {pricePerVisit && Number(pricePerVisit) > 0 && (
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  7 visits × ₹{pricePerVisit} = ₹{packageSubtotal} + ₹{platformFee} platform fee = <span className="font-bold text-slate-600">₹{totalAmount} total</span>
+                </p>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Payment</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button type="button" onClick={() => setPaymentMethod('cod')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{ background: paymentMethod === 'cod' ? '#ECFEFF' : '#F8FAFC', color: paymentMethod === 'cod' ? '#0891B2' : '#64748B', borderColor: paymentMethod === 'cod' ? '#0891B2' : '#E2E8F0' }}>
+                  💵 Cash on Delivery
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Collected across the 7 visits</p>
+                </button>
+                <button type="button" onClick={() => setPaymentMethod('online')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{ background: paymentMethod === 'online' ? '#ECFDF5' : '#F8FAFC', color: paymentMethod === 'online' ? '#059669' : '#64748B', borderColor: paymentMethod === 'online' ? '#059669' : '#E2E8F0' }}>
+                  📱 Online (QR)
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Customer already paid in full</p>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Address</p>
+                {customerMatch && customerMatch.addresses.length > 0 && !addingNewAddress && (
+                  <button type="button" onClick={startNewAddress} className="text-[11px] font-bold text-cyan-700 hover:text-cyan-800">+ Add new address</button>
+                )}
+                {customerMatch && addingNewAddress && customerMatch.addresses.length > 0 && (
+                  <button type="button" onClick={() => {
+                    setAddingNewAddress(false)
+                    const def = customerMatch.addresses.find(a => a.is_default) ?? customerMatch.addresses[0]
+                    setSelectedAddressId(def.id)
+                  }} className="text-[11px] font-bold text-slate-500 hover:text-slate-700">← Use a saved address</button>
+                )}
+              </div>
+
+              {customerMatch && customerMatch.addresses.length > 0 && !addingNewAddress ? (
+                <div className="mb-3">
+                  <select value={selectedAddressId} onChange={e => setSelectedAddressId(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                    {customerMatch.addresses.map(a => (
+                      <option key={a.id} value={a.id}>{a.is_default ? '★ ' : ''}{addrLabel(a)}</option>
+                    ))}
+                  </select>
+                  {fullAddress && (
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      📍 {[flatNo, building].filter(Boolean).join(', ')}{(flatNo || building) ? ' · ' : ''}{fullAddress}{pincode ? ` — ${pincode}` : ''}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div className="mb-3">
+                    <AddressMapPicker onPick={handleMapPick} initialLat={latitude} initialLng={longitude}/>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                    <input type="text" placeholder="Building / Society" value={building} onChange={e => setBuilding(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                  </div>
+                  <input type="text" placeholder="Full address *" value={fullAddress} onChange={e => setFullAddress(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 mb-3"/>
+                  <div className="grid grid-cols-3 gap-3">
+                    <input type="text" placeholder="Area" value={area} onChange={e => setArea(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                    <input type="text" placeholder="City" value={city} onChange={e => setCity(e.target.value)}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                    <input type="text" placeholder="Pincode *" value={pincode}
+                      onChange={e => { setPincode(e.target.value); resetAvailability() }}
+                      className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Start Date — runs 7 consecutive days</p>
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {Array.from({ length: 30 }, (_, i) => addDaysToDate(new Date(), i)).map((d, i) => {
+                  const active = localDateStr(d) === localDateStr(startDate)
+                  return (
+                    <button key={i} type="button"
+                      onClick={() => { setStartDate(d); resetAvailability() }}
+                      className="flex-shrink-0 w-14 py-2 rounded-xl text-center transition-all"
+                      style={{ background: active ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#F8FAFC', border: `1.5px solid ${active ? '#0891B2' : '#E2E8F0'}` }}>
+                      <p className="text-[9px] font-bold" style={{ color: active ? '#DFFAFE' : '#94A3B8' }}>
+                        {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][(d.getDay() + 6) % 7]}
+                      </p>
+                      <p className="text-lg font-black" style={{ color: active ? '#fff' : '#1E293B' }}>{d.getDate()}</p>
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[11px] text-cyan-700 font-semibold mt-2">
+                Runs {prettyDayDate(startDate)} → {prettyDayDate(addDaysToDate(startDate, 6))}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Daily Time — same time every day (unless overridden below)</p>
+              {zoneChecking && <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode...</p>}
+              {!zoneChecking && zoneWorkerIds != null && (
+                <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
+                  <p className="text-[11px] text-cyan-700 font-semibold">
+                    📐 {zoneWorkerIds.size} worker{zoneWorkerIds.size === 1 ? '' : 's'} cover pincode {pincode.trim()}.
+                  </p>
+                </div>
+              )}
+              <div className="grid grid-cols-4 gap-2">
+                {TIME_SLOTS.map(slot => {
+                  const active = standardSlot === slot
+                  return (
+                    <button key={slot} type="button"
+                      onClick={() => { setStandardSlot(slot); resetAvailability() }}
+                      className="px-2 py-2 rounded-lg text-[11px] font-bold transition-all"
+                      style={{
+                        background: active ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
+                        color: active ? '#fff' : '#334155',
+                        border: `1px solid ${active ? '#0891B2' : '#E2E8F0'}`,
+                      }}>
+                      {slot}
+                    </button>
+                  )
+                })}
+              </div>
+              <button type="button" onClick={checkAvailability} disabled={!standardSlot || !pincode.trim()}
+                className="w-full mt-3 h-10 rounded-xl font-black text-xs text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+                style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+                Check availability for all 7 days
+              </button>
+            </div>
+
+            {checked && conflicts.length > 0 && (
+              <div className="rounded-2xl p-4 space-y-3 bg-amber-50 border border-amber-200">
+                <p className="text-xs font-black text-amber-800">⚠️ Some days need a different time</p>
+                {conflicts.map(day => {
+                  const d = sevenDays[day - 1]
+                  const chosen = dayOverrides[day]
+                  const freeMap = freeSlotsForDay(day)
+                  return (
+                    <div key={day} className="rounded-xl p-3 bg-white border border-amber-200">
+                      <p className="text-[12px] font-bold text-amber-800 mb-2">Day {day} · {prettyDayDate(d)}</p>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {TIME_SLOTS.map(slot => {
+                          const isFree = freeMap[slot]
+                          const active = chosen === slot
+                          return (
+                            <button key={slot} type="button" disabled={!isFree}
+                              onClick={() => setDayOverrides(p => ({ ...p, [day]: slot }))}
+                              className="px-1.5 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+                              style={{
+                                background: !isFree ? '#F1F5F9' : active ? '#0891B2' : '#fff',
+                                color: !isFree ? '#CBD5E1' : active ? '#fff' : '#334155',
+                                border: `1px solid ${!isFree ? '#E2E8F0' : active ? '#0891B2' : '#E2E8F0'}`,
+                              }}>
+                              {slot}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
+            {checked && (
+              <>
+                {overridesVerified === true && (
+                  <div className="rounded-xl px-4 py-3 bg-green-50 border border-green-200">
+                    <p className="text-xs font-bold text-green-700">✓ Confirmed — one professional can cover all 7 days with these times.</p>
+                  </div>
+                )}
+                {overridesVerified === false && allConflictsResolved && (
+                  <div className="rounded-xl px-4 py-3 bg-red-50 border border-red-200">
+                    <p className="text-xs font-bold text-red-600">No single professional can cover all 7 days with this combination. Try different times.</p>
+                  </div>
+                )}
+              </>
+            )}
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Notes (optional)</p>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+                placeholder="Anything the worker should know..."
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 resize-none"/>
+            </div>
+
+            {error && (
+              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+                <p className="text-xs font-bold text-red-600">{error}</p>
+              </div>
+            )}
+
+            <button onClick={submit} disabled={!canSubmit || submitting}
+              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+              {submitting ? '...' : '🔁 Create Recurring Package'}
             </button>
           </div>
         )}
@@ -1177,7 +1723,7 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
                     <select value={line.serviceId}
                       onChange={e => updateServiceLine(idx, { serviceId: e.target.value })}
                       className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
-                      <option value="">Select service…</option>
+                      <option value="">Select service...</option>
                       {services.map(s => (
                         <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
                       ))}
@@ -1263,7 +1809,7 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
             <div>
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
               {zoneChecking && (
-                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode…</p>
+                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode...</p>
               )}
               {!zoneChecking && zoneWorkerIds != null && (
                 <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
@@ -1301,7 +1847,7 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
             <button onClick={submit} disabled={!canSubmit || submitting}
               className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
               style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
-              {submitting ? '…' : '✏️ Save Changes'}
+              {submitting ? '...' : '✏️ Save Changes'}
             </button>
           </div>
         )}
@@ -1389,7 +1935,7 @@ function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Worker</p>
               <select value={workerId} onChange={e => { setWorkerId(e.target.value); setScheduledIso('') }}
                 className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
-                <option value="">Select worker…</option>
+                <option value="">Select worker...</option>
                 {workers.map(w => (
                   <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
                 ))}
@@ -1436,7 +1982,7 @@ function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
             <button onClick={submit} disabled={!canSubmit || submitting}
               className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
               style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)' }}>
-              {submitting ? '…' : '🚫 Block This Slot'}
+              {submitting ? '...' : '🚫 Block This Slot'}
             </button>
           </div>
         )}
@@ -1677,7 +2223,7 @@ function Drawer({
               <button onClick={() => act('in_progress')} disabled={busy}
                 className="w-full flex items-center gap-3 px-4 py-4 rounded-2xl bg-white border border-cyan-300 hover:bg-cyan-50 transition-all active:scale-[0.98] disabled:opacity-50">
                 <div className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-lg bg-cyan-100 text-cyan-700 flex-shrink-0">
-                  {busy ? '…' : '▶️'}
+                  {busy ? '...' : '▶️'}
                 </div>
                 <div className="flex-1 text-left">
                   <p className="font-black text-sm text-cyan-700">Start Work</p>
@@ -1698,7 +2244,7 @@ function Drawer({
             }} disabled={busy}
               className="w-full flex items-center gap-3 px-4 py-4 rounded-2xl bg-green-50 border border-green-200 hover:bg-green-100 transition-all active:scale-[0.98] disabled:opacity-50">
               <div className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-lg bg-green-100 text-green-600 flex-shrink-0">
-                {busy ? '…' : '✓'}
+                {busy ? '...' : '✓'}
               </div>
               <div className="flex-1 text-left">
                 <p className="font-black text-sm text-green-700">Mark Complete</p>
@@ -1767,7 +2313,7 @@ function Drawer({
                   <>
                     <select value={selW} onChange={e => setSelW(e.target.value)}
                       className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-white border border-slate-200">
-                      <option value="">Select worker…</option>
+                      <option value="">Select worker...</option>
                       {availableForSlot.map(w => (
                         <option key={w.id} value={w.id}>
                           {w.name} — {w.phone}
@@ -1779,7 +2325,7 @@ function Drawer({
                     <button onClick={assign} disabled={!selW || busy || selW === b.worker_id}
                       className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
                       style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-                      {busy ? '…' : b.worker_id ? '✓ Reassign + Notify Customer 🔔' : '+ Assign Worker + Notify Customer 🔔'}
+                      {busy ? '...' : b.worker_id ? '✓ Reassign + Notify Customer 🔔' : '+ Assign Worker + Notify Customer 🔔'}
                     </button>
                   </>
                 )}
@@ -1814,7 +2360,7 @@ function Drawer({
                   disabled={!newDateTime || rescheduling}
                   className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
                   style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
-                  {rescheduling ? '…' : '📅 Reschedule + Notify Customer & Worker 🔔'}
+                  {rescheduling ? '...' : '📅 Reschedule + Notify Customer & Worker 🔔'}
                 </button>
               </div>
             </div>
@@ -1987,6 +2533,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
   const [showPhoneModal, setShowPhoneModal] = useState(false)
+  const [showRecurringPhoneModal, setShowRecurringPhoneModal] = useState(false)
   const [showBlockModal, setShowBlockModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
@@ -2320,7 +2867,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       <div className="flex flex-col items-center gap-3">
         <div className="w-10 h-10 rounded-full border-4 border-t-transparent animate-spin border-slate-200"
           style={{ borderTopColor: '#0891B2' }}/>
-        <p className="text-sm text-slate-400">Loading bookings…</p>
+        <p className="text-sm text-slate-400">Loading bookings...</p>
       </div>
     </div>
   )
@@ -2360,13 +2907,18 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
               style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)', boxShadow: '0 4px 12px rgba(8,145,178,0.25)' }}>
               📞 Phone Booking
             </button>
+            <button onClick={() => setShowRecurringPhoneModal(true)}
+              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black text-white active:scale-[0.98] transition-all whitespace-nowrap"
+              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)', boxShadow: '0 4px 12px rgba(124,58,237,0.25)' }}>
+              🔁 Recurring Package
+            </button>
             <button onClick={() => setShowBlockModal(true)}
               className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black text-white active:scale-[0.98] transition-all whitespace-nowrap"
               style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)', boxShadow: '0 4px 12px rgba(220,38,38,0.25)' }}>
               🚫 Block Slot
             </button>
           </div>
-          <input type="text" placeholder="Search service, customer, phone, worker…" value={search} onChange={e => setSearch(e.target.value)}
+          <input type="text" placeholder="Search service, customer, phone, worker..." value={search} onChange={e => setSearch(e.target.value)}
             className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
         </div>
       </div>
@@ -2893,7 +3445,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                   <select value={assignMap[b.id] ?? ''} onChange={e => setAssignMap(p => ({ ...p, [b.id]: e.target.value }))}
                                     className="flex-1 max-w-xs px-3 py-1.5 rounded-lg text-[13px] text-slate-800 outline-none bg-white"
                                     style={{ border: `1.5px solid ${slotAvailable.length > 0 ? '#FCD34D' : '#FECACA'}` }}>
-                                    <option value="">{slotAvailable.length === 0 ? 'No workers free' : 'Assign worker…'}</option>
+                                    <option value="">{slotAvailable.length === 0 ? 'No workers free' : 'Assign worker...'}</option>
                                     {slotAvailable.map(w => (
                                       <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
                                     ))}
@@ -2902,7 +3454,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                     disabled={!assignMap[b.id] || assigning === b.id || slotAvailable.length === 0}
                                     className="px-3 py-1.5 rounded-lg text-[11px] font-black text-white disabled:opacity-40 active:scale-95 whitespace-nowrap"
                                     style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-                                    {assigning === b.id ? '…' : 'Assign 🔔'}
+                                    {assigning === b.id ? '...' : 'Assign 🔔'}
                                   </button>
                                 </div>
                               </td>
@@ -2945,7 +3497,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                   disabled={!assignMap[mapFor.id] || assigning === mapFor.id}
                   className="w-full mt-3 h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
                   style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-                  {assigning === mapFor.id ? '…' : 'Assign selected worker + Notify 🔔'}
+                  {assigning === mapFor.id ? '...' : 'Assign selected worker + Notify 🔔'}
                 </button>
               )}
               <button onClick={() => { setSelected(mapFor); setMapFor(null) }}
@@ -2987,6 +3539,16 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           allBookings={slimBookings}
           onClose={() => setShowPhoneModal(false)}
           onDone={() => { setShowPhoneModal(false); load() }}
+        />
+      )}
+
+      {showRecurringPhoneModal && (
+        <RecurringPhoneBookingModal
+          services={services}
+          workers={workers}
+          allBookings={slimBookings}
+          onClose={() => setShowRecurringPhoneModal(false)}
+          onDone={() => { setShowRecurringPhoneModal(false); load() }}
         />
       )}
 
