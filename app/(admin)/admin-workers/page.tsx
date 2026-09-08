@@ -662,8 +662,15 @@ type AttendanceDay = {
   worked_minutes: number
   bookings_completed: number
   earned_amount: number
-  service_names: string[]
-  status: 'holiday' | 'off' | 'present' | 'absent' | 'upcoming'
+  // Full detail for every order SCHEDULED this day (any status) — not
+  // just completed-job names. Replaces the earlier separate
+  // service_names/cancelled_service_names arrays with one richer list.
+  day_bookings: unknown
+  // 'off' status removed — presence is now purely schedule-based:
+  // a scheduled working day is 'present', an unscheduled/disabled day
+  // (with no holiday marked) is 'absent'. Only 'holiday' (explicit
+  // admin mark) and 'upcoming' (future date) remain as the exceptions.
+  status: 'holiday' | 'present' | 'absent' | 'upcoming'
 }
 
 type WeekSummary = {
@@ -714,8 +721,34 @@ const ATTENDANCE_STATUS_STYLE: Record<AttendanceDay['status'], { bg: string; fg:
   present:  { bg: '#DCFCE7', fg: '#15803D', label: 'Present' },
   absent:   { bg: '#FEE2E2', fg: '#B91C1C', label: 'Absent' },
   holiday:  { bg: '#FEF3C7', fg: '#B45309', label: 'Holiday' },
-  off:      { bg: '#F1F5F9', fg: '#94A3B8', label: 'Off' },
   upcoming: { bg: '#F8FAFC', fg: '#CBD5E1', label: 'Upcoming' },
+}
+
+type DayBookingDetail = {
+  id: string
+  time: string
+  service_name: string
+  customer_name: string
+  final_amount: number
+  duration_minutes: number
+  status: string
+}
+
+// Formats minutes as e.g. "1h 30m" / "45m", matching the same style
+// used elsewhere in this file (secsToHrsLabel, minsToLabel).
+function durationLabel(mins: number): string {
+  const h = Math.floor(mins / 60), m = mins % 60
+  if (h === 0) return `${m}m`
+  if (m === 0) return `${h}h`
+  return `${h}h ${m}m`
+}
+
+const BOOKING_STATUS_CHIP: Record<string, { bg: string; fg: string }> = {
+  completed: { bg: '#DCFCE7', fg: '#15803D' },
+  cancelled: { bg: '#FEE2E2', fg: '#B91C1C' },
+  pending:   { bg: '#FEF3C7', fg: '#B45309' },
+  accepted:  { bg: '#DBEAFE', fg: '#1D4ED8' },
+  in_progress: { bg: '#CFFAFE', fg: '#0E7490' },
 }
 
 function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any }) {
@@ -729,21 +762,6 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
   const [holidayReason, setHolidayReason] = useState('')
   const [holidayPenalty, setHolidayPenalty] = useState('')
   const [saving, setSaving] = useState(false)
-
-  // Combined day-editor mode — one calendar now handles BOTH setting a
-  // day's working hours AND marking it a holiday+penalty, so the admin
-  // never has to jump to a separate tab mid-flow. Holidays are always
-  // ad-hoc and admin-chosen here — there is no automatic weekly day
-  // off (e.g. no built-in "Sundays off"); every holiday is a specific
-  // date the admin explicitly marks below, exactly like every other
-  // action on this calendar.
-  const [dayMode, setDayMode] = useState<'schedule' | 'holiday'>('schedule')
-  const [schedLoading, setSchedLoading] = useState(false)
-  const [schedEnabled, setSchedEnabled] = useState(true)
-  const [schedStart, setSchedStart] = useState('09:00')
-  const [schedEnd, setSchedEnd] = useState('17:00')
-  const [schedBreakOn, setSchedBreakOn] = useState(false)
-  const [schedBreakFrom, setSchedBreakFrom] = useState('13:00')
 
   async function load() {
     setLoading(true); setErr(null)
@@ -763,87 +781,16 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
   }
   useEffect(() => { load(); setSelectedDay(null) }, [workerId, monthDate])
 
-  async function openDay(d: AttendanceDay) {
+  // Opening a day is now purely about VIEWING what happened (full
+  // order details) and marking a holiday+penalty if needed — no
+  // schedule editing here. Working hours are set from the existing
+  // Schedule tab; Attendance only ever READS that schedule (via
+  // is_scheduled/status from worker_monthly_attendance) to decide
+  // Present vs Absent, exactly like everywhere else in this app.
+  function openDay(d: AttendanceDay) {
     setSelectedDay(d)
     setHolidayReason(d.holiday_reason ?? '')
     setHolidayPenalty(d.penalty_amount > 0 ? String(d.penalty_amount) : '')
-    // Default to whichever action is more likely relevant for this
-    // day: already a holiday -> open on the holiday editor; otherwise
-    // default to the schedule editor.
-    setDayMode(d.is_holiday ? 'holiday' : 'schedule')
-
-    // Pull this ONE day's actual schedule row (start/end/breaks) so the
-    // schedule editor pre-fills with what's really set, instead of
-    // always showing generic 09:00–17:00 defaults. worker_monthly_
-    // attendance only returns a boolean (is_scheduled), not the times
-    // themselves, so this is a small on-demand fetch — exactly the
-    // same pattern already used elsewhere in this file (e.g. PayRatesTab).
-    setSchedLoading(true)
-    try {
-      const { data } = await supabase
-        .from('worker_schedule_dates')
-        .select('enabled, start_time, end_time, breaks')
-        .eq('worker_id', workerId)
-        .eq('date', d.day)
-        .maybeSingle()
-      if (data) {
-        setSchedEnabled(data.enabled === true)
-        setSchedStart(data.start_time ?? '09:00')
-        setSchedEnd(data.end_time ?? '17:00')
-        const breaks = data.breaks ?? []
-        if (breaks.length > 0) {
-          setSchedBreakOn(true)
-          setSchedBreakFrom(breaks[0].from)
-        } else {
-          setSchedBreakOn(false)
-          setSchedBreakFrom('13:00')
-        }
-      } else {
-        setSchedEnabled(true)
-        setSchedStart('09:00')
-        setSchedEnd('17:00')
-        setSchedBreakOn(false)
-        setSchedBreakFrom('13:00')
-      }
-    } catch {
-      // Non-fatal — editor just falls back to defaults if this lookup
-      // fails; saving still works correctly either way.
-    } finally {
-      setSchedLoading(false)
-    }
-  }
-
-  function addMinsToTime(t: string, mins: number): string {
-    const [h, m] = t.split(':').map(Number)
-    const total = (h * 60 + m + mins + 1440) % 1440
-    const hh = Math.floor(total / 60), mm = total % 60
-    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
-  }
-
-  async function saveSchedule() {
-    if (!selectedDay) return
-    setSaving(true); setErr(null)
-    try {
-      const breaks = schedEnabled && schedBreakOn
-        ? [{ from: schedBreakFrom, to: addMinsToTime(schedBreakFrom, 15) }]
-        : []
-      const { error } = await supabase.from('worker_schedule_dates').upsert({
-        worker_id: workerId,
-        date: selectedDay.day,
-        enabled: schedEnabled,
-        start_time: schedStart,
-        end_time: schedEnd,
-        breaks,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'worker_id,date' })
-      if (error) { setErr(error.message); setSaving(false); return }
-      setSelectedDay(null)
-      await load()
-    } catch (e: any) {
-      setErr(e?.message ?? 'Could not save schedule')
-    } finally {
-      setSaving(false)
-    }
   }
 
   async function saveHoliday() {
@@ -904,16 +851,20 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
   const holidayCount = days.filter(d => d.status === 'holiday').length
   const totalPenalty = days.reduce((s, d) => s + (d.penalty_amount ?? 0), 0)
 
+  const selectedBookings: DayBookingDetail[] = (selectedDay?.day_bookings ?? []) as DayBookingDetail[]
+
   return (
     <div className="p-5 space-y-4">
       <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5">
         <p className="text-[11px] text-amber-700 font-semibold">
-          🗓 Tap any day to set its working hours or mark it as a holiday
-          with an optional penalty — both actions live right here. Holidays
-          are always chosen by you for a specific date; there is no
-          automatic weekly day off (e.g. Sundays are ordinary working
-          days unless you mark one as a holiday). This same monthly
-          picture is what the worker sees in their app.
+          🗓 Presence is read directly from this worker's existing
+          schedule (set in the Schedule tab): a day set to Working shows{' '}
+          <strong>Present</strong>; a day set to Day Off with no holiday
+          marked shows <strong>Absent</strong>. Tap any day to see every
+          order scheduled that day and, if needed, mark it as a holiday
+          with an optional penalty — deducted directly from payout.
+          There is no automatic weekly day off — Sundays are ordinary
+          working days unless you mark one as a holiday.
         </p>
       </div>
 
@@ -1038,130 +989,76 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
 
           <div className="flex items-center gap-4 text-[11px] text-slate-500 flex-wrap">
             <span>Worked: {Math.round(selectedDay.worked_minutes)} min</span>
-            <span>Jobs: {selectedDay.bookings_completed}</span>
+            <span>Jobs done: {selectedDay.bookings_completed}</span>
             <span>Earned: ₹{selectedDay.earned_amount.toLocaleString('en-IN')}</span>
             <span>Status: {ATTENDANCE_STATUS_STYLE[selectedDay.status].label}</span>
           </div>
 
-          {selectedDay.service_names.length > 0 && (
-            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1">Services done this day</p>
-              <div className="flex flex-wrap gap-1.5">
-                {selectedDay.service_names.map((name, i) => (
-                  <span key={i} className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200">
-                    {name}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Mode toggle — set hours vs. mark holiday, both from this
-              same day panel so the admin never has to switch tabs. */}
-          <div className="flex gap-2">
-            <button onClick={() => setDayMode('schedule')}
-              className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
-              style={{
-                background: dayMode === 'schedule' ? '#0891B2' : '#fff',
-                color: dayMode === 'schedule' ? '#fff' : '#64748b',
-                border: '1px solid #CBD5E1',
-              }}>
-              🗓 Set Schedule
-            </button>
-            <button onClick={() => setDayMode('holiday')}
-              className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
-              style={{
-                background: dayMode === 'holiday' ? '#D97706' : '#fff',
-                color: dayMode === 'holiday' ? '#fff' : '#64748b',
-                border: '1px solid #CBD5E1',
-              }}>
-              🚫 Holiday & Penalty
-            </button>
-          </div>
-
-          {dayMode === 'schedule' ? (
-            schedLoading ? (
-              <div className="py-4 text-center text-xs text-slate-400">Loading current schedule…</div>
-            ) : (
-              <div className="space-y-3">
-                <div className="flex gap-2">
-                  <button onClick={() => setSchedEnabled(true)}
-                    className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
-                    style={{ background: schedEnabled ? '#0891B2' : '#fff', color: schedEnabled ? '#fff' : '#64748b', border: '1px solid #CBD5E1' }}>
-                    Working
-                  </button>
-                  <button onClick={() => setSchedEnabled(false)}
-                    className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
-                    style={{ background: !schedEnabled ? '#64748b' : '#fff', color: !schedEnabled ? '#fff' : '#64748b', border: '1px solid #CBD5E1' }}>
-                    Day off
-                  </button>
-                </div>
-
-                {schedEnabled && (
-                  <>
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1">
-                        <p className="text-[10px] text-slate-500 mb-1">Start</p>
-                        <input type="time" value={schedStart} onChange={e => setSchedStart(e.target.value)}
-                          className="w-full px-2 py-1.5 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
+          {/* Full order details — every booking scheduled this day,
+              any status, with time/service/customer/amount, not just
+              a name chip. */}
+          {selectedBookings.length > 0 ? (
+            <div className="rounded-lg bg-white border border-slate-200 overflow-hidden">
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide px-3 pt-2">
+                Orders this day ({selectedBookings.length})
+              </p>
+              <div className="divide-y divide-slate-100 mt-1">
+                {selectedBookings.map(b => {
+                  const chip = BOOKING_STATUS_CHIP[b.status] ?? { bg: '#F1F5F9', fg: '#64748B' }
+                  return (
+                    <div key={b.id} className="flex items-center justify-between px-3 py-2 gap-2">
+                      <div className="min-w-0">
+                        <p className="text-[12px] font-bold text-slate-800 truncate">{b.service_name}</p>
+                        <p className="text-[11px] text-slate-400 truncate">{b.time} · {durationLabel(b.duration_minutes)} · {b.customer_name}</p>
                       </div>
-                      <div className="flex-1">
-                        <p className="text-[10px] text-slate-500 mb-1">End</p>
-                        <input type="time" value={schedEnd} onChange={e => setSchedEnd(e.target.value)}
-                          className="w-full px-2 py-1.5 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-[12px] font-black text-slate-700">₹{Number(b.final_amount).toLocaleString('en-IN')}</span>
+                        <span className="text-[9px] font-black px-2 py-0.5 rounded-full capitalize"
+                          style={{ background: chip.bg, color: chip.fg }}>
+                          {b.status.replace('_', ' ')}
+                        </span>
                       </div>
                     </div>
-                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                      <input type="checkbox" checked={schedBreakOn} onChange={e => setSchedBreakOn(e.target.checked)} />
-                      15-min break starting at
-                      {schedBreakOn && (
-                        <input type="time" value={schedBreakFrom} onChange={e => setSchedBreakFrom(e.target.value)}
-                          className="px-2 py-1 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
-                      )}
-                    </label>
-                  </>
-                )}
-
-                <button onClick={saveSchedule} disabled={saving}
-                  className="w-full py-2.5 rounded-xl font-black text-white text-sm disabled:opacity-40"
-                  style={{ background: '#16a34a' }}>
-                  {saving ? '…' : 'Save schedule for this day'}
-                </button>
-              </div>
-            )
-          ) : (
-            <div className="space-y-3">
-              <div>
-                <p className="text-[10px] text-slate-500 mb-1">Reason (optional)</p>
-                <input value={holidayReason} onChange={e => setHolidayReason(e.target.value)}
-                  placeholder="e.g. Sick leave, personal reasons"
-                  className="w-full px-3 py-2 rounded-lg text-sm text-slate-800 bg-white border border-slate-200 outline-none" />
-              </div>
-
-              <div>
-                <p className="text-[10px] text-slate-500 mb-1">Penalty amount (₹)</p>
-                <input type="number" min={0} value={holidayPenalty} onChange={e => setHolidayPenalty(e.target.value)}
-                  placeholder="0"
-                  className="w-full px-3 py-2 rounded-lg text-sm font-bold text-slate-800 bg-white border border-slate-200 outline-none" />
-                <p className="text-[10px] text-slate-400 mt-1">Deducted directly from this worker&apos;s payout total for the period.</p>
-              </div>
-
-              <div className="flex gap-2 pt-1">
-                {selectedDay.is_holiday && (
-                  <button onClick={removeHoliday} disabled={saving}
-                    className="flex-1 py-2.5 rounded-xl font-bold text-white text-sm disabled:opacity-40"
-                    style={{ background: '#64748B' }}>
-                    {saving ? '…' : 'Remove holiday'}
-                  </button>
-                )}
-                <button onClick={saveHoliday} disabled={saving}
-                  className="flex-1 py-2.5 rounded-xl font-black text-white text-sm disabled:opacity-40"
-                  style={{ background: '#D97706' }}>
-                  {saving ? '…' : selectedDay.is_holiday ? 'Update holiday' : 'Mark as holiday'}
-                </button>
+                  )
+                })}
               </div>
             </div>
+          ) : (
+            <p className="text-[11px] text-slate-400">No orders scheduled this day.</p>
           )}
+
+          <div className="space-y-3 pt-1 border-t border-amber-200/60">
+            <p className="text-[11px] font-black uppercase tracking-wide text-amber-700 pt-2">🚫 Holiday & Penalty</p>
+            <div>
+              <p className="text-[10px] text-slate-500 mb-1">Reason (optional)</p>
+              <input value={holidayReason} onChange={e => setHolidayReason(e.target.value)}
+                placeholder="e.g. Sick leave, personal reasons"
+                className="w-full px-3 py-2 rounded-lg text-sm text-slate-800 bg-white border border-slate-200 outline-none" />
+            </div>
+
+            <div>
+              <p className="text-[10px] text-slate-500 mb-1">Penalty amount (₹)</p>
+              <input type="number" min={0} value={holidayPenalty} onChange={e => setHolidayPenalty(e.target.value)}
+                placeholder="0"
+                className="w-full px-3 py-2 rounded-lg text-sm font-bold text-slate-800 bg-white border border-slate-200 outline-none" />
+              <p className="text-[10px] text-slate-400 mt-1">Deducted directly from this worker&apos;s payout total for the period.</p>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              {selectedDay.is_holiday && (
+                <button onClick={removeHoliday} disabled={saving}
+                  className="flex-1 py-2.5 rounded-xl font-bold text-white text-sm disabled:opacity-40"
+                  style={{ background: '#64748B' }}>
+                  {saving ? '…' : 'Remove holiday'}
+                </button>
+              )}
+              <button onClick={saveHoliday} disabled={saving}
+                className="flex-1 py-2.5 rounded-xl font-black text-white text-sm disabled:opacity-40"
+                style={{ background: '#D97706' }}>
+                {saving ? '…' : selectedDay.is_holiday ? 'Update holiday' : 'Mark as holiday'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -3002,13 +2899,15 @@ export default function AdminWorkers() {
       setPendingCount(pj.count ?? 0)
     } catch {}
     if (selected) { const updated = list.find(w => w.id === selected.id); if (updated) setSelected(updated) }
-    for (const w of list) {
-      if (w.totalWorkSecs > 0) {
-        supabase.from('workers').upsert(
-          { user_id: w.id, total_work_seconds: w.totalWorkSecs },
-          { onConflict: 'user_id' }
-        ).then(() => {})
-      }
+    // PERF: previously fired one upsert call PER worker, every single
+    // time this page loaded — with dozens of workers that's dozens of
+    // separate write round-trips on every load, fire-and-forget with
+    // no error handling. Batched into one upsert with all rows at once.
+    const workSecsRows = list
+      .filter(w => w.totalWorkSecs > 0)
+      .map(w => ({ user_id: w.id, total_work_seconds: w.totalWorkSecs }))
+    if (workSecsRows.length > 0) {
+      supabase.from('workers').upsert(workSecsRows, { onConflict: 'user_id' }).then(() => {})
     }
     setLoading(false)
   }

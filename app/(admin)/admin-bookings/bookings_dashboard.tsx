@@ -162,7 +162,7 @@ function nextDays(n: number): Date[] {
 
 function isWorkerAvailableAt(
   worker: Worker, scheduledAt: string, durationMins: number,
-  existingBookings: { worker_id: string; scheduled_at: string }[]
+  existingBookings: { worker_id: string; scheduled_at: string; duration_mins?: number }[]
 ): boolean {
   if (!worker.is_available) return false
   const slotDt    = new Date(scheduledAt)
@@ -174,9 +174,17 @@ function isWorkerAvailableAt(
   if (dayEntry) {
     if (!dayEntry.enabled) return false
     const slotMins = localSlot.getHours() * 60 + localSlot.getMinutes()
-    if (slotMins < timeToMins(dayEntry.start) || slotMins >= timeToMins(dayEntry.end)) return false
+    // FIXED: previously only checked the slot's START time against the
+    // shift window, so a job starting just before shift-end could
+    // appear bookable even though it would run past closing time. Now
+    // also checks the job's full duration fits before the shift ends.
+    const slotEndMins = slotMins + durationMins
+    if (slotMins < timeToMins(dayEntry.start) || slotEndMins > timeToMins(dayEntry.end)) return false
     for (const b of (dayEntry.breaks ?? [])) {
       if (slotMins >= timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
+      // FIXED: also block if the job would RUN INTO a break partway
+      // through, not just start inside one.
+      if (slotEndMins > timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
     }
   } else if (worker.hasAnyScheduleDates) {
     return false
@@ -185,7 +193,15 @@ function isWorkerAvailableAt(
   for (const bk of existingBookings) {
     if (bk.worker_id !== worker.id) continue
     const bkDt  = new Date(bk.scheduled_at)
-    const bkEnd = new Date(bkDt.getTime() + durationMins * 60000)
+    // FIXED: previously used the NEW booking's own duration to estimate
+    // how long this OTHER, unrelated booking occupies the worker — so
+    // a short new booking could under-estimate a long existing job's
+    // real busy window, letting a slot show as free when the worker
+    // was actually still busy. Now uses that other booking's own real
+    // duration (falls back to the new booking's duration only if the
+    // other booking's duration wasn't provided at all).
+    const bkDurMins = bk.duration_mins ?? durationMins
+    const bkEnd = new Date(bkDt.getTime() + bkDurMins * 60000)
     if (slotDt < bkEnd && slotEnd > bkDt) return false
   }
   return true
@@ -2046,9 +2062,35 @@ function Drawer({
       return
     }
     setBusy(true)
-    await supabase.from('bookings')
-      .update({ worker_id: selW, status: 'accepted' })
-      .eq('id', b.id)
+    // FIXED: previously a raw, unchecked update — this is exactly how
+    // real double-bookings got saved, since nothing server-side ever
+    // re-verified the worker was actually free. Now goes through
+    // admin_assign_worker, which re-runs the full holiday/schedule/
+    // conflict check (using each booking's real duration) before
+    // allowing the assignment.
+    const { data, error } = await supabase.rpc('admin_assign_worker', {
+      p_booking_id: b.id,
+      p_worker_id: selW,
+    })
+    if (error) {
+      alert(error.message)
+      setBusy(false)
+      return
+    }
+    if (!data?.success) {
+      const reasonMap: Record<string, string> = {
+        not_found: 'Booking not found.',
+        cannot_assign_status: 'This booking can no longer be assigned (already in progress, completed, or cancelled).',
+        worker_unavailable: 'This worker is currently marked unavailable.',
+        worker_not_in_zone: 'This worker is not assigned to cover this pincode.',
+        worker_on_holiday: 'This worker has a holiday marked on this date.',
+        worker_not_scheduled: 'This worker is not scheduled to work at this time.',
+        worker_busy: 'This worker actually has another job that overlaps this time — please pick someone else.',
+      }
+      alert(reasonMap[data?.reason] ?? (data?.message || 'Could not assign this worker.'))
+      setBusy(false)
+      return
+    }
     await sendNotification(
       b.customer_id, '✅ Booking Confirmed!',
       `Your ${b.service_name} is scheduled for ${scheduledStr}. A verified pro has been assigned.`,
@@ -2569,7 +2611,18 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
 
   const slimBookings = bookings
     .filter(b => ['pending','accepted','in_progress'].includes(b.status))
-    .map(b => ({ worker_id: b.worker_id ?? '', scheduled_at: b.scheduled_at }))
+    .map(b => ({
+      worker_id: b.worker_id ?? '',
+      scheduled_at: b.scheduled_at,
+      // FIXED: previously omitted entirely, forcing isWorkerAvailableAt
+      // to guess this booking's duration using whatever NEW booking's
+      // duration was being checked against it. Same fallback priority
+      // as every server-side conflict check in this codebase: actual
+      // service duration -> reserved slot duration -> catalog default
+      // -> 60 min, plus any Extra Time actually added.
+      duration_mins: (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
+        + (b.extra_time_mins ?? 0),
+    }))
 
   function stripDirectionalSuffix(name: string): string {
     return name
@@ -2728,18 +2781,39 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       }
     }))
 
+    // PERF: previously did one async pincode lookup PER pending/accepted
+    // booking (N+1 queries — on a busy day this could be dozens of
+    // round-trips on every single load). Now gathers every unique
+    // pincode across all bookings needing assignment and resolves them
+    // all in ONE query, then builds each booking's eligible-worker set
+    // from that single result in memory.
     const needsAssignBookings = (bd ?? []).filter((b: any) =>
       ['pending', 'accepted'].includes(b.status)
     )
-    const zoneEntries = await Promise.all(
-      needsAssignBookings.map(async (b: any) => {
-        const ids = await resolvePincodeWorkerIds(
-          supabase,
-          b.addresses?.pincode ?? null
-        )
-        return [b.id as string, ids] as const
-      })
-    )
+    const uniquePincodes = Array.from(new Set(
+      needsAssignBookings
+        .map((b: any) => b.addresses?.pincode)
+        .filter((p: any) => p && String(p).trim() !== '')
+    )) as string[]
+
+    let pincodeWorkerMap: Record<string, Set<string>> = {}
+    if (uniquePincodes.length > 0) {
+      const { data: pinRows } = await supabase
+        .from('worker_pincodes')
+        .select('pincode, worker_id')
+        .in('pincode', uniquePincodes)
+      for (const row of (pinRows ?? []) as any[]) {
+        if (!pincodeWorkerMap[row.pincode]) pincodeWorkerMap[row.pincode] = new Set()
+        pincodeWorkerMap[row.pincode].add(row.worker_id)
+      }
+    }
+    const zoneEntries = needsAssignBookings.map((b: any) => {
+      const pincode = b.addresses?.pincode ?? null
+      const ids = pincode && pincodeWorkerMap[pincode] && pincodeWorkerMap[pincode].size > 0
+        ? pincodeWorkerMap[pincode]
+        : null
+      return [b.id as string, ids] as const
+    })
     setZoneEligible(Object.fromEntries(zoneEntries))
 
     if (wd) setWorkers(wd.map((w: any) => ({
@@ -2767,12 +2841,23 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   }, [])
 
   useEffect(() => {
+    // PERF: previously called load() directly on every single postgres
+    // change — creating a 7-day recurring package (7 inserts in quick
+    // succession) fired 7 concurrent full reloads, each doing its own
+    // fan-out of queries. Debouncing collapses any burst of changes
+    // within 800ms into a single reload, which is the fix for the most
+    // likely cause of the site freezing under real usage.
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null
     const ch = supabase.channel('bkng')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => {
-        load()
+        if (debounceTimer) clearTimeout(debounceTimer)
+        debounceTimer = setTimeout(() => { load() }, 800)
       })
       .subscribe()
-    return () => { supabase.removeChannel(ch) }
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      supabase.removeChannel(ch)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -2783,9 +2868,26 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   async function quickAssign(bId: string) {
     const wId = assignMap[bId]; if (!wId) return
     setAssigning(bId)
-    await supabase.from('bookings')
-      .update({ worker_id: wId, status: 'accepted' })
-      .eq('id', bId)
+    // FIXED: same unchecked-raw-update bug as the drawer's assign() —
+    // now goes through the same server-side re-verification.
+    const { data, error } = await supabase.rpc('admin_assign_worker', {
+      p_booking_id: bId,
+      p_worker_id: wId,
+    })
+    if (error || !data?.success) {
+      const reasonMap: Record<string, string> = {
+        not_found: 'Booking not found.',
+        cannot_assign_status: 'This booking can no longer be assigned.',
+        worker_unavailable: 'This worker is currently marked unavailable.',
+        worker_not_in_zone: 'This worker is not assigned to cover this pincode.',
+        worker_on_holiday: 'This worker has a holiday marked on this date.',
+        worker_not_scheduled: 'This worker is not scheduled to work at this time.',
+        worker_busy: 'This worker actually has another job that overlaps this time — please pick someone else.',
+      }
+      alert(error?.message ?? reasonMap[data?.reason] ?? (data?.message || 'Could not assign this worker.'))
+      setAssigning(null)
+      return
+    }
     const bk = bookings.find(b => b.id === bId)
     if (bk) {
       const scheduledStr = new Date(bk.scheduled_at).toLocaleString('en-IN', {
