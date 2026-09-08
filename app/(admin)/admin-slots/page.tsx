@@ -13,6 +13,13 @@ import { createClient } from '@/lib/supabase/client'
 // logic as try_claim_slot/check_slot_availability server-side. This is a
 // read-only operational view: "how much room is left in this area, on
 // this day" — not a booking tool itself.
+//
+// NEW: tapping a free slot opens a popup listing exactly which worker(s)
+// are free at that time, via admin_get_free_workers_for_slot() — which
+// re-runs the identical eligibility/schedule/conflict logic the grid
+// itself uses, so the two always agree on who counts as "free." For each
+// worker it also shows the gap between this slot ending and whatever
+// they're doing next (their next booking that day, or shift-end if none).
 // ============================================================================
 
 type AreaOption = {
@@ -24,6 +31,15 @@ type SlotRow = {
   time_slot: string   // 'HH:MM' 24hr
   available: boolean
   free_count: number
+}
+
+type FreeWorker = {
+  worker_id: string
+  full_name: string
+  phone: string
+  free_until: string        // ISO timestamp
+  free_minutes: number
+  free_until_label: string  // e.g. "2:30 PM"
 }
 
 const DURATION_OPTIONS = [
@@ -52,6 +68,21 @@ function todayStr(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+// Builds the actual timestamptz for a given 'HH:MM' slot on the
+// selected date, interpreted in IST — matching every other slot
+// computation in this app (admin_get_area_slot_grid, try_claim_slot).
+function slotToIso(dateStr: string, hhmm: string): string {
+  return `${dateStr}T${hhmm}:00+05:30`
+}
+
+function freeDurationLabel(mins: number): string {
+  if (mins <= 0) return 'right up to their next job'
+  const h = Math.floor(mins / 60), m = mins % 60
+  if (h === 0) return `${m}m`
+  if (m === 0) return `${h}h`
+  return `${h}h ${m}m`
+}
+
 export default function AdminSlotsPage() {
   const supabase = createClient()
 
@@ -64,6 +95,12 @@ export default function AdminSlotsPage() {
   const [grid, setGrid] = useState<SlotRow[]>([])
   const [gridLoading, setGridLoading] = useState(false)
   const [gridError, setGridError] = useState<string | null>(null)
+
+  // ── Free-workers popup state ────────────────────────────────────
+  const [popupSlot, setPopupSlot] = useState<SlotRow | null>(null)
+  const [popupWorkers, setPopupWorkers] = useState<FreeWorker[]>([])
+  const [popupLoading, setPopupLoading] = useState(false)
+  const [popupError, setPopupError] = useState<string | null>(null)
 
   // ── Load distinct pincode/area options from service_areas ──────
   useEffect(() => {
@@ -148,6 +185,34 @@ export default function AdminSlotsPage() {
       clearInterval(interval)
     }
   }, [supabase, loadGrid])
+
+  // ── Free-workers popup ──────────────────────────────────────────
+  async function openSlot(slot: SlotRow) {
+    if (!slot.available) return // Full slots have nothing to show.
+    setPopupSlot(slot)
+    setPopupWorkers([])
+    setPopupError(null)
+    setPopupLoading(true)
+    try {
+      const { data, error } = await supabase.rpc('admin_get_free_workers_for_slot', {
+        p_pincode: selectedPincode,
+        p_scheduled_at: slotToIso(selectedDate, slot.time_slot),
+        p_duration_mins: duration,
+      })
+      if (error) { setPopupError(error.message); setPopupLoading(false); return }
+      setPopupWorkers((data ?? []) as FreeWorker[])
+    } catch (e: any) {
+      setPopupError(e?.message ?? 'Could not load free workers')
+    } finally {
+      setPopupLoading(false)
+    }
+  }
+
+  function closePopup() {
+    setPopupSlot(null)
+    setPopupWorkers([])
+    setPopupError(null)
+  }
 
   const availableCount = grid.filter(s => s.available).length
   const selectedAreaLabel = areas.find(a => a.pincode === selectedPincode)?.label ?? selectedPincode
@@ -234,7 +299,7 @@ export default function AdminSlotsPage() {
             <p className="text-[11px] text-slate-400">
               {gridLoading
                 ? 'Checking availability…'
-                : `${availableCount} of ${grid.length} slots available · ${duration} min service`}
+                : `${availableCount} of ${grid.length} slots available · ${duration} min service · tap a free slot to see who's available`}
             </p>
           </div>
           <div className="flex items-center gap-4">
@@ -270,12 +335,15 @@ export default function AdminSlotsPage() {
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-2.5">
               {grid.map(slot => (
-                <div
+                <button
                   key={slot.time_slot}
-                  className="h-16 rounded-xl flex flex-col items-center justify-center border transition-all"
+                  onClick={() => openSlot(slot)}
+                  disabled={!slot.available}
+                  className="h-16 rounded-xl flex flex-col items-center justify-center border transition-all disabled:cursor-not-allowed hover:enabled:scale-[1.03] hover:enabled:shadow-md"
                   style={{
                     background: slot.available ? '#ECFEFF' : '#F8FAFC',
                     borderColor: slot.available ? '#06B6D4' : '#E2E8F0',
+                    cursor: slot.available ? 'pointer' : 'not-allowed',
                   }}>
                   <span className="text-[13px] font-black"
                     style={{ color: slot.available ? '#0891B2' : '#CBD5E1' }}>
@@ -288,7 +356,7 @@ export default function AdminSlotsPage() {
                   ) : (
                     <span className="text-[10px] font-bold text-slate-400 mt-0.5">Full</span>
                   )}
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -306,6 +374,78 @@ export default function AdminSlotsPage() {
           )}
         </div>
       </div>
+
+      {/* Free-workers popup */}
+      {popupSlot && (
+        <>
+          <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={closePopup} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <div>
+                <h2 className="text-lg font-black text-slate-800">
+                  {pretty12h(popupSlot.time_slot)} · {selectedAreaLabel}
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Who&apos;s free for a {duration}-min job at this time
+                </p>
+              </div>
+              <button onClick={closePopup}
+                className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+            </div>
+
+            <div className="px-6 py-5 max-h-[70vh] overflow-y-auto">
+              {popupError && (
+                <div className="rounded-xl px-4 py-3 bg-red-50 border border-red-200 mb-3">
+                  <p className="text-sm font-bold text-red-600">Could not load workers: {popupError}</p>
+                </div>
+              )}
+
+              {popupLoading ? (
+                <div className="space-y-2">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div key={i} className="h-16 rounded-xl bg-slate-100 animate-pulse" />
+                  ))}
+                </div>
+              ) : popupWorkers.length === 0 && !popupError ? (
+                <div className="py-8 text-center">
+                  <p className="text-3xl mb-2">🤔</p>
+                  <p className="text-slate-500 text-sm font-semibold">No workers found for this slot</p>
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    The grid said this slot was free — try refreshing if this looks wrong.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {popupWorkers.map(w => (
+                    <div key={w.worker_id}
+                      className="rounded-xl border border-slate-200 px-4 py-3 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-9 h-9 rounded-full flex items-center justify-center font-black text-white flex-shrink-0"
+                          style={{ background: 'linear-gradient(135deg,#F59E0B,#D97706)' }}>
+                          {w.full_name?.[0]?.toUpperCase() ?? '?'}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-slate-800 truncate">{w.full_name}</p>
+                          <a href={`tel:${w.phone}`} className="text-[11px] text-cyan-600 font-semibold hover:underline">
+                            {w.phone}
+                          </a>
+                        </div>
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <p className="text-[11px] text-slate-400">Free until</p>
+                        <p className="text-sm font-black text-emerald-600">{w.free_until_label}</p>
+                        <p className="text-[10px] text-slate-400">
+                          {freeDurationLabel(w.free_minutes)} after this job
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }

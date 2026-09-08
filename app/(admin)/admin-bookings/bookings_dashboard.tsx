@@ -1068,7 +1068,9 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
   const supabase = createClient()
   const [phone, setPhone] = useState('')
   const [name, setName] = useState('')
-  const [serviceId, setServiceId] = useState('')
+  const [serviceLines, setServiceLines] = useState<{ serviceId: string; quantity: number }[]>([
+    { serviceId: '', quantity: 1 },
+  ])
   const [pricePerVisit, setPricePerVisit] = useState('')
   const [platformFee] = useState(10)
   const [flatNo, setFlatNo] = useState('')
@@ -1155,15 +1157,40 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
 
   const filteredWorkers = zoneWorkerIds == null ? workers : workers.filter(w => zoneWorkerIds.has(w.id))
 
-  const selectedService = services.find(s => s.id === serviceId)
-  const durationMins = selectedService?.duration_minutes ?? 60
+  function addServiceLine() {
+    setServiceLines(prev => [...prev, { serviceId: '', quantity: 1 }])
+    resetAvailability()
+  }
+  function removeServiceLine(idx: number) {
+    setServiceLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx))
+    resetAvailability()
+  }
+  function updateServiceLine(idx: number, patch: Partial<{ serviceId: string; quantity: number }>) {
+    setServiceLines(prev => prev.map((line, i) => i === idx ? { ...line, ...patch } : line))
+    resetAvailability()
+  }
+
+  const validServiceLines = serviceLines.filter(l => l.serviceId)
+
+  // Combined duration + catalog price across every selected service —
+  // same computation pattern as PhoneBookingModal's multi-service total.
+  const durationMins = validServiceLines.reduce((sum, line) => {
+    const svc = services.find(s => s.id === line.serviceId)
+    if (!svc) return sum
+    return sum + (svc.duration_minutes ?? 60) * Math.max(1, line.quantity)
+  }, 0)
+  const combinedCatalogPrice = validServiceLines.reduce((sum, line) => {
+    const svc = services.find(s => s.id === line.serviceId)
+    if (!svc || svc.base_price == null) return sum
+    return sum + svc.base_price * Math.max(1, line.quantity)
+  }, 0)
 
   useEffect(() => {
-    if (selectedService && !pricePerVisit) {
-      setPricePerVisit(selectedService.base_price != null ? String(selectedService.base_price) : '')
+    if (validServiceLines.length > 0 && !pricePerVisit) {
+      setPricePerVisit(combinedCatalogPrice > 0 ? String(combinedCatalogPrice) : '')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serviceId])
+  }, [JSON.stringify(serviceLines)])
 
   function resetAvailability() {
     setChecked(false)
@@ -1234,7 +1261,7 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
   const packageSubtotal = (Number(pricePerVisit) || 0) * 7
   const totalAmount = packageSubtotal + platformFee
 
-  const canSubmit = phone.trim().length >= 10 && serviceId && pricePerVisit.trim() !== '' &&
+  const canSubmit = phone.trim().length >= 10 && validServiceLines.length > 0 && pricePerVisit.trim() !== '' &&
     Number(pricePerVisit) > 0 && fullAddress.trim() && pincode.trim() &&
     checked && allConflictsResolved && overridesVerified === true
 
@@ -1254,10 +1281,9 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
         p_city: city.trim() || null,
         p_pincode: pincode.trim(),
         p_full_address: fullAddress.trim(),
-        p_service_id: serviceId,
+        p_services: validServiceLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
         p_start_date: localDateStr(startDate),
         p_time: timeSlotTo24h(standardSlot),
-        p_duration_mins: durationMins,
         p_price_per_visit: Number(pricePerVisit),
         p_total_amount: totalAmount,
         p_day_overrides: overridesPayload,
@@ -1341,14 +1367,43 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
             </div>
 
             <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Service (single service for the whole package)</p>
-              <select value={serviceId} onChange={e => { setServiceId(e.target.value); resetAvailability() }}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
-                <option value="">Select service...</option>
-                {services.map(s => (
-                  <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Services (same for every visit)</p>
+                <button type="button" onClick={addServiceLine}
+                  className="text-[11px] font-bold text-cyan-700 hover:text-cyan-800">
+                  + Add another service
+                </button>
+              </div>
+              <div className="space-y-2">
+                {serviceLines.map((line, idx) => (
+                  <div key={idx} className="grid grid-cols-3 gap-3">
+                    <select value={line.serviceId}
+                      onChange={e => updateServiceLine(idx, { serviceId: e.target.value })}
+                      className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                      <option value="">Select service...</option>
+                      {services.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
+                      ))}
+                    </select>
+                    <div className="flex items-center gap-2">
+                      <input type="number" min={1} value={line.quantity}
+                        onChange={e => updateServiceLine(idx, { quantity: Math.max(1, Number(e.target.value)) })}
+                        className="flex-1 px-3 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                      {serviceLines.length > 1 && (
+                        <button type="button" onClick={() => removeServiceLine(idx)}
+                          className="w-9 h-9 flex-shrink-0 rounded-lg flex items-center justify-center bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 ))}
-              </select>
+              </div>
+              {durationMins > 0 && (
+                <p className="text-[11px] text-slate-400 mt-1.5">
+                  Combined duration per visit: {durationMins} min
+                </p>
+              )}
             </div>
 
             <div>
