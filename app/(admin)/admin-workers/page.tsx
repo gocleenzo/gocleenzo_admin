@@ -25,27 +25,16 @@ type Worker = {
   completedList: RecentJob[]
   todaySchedule: TodayEntry | null
   worker_otp: string | null
-  // Location tracking — reflects the worker app's device-level Location
-  // toggle. The worker app now BLOCKS ITSELF entirely while location
-  // services are off (LocationGate), so "location off" here also means
-  // the worker literally cannot use the app at all right now — this
-  // isn't just "app closed", it's a hard signal.
   locationUpdatedAt: string | null
-  // work hours aggregates
   totalWorkSecs: number
   todayWorkSecs: number
   thisWeekWorkSecs: number
   thisMonthWorkSecs: number
-  dailyHours: { date: string; secs: number }[]      // last 30 days
-  weeklyHours: { week: string; secs: number }[]     // last 12 weeks
-  monthlyHours: { month: string; secs: number }[]   // last 12 months
+  dailyHours: { date: string; secs: number }[]
+  weeklyHours: { week: string; secs: number }[]
+  monthlyHours: { month: string; secs: number }[]
 }
 
-// A worker's location is considered "live" if it's been updated within
-// this window — matches the same 2-minute freshness threshold used by
-// the live map / coverage views, so a worker's status looks consistent
-// everywhere in the admin app rather than using different thresholds
-// in different places.
 const LOCATION_STALE_MS = 2 * 60 * 1000;
 
 function isLocationLive(updatedAt: string | null): boolean {
@@ -64,9 +53,7 @@ function locationAgoLabel(updatedAt: string | null): string {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
-type ServiceStat = {
-  name: string; count: number; income: number; secs: number
-}
+type ServiceStat = { name: string; count: number; income: number; secs: number }
 
 type RecentJob = {
   id: string; service_name: string; area: string; status: string
@@ -100,9 +87,6 @@ function todayNetMins(entry: TodayEntry | null): number {
   return Math.max(0, total - breakMins)
 }
 
-// Is the worker currently within today's scheduled hours (and not on a
-// break)? No entry for today = not scheduled = false (the admin hasn't
-// appointed hours for this date via the calendar yet).
 function isWorkingNow(entry: TodayEntry | null): boolean {
   if (!entry || !entry.enabled) return false
   const now = new Date()
@@ -122,7 +106,6 @@ function elapsed(start: string, end?: string | null) {
   return Math.floor(((end ? new Date(end) : new Date()).getTime() - new Date(start).getTime()) / 1000)
 }
 
-// ── Work Hours Helpers ─────────────────────────────────────────
 function secsToHrsLabel(s: number) {
   if (!s) return '0h'
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
@@ -133,7 +116,7 @@ function secsToHrsLabel(s: number) {
 
 function startOfWeek(d: Date): Date {
   const day = d.getDay()
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1) // Monday
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1)
   return new Date(d.getFullYear(), d.getMonth(), diff)
 }
 
@@ -147,7 +130,6 @@ function isoMonth(d: Date): string {
 }
 
 function weekLabel(w: string): string {
-  // "2024-W23" → "Jun W3"
   const [year, wNum] = w.split('-W')
   const jan1 = new Date(Number(year), 0, 1)
   const d = new Date(jan1.getTime() + (Number(wNum) - 1) * 7 * 86400000)
@@ -189,21 +171,18 @@ function buildWorkHours(completedBookings: any[]) {
     if (monthStr === thisMonth)  thisMonthWorkSecs += secs
   }
 
-  // last 30 days
   const dailyHours = Array.from({ length: 30 }, (_, i) => {
     const d = new Date(now); d.setDate(d.getDate() - (29 - i))
     const ds = d.toISOString().slice(0, 10)
     return { date: d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }), secs: dailyMap[ds] ?? 0 }
   })
 
-  // last 12 weeks
   const weeklyHours = Array.from({ length: 12 }, (_, i) => {
     const d = new Date(now); d.setDate(d.getDate() - (11 - i) * 7)
     const ws = isoWeek(d)
     return { week: weekLabel(ws), secs: weeklyMap[ws] ?? 0 }
   })
 
-  // last 12 months
   const monthlyHours = Array.from({ length: 12 }, (_, i) => {
     const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1)
     const ms = isoMonth(d)
@@ -213,7 +192,6 @@ function buildWorkHours(completedBookings: any[]) {
   return { totalWorkSecs, todayWorkSecs, thisWeekWorkSecs, thisMonthWorkSecs, dailyHours, weeklyHours, monthlyHours }
 }
 
-// ── Work Hours Panel ────────────────────────────────────────────
 function WorkHoursPanel({ w }: { w: Worker }) {
   const [view, setView] = useState<'daily'|'weekly'|'monthly'>('weekly')
 
@@ -237,7 +215,6 @@ function WorkHoursPanel({ w }: { w: Worker }) {
         <span className="text-xs font-black text-cyan-700">{secsToHrsLabel(w.totalWorkSecs)} total</span>
       </div>
       <div className="p-4 space-y-4">
-        {/* summary row */}
         <div className="grid grid-cols-2 gap-2">
           {summaryCards.map(c => (
             <div key={c.label} className="rounded-xl p-3 border" style={{ background: c.bg, borderColor: c.color+'25' }}>
@@ -247,7 +224,6 @@ function WorkHoursPanel({ w }: { w: Worker }) {
           ))}
         </div>
 
-        {/* view toggle */}
         <div className="flex gap-1 p-1 rounded-xl bg-slate-100">
           {(['daily','weekly','monthly'] as const).map(v => (
             <button key={v} onClick={() => setView(v)}
@@ -262,10 +238,8 @@ function WorkHoursPanel({ w }: { w: Worker }) {
           ))}
         </div>
 
-        {/* bar chart */}
         <div className="space-y-1">
           {data.filter((_, i) => {
-            // daily: last 14, weekly: last 8, monthly: all 12
             if (view === 'daily')   return i >= data.length - 14
             if (view === 'weekly')  return i >= data.length - 8
             return true
@@ -322,7 +296,6 @@ const JOB_STATUS: Record<string, { label: string; color: string; bg: string }> =
   cancelled:    { label: 'Cancelled',   color: '#DC2626', bg: '#FEE2E2' },
 }
 
-// ── Approval Tab (onboarding review) ────────────────────────────
 function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () => void }) {
   const [d, setD] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -373,7 +346,6 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
 
   return (
     <div className="p-5 space-y-4">
-      {/* status banner */}
       <div className="flex items-center justify-between rounded-xl px-4 py-3 border"
         style={{ background: st.bg + '77', borderColor: st.fg + '30' }}>
         <div>
@@ -393,7 +365,6 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
         </div>
       )}
 
-      {/* personal */}
       <ApSection title="Personal details">
         <ApField label="Full name" value={p.full_name || '—'} />
         <ApField label="Phone" value={p.phone || '—'} />
@@ -404,21 +375,18 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
         <ApField label="Address" value={p.address || '—'} />
       </ApSection>
 
-      {/* emergency */}
       <ApSection title="Emergency contact">
         <ApField label="Name" value={p.emergency_name || '—'} />
         <ApField label="Phone" value={p.emergency_phone || '—'} />
         <ApField label="Relationship" value={p.emergency_relation || '—'} />
       </ApSection>
 
-      {/* work */}
       <ApSection title="Work preferences">
         <ApField label="Available hours/day" value={p.available_hours != null ? String(p.available_hours) + ' hrs' : '—'} />
         <ApField label="Base area" value={p.base_address || '—'} />
         <ApField label="Other areas" value={p.work_areas_note || '—'} />
       </ApSection>
 
-      {/* documents */}
       <div>
         <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">Documents</p>
         <div className="grid grid-cols-2 gap-2.5">
@@ -439,7 +407,6 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
         </div>
       </div>
 
-      {/* bank + verify toggle */}
       <div>
         <div className="flex items-center justify-between mb-2">
           <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">Bank details</p>
@@ -467,7 +434,6 @@ function ApprovalTab({ workerId, onChanged }: { workerId: string; onChanged: () 
         </p>
       </div>
 
-      {/* approve / reject */}
       <div className="flex gap-3 pt-1">
         <button disabled={busy || d.status === 'rejected'}
           onClick={() => { const r = window.prompt('Reason for rejection (worker will see this):'); if (r !== null) act('reject', r) }}
@@ -508,7 +474,6 @@ function ApField({ label, value, mono }: { label: string; value: string; mono?: 
   )
 }
 
-// ── KYC Tab (inside worker detail) ──────────────────────────────
 function KycTab({ workerId }: { workerId: string }) {
   const [detail, setDetail] = useState<any>(null)
   const [urls, setUrls] = useState<Record<string, string | null>>({})
@@ -571,7 +536,6 @@ function KycTab({ workerId }: { workerId: string }) {
 
   return (
     <div className="p-5 space-y-4">
-      {/* status banner */}
       <div className="flex items-center justify-between rounded-xl px-4 py-3 border"
         style={{ background: st.bg + '55', borderColor: st.fg + '30' }}>
         <div>
@@ -585,7 +549,6 @@ function KycTab({ workerId }: { workerId: string }) {
         )}
       </div>
 
-      {/* bank */}
       <KycSection title="Bank & payout">
         <KycField label="Holder" value={detail.bank_holder || '—'} />
         <KycField label="Account no." value={detail.bank_account || '—'} mono />
@@ -593,13 +556,11 @@ function KycTab({ workerId }: { workerId: string }) {
         <KycField label="UPI ID" value={detail.upi_id || '—'} mono />
       </KycSection>
 
-      {/* identity */}
       <KycSection title="Identity">
         <KycField label="PAN" value={detail.pan_number || '—'} mono />
         <KycField label="Aadhaar" value={detail.aadhaar_number || '—'} mono />
       </KycSection>
 
-      {/* personal */}
       <KycSection title="Personal">
         <KycField label="Date of birth" value={detail.date_of_birth || '—'} />
         <KycField label="Marital status" value={detail.marital_status || '—'} />
@@ -607,7 +568,6 @@ function KycTab({ workerId }: { workerId: string }) {
         <KycField label="Languages" value={(detail.languages && detail.languages.length) ? detail.languages.join(', ') : '—'} />
       </KycSection>
 
-      {/* documents */}
       <div>
         <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">Documents</p>
         <div className="grid grid-cols-2 gap-2.5">
@@ -628,7 +588,6 @@ function KycTab({ workerId }: { workerId: string }) {
         </div>
       </div>
 
-      {/* consents */}
       <KycSection title="Legal consent">
         {consents.length === 0 ? (
           <div className="px-3 py-2.5"><span className="text-[13px] text-slate-400">No consent records.</span></div>
@@ -646,7 +605,6 @@ function KycTab({ workerId }: { workerId: string }) {
         </div>
       )}
 
-      {/* actions */}
       <div className="flex gap-3 pt-1">
         <button disabled={busy || detail.status === 'rejected'} onClick={() => act('reject')}
           className="flex-1 py-3 rounded-xl font-bold text-white disabled:opacity-40" style={{ background: '#dc2626' }}>
@@ -687,11 +645,529 @@ function KycField({ label, value, mono }: { label: string; value: string; mono?:
 }
 
 
+// ═══════════════════════════════════════════════════════════════
+// ATTENDANCE TAB — monthly calendar + holiday/penalty marking.
+// Calls worker_monthly_attendance(worker_id, year, month) for the
+// per-day picture (the SAME function the worker app calls too, so
+// both sides always agree on what happened each day), and
+// admin_mark_worker_holiday / admin_remove_worker_holiday to act.
+// ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// UNIFIED WORKER TABS: Payouts, Earnings, Referrals, Tier, SOS
-// Each fetches only this worker's data via ?worker_id= filter.
-// ═══════════════════════════════════════════════════════════════
+type AttendanceDay = {
+  day: string
+  is_scheduled: boolean
+  is_holiday: boolean
+  holiday_reason: string | null
+  penalty_amount: number
+  worked_minutes: number
+  bookings_completed: number
+  earned_amount: number
+  service_names: string[]
+  status: 'holiday' | 'off' | 'present' | 'absent' | 'upcoming'
+}
+
+type WeekSummary = {
+  weekLabel: string
+  totalMinutes: number
+  totalJobs: number
+  totalEarned: number
+  totalPenalty: number
+}
+
+// Groups a month's days into calendar weeks (Sun–Sat), matching the
+// same grid the calendar below already renders, so the numbers here
+// line up visually with what the admin just looked at.
+function buildWeeklySummary(days: AttendanceDay[]): WeekSummary[] {
+  if (days.length === 0) return []
+  const firstDate = new Date(days[0].day + 'T00:00:00')
+  const startWeekday = firstDate.getDay()
+  const weeks: WeekSummary[] = []
+  let current: (AttendanceDay | null)[] = []
+  for (let i = 0; i < startWeekday; i++) current.push(null)
+  for (const d of days) {
+    current.push(d)
+    if (current.length === 7) {
+      weeks.push(summarizeWeek(current))
+      current = []
+    }
+  }
+  if (current.length > 0) weeks.push(summarizeWeek(current))
+  return weeks
+}
+
+function summarizeWeek(cellDays: (AttendanceDay | null)[]): WeekSummary {
+  const real = cellDays.filter((d): d is AttendanceDay => d != null)
+  const first = real[0]
+  const last = real[real.length - 1]
+  const fmt = (d: AttendanceDay) =>
+    new Date(d.day + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+  return {
+    weekLabel: first && last ? `${fmt(first)} – ${fmt(last)}` : '—',
+    totalMinutes: real.reduce((s, d) => s + d.worked_minutes, 0),
+    totalJobs: real.reduce((s, d) => s + d.bookings_completed, 0),
+    totalEarned: real.reduce((s, d) => s + d.earned_amount, 0),
+    totalPenalty: real.reduce((s, d) => s + d.penalty_amount, 0),
+  }
+}
+
+const ATTENDANCE_STATUS_STYLE: Record<AttendanceDay['status'], { bg: string; fg: string; label: string }> = {
+  present:  { bg: '#DCFCE7', fg: '#15803D', label: 'Present' },
+  absent:   { bg: '#FEE2E2', fg: '#B91C1C', label: 'Absent' },
+  holiday:  { bg: '#FEF3C7', fg: '#B45309', label: 'Holiday' },
+  off:      { bg: '#F1F5F9', fg: '#94A3B8', label: 'Off' },
+  upcoming: { bg: '#F8FAFC', fg: '#CBD5E1', label: 'Upcoming' },
+}
+
+function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any }) {
+  const [monthDate, setMonthDate] = useState(() => {
+    const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1)
+  })
+  const [days, setDays] = useState<AttendanceDay[]>([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [selectedDay, setSelectedDay] = useState<AttendanceDay | null>(null)
+  const [holidayReason, setHolidayReason] = useState('')
+  const [holidayPenalty, setHolidayPenalty] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  // Combined day-editor mode — one calendar now handles BOTH setting a
+  // day's working hours AND marking it a holiday+penalty, so the admin
+  // never has to jump to a separate tab mid-flow. Holidays are always
+  // ad-hoc and admin-chosen here — there is no automatic weekly day
+  // off (e.g. no built-in "Sundays off"); every holiday is a specific
+  // date the admin explicitly marks below, exactly like every other
+  // action on this calendar.
+  const [dayMode, setDayMode] = useState<'schedule' | 'holiday'>('schedule')
+  const [schedLoading, setSchedLoading] = useState(false)
+  const [schedEnabled, setSchedEnabled] = useState(true)
+  const [schedStart, setSchedStart] = useState('09:00')
+  const [schedEnd, setSchedEnd] = useState('17:00')
+  const [schedBreakOn, setSchedBreakOn] = useState(false)
+  const [schedBreakFrom, setSchedBreakFrom] = useState('13:00')
+
+  async function load() {
+    setLoading(true); setErr(null)
+    try {
+      const { data, error } = await supabase.rpc('worker_monthly_attendance', {
+        p_worker_id: workerId,
+        p_year: monthDate.getFullYear(),
+        p_month: monthDate.getMonth() + 1,
+      })
+      if (error) { setErr(error.message); setLoading(false); return }
+      setDays((data ?? []) as AttendanceDay[])
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not load attendance')
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { load(); setSelectedDay(null) }, [workerId, monthDate])
+
+  async function openDay(d: AttendanceDay) {
+    setSelectedDay(d)
+    setHolidayReason(d.holiday_reason ?? '')
+    setHolidayPenalty(d.penalty_amount > 0 ? String(d.penalty_amount) : '')
+    // Default to whichever action is more likely relevant for this
+    // day: already a holiday -> open on the holiday editor; otherwise
+    // default to the schedule editor.
+    setDayMode(d.is_holiday ? 'holiday' : 'schedule')
+
+    // Pull this ONE day's actual schedule row (start/end/breaks) so the
+    // schedule editor pre-fills with what's really set, instead of
+    // always showing generic 09:00–17:00 defaults. worker_monthly_
+    // attendance only returns a boolean (is_scheduled), not the times
+    // themselves, so this is a small on-demand fetch — exactly the
+    // same pattern already used elsewhere in this file (e.g. PayRatesTab).
+    setSchedLoading(true)
+    try {
+      const { data } = await supabase
+        .from('worker_schedule_dates')
+        .select('enabled, start_time, end_time, breaks')
+        .eq('worker_id', workerId)
+        .eq('date', d.day)
+        .maybeSingle()
+      if (data) {
+        setSchedEnabled(data.enabled === true)
+        setSchedStart(data.start_time ?? '09:00')
+        setSchedEnd(data.end_time ?? '17:00')
+        const breaks = data.breaks ?? []
+        if (breaks.length > 0) {
+          setSchedBreakOn(true)
+          setSchedBreakFrom(breaks[0].from)
+        } else {
+          setSchedBreakOn(false)
+          setSchedBreakFrom('13:00')
+        }
+      } else {
+        setSchedEnabled(true)
+        setSchedStart('09:00')
+        setSchedEnd('17:00')
+        setSchedBreakOn(false)
+        setSchedBreakFrom('13:00')
+      }
+    } catch {
+      // Non-fatal — editor just falls back to defaults if this lookup
+      // fails; saving still works correctly either way.
+    } finally {
+      setSchedLoading(false)
+    }
+  }
+
+  function addMinsToTime(t: string, mins: number): string {
+    const [h, m] = t.split(':').map(Number)
+    const total = (h * 60 + m + mins + 1440) % 1440
+    const hh = Math.floor(total / 60), mm = total % 60
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+  }
+
+  async function saveSchedule() {
+    if (!selectedDay) return
+    setSaving(true); setErr(null)
+    try {
+      const breaks = schedEnabled && schedBreakOn
+        ? [{ from: schedBreakFrom, to: addMinsToTime(schedBreakFrom, 15) }]
+        : []
+      const { error } = await supabase.from('worker_schedule_dates').upsert({
+        worker_id: workerId,
+        date: selectedDay.day,
+        enabled: schedEnabled,
+        start_time: schedStart,
+        end_time: schedEnd,
+        breaks,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'worker_id,date' })
+      if (error) { setErr(error.message); setSaving(false); return }
+      setSelectedDay(null)
+      await load()
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not save schedule')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function saveHoliday() {
+    if (!selectedDay) return
+    const penalty = holidayPenalty.trim() === '' ? 0 : Number(holidayPenalty)
+    if (Number.isNaN(penalty) || penalty < 0) {
+      setErr('Penalty must be a non-negative number'); return
+    }
+    setSaving(true); setErr(null)
+    try {
+      const { data, error } = await supabase.rpc('admin_mark_worker_holiday', {
+        p_worker_id: workerId,
+        p_holiday_date: selectedDay.day,
+        p_reason: holidayReason.trim() || null,
+        p_penalty_amount: penalty,
+      })
+      if (error) { setErr(error.message); setSaving(false); return }
+      if (!data?.success) { setErr(data?.message ?? 'Could not mark holiday'); setSaving(false); return }
+      setSelectedDay(null)
+      await load()
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not mark holiday')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function removeHoliday() {
+    if (!selectedDay) return
+    setSaving(true); setErr(null)
+    try {
+      const { data, error } = await supabase.rpc('admin_remove_worker_holiday', {
+        p_worker_id: workerId,
+        p_holiday_date: selectedDay.day,
+      })
+      if (error) { setErr(error.message); setSaving(false); return }
+      if (!data?.success) { setErr(data?.message ?? 'Could not remove holiday'); setSaving(false); return }
+      setSelectedDay(null)
+      await load()
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not remove holiday')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const startWeekday = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1).getDay()
+  const cells: (AttendanceDay | null)[] = []
+  for (let i = 0; i < startWeekday; i++) cells.push(null)
+  for (const d of days) cells.push(d)
+  while (cells.length % 7 !== 0) cells.push(null)
+  const weeks: (AttendanceDay | null)[][] = []
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7))
+  const WEEKDAY_LABELS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+
+  const presentCount = days.filter(d => d.status === 'present').length
+  const absentCount  = days.filter(d => d.status === 'absent').length
+  const holidayCount = days.filter(d => d.status === 'holiday').length
+  const totalPenalty = days.reduce((s, d) => s + (d.penalty_amount ?? 0), 0)
+
+  return (
+    <div className="p-5 space-y-4">
+      <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2.5">
+        <p className="text-[11px] text-amber-700 font-semibold">
+          🗓 Tap any day to set its working hours or mark it as a holiday
+          with an optional penalty — both actions live right here. Holidays
+          are always chosen by you for a specific date; there is no
+          automatic weekly day off (e.g. Sundays are ordinary working
+          days unless you mark one as a holiday). This same monthly
+          picture is what the worker sees in their app.
+        </p>
+      </div>
+
+      {err && (
+        <div className="rounded-xl bg-red-50 border border-red-200 p-3">
+          <p className="text-sm font-bold text-red-700">{err}</p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-4 gap-2">
+        {[
+          { label: 'Present', value: presentCount, color: '#059669', bg: '#ECFDF5' },
+          { label: 'Absent',  value: absentCount,  color: '#DC2626', bg: '#FEF2F2' },
+          { label: 'Holiday', value: holidayCount, color: '#D97706', bg: '#FFFBEB' },
+          { label: 'Penalty', value: `₹${totalPenalty}`, color: '#7C3AED', bg: '#F5F3FF' },
+        ].map(c => (
+          <div key={c.label} className="rounded-xl p-3 border text-center" style={{ background: c.bg, borderColor: c.color+'25' }}>
+            <p className="text-lg font-black leading-none mb-0.5" style={{ color: c.color }}>{c.value}</p>
+            <p className="text-[10px] text-slate-400">{c.label}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between">
+        <button onClick={() => setMonthDate(m => new Date(m.getFullYear(), m.getMonth() - 1, 1))}
+          className="w-7 h-7 rounded-lg flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 text-sm">‹</button>
+        <span className="text-sm font-black text-slate-700">
+          {monthDate.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}
+        </span>
+        <button onClick={() => setMonthDate(m => new Date(m.getFullYear(), m.getMonth() + 1, 1))}
+          className="w-7 h-7 rounded-lg flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 text-sm">›</button>
+      </div>
+
+      <div className="flex gap-3 flex-wrap">
+        {(Object.entries(ATTENDANCE_STATUS_STYLE) as [AttendanceDay['status'], typeof ATTENDANCE_STATUS_STYLE['present']][])
+          .filter(([k]) => k !== 'upcoming')
+          .map(([k, v]) => (
+            <div key={k} className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full" style={{ background: v.fg }}/>
+              <span className="text-[11px] text-slate-400">{v.label}</span>
+            </div>
+          ))}
+      </div>
+
+      {loading ? (
+        <div className="py-10 text-center text-sm text-slate-400">Loading calendar…</div>
+      ) : (
+        <div className="rounded-xl border border-slate-200 p-2 bg-white">
+          <div className="grid grid-cols-7 gap-1 mb-1">
+            {WEEKDAY_LABELS.map(l => (
+              <p key={l} className="text-[9px] font-black text-slate-400 text-center">{l}</p>
+            ))}
+          </div>
+          <div className="space-y-1">
+            {weeks.map((week, wi) => (
+              <div key={wi} className="grid grid-cols-7 gap-1">
+                {week.map((d, di) => {
+                  if (!d) return <div key={di} />
+                  const st = ATTENDANCE_STATUS_STYLE[d.status]
+                  const dayNum = Number(d.day.split('-')[2])
+                  return (
+                    <button key={di}
+                      onClick={() => d.status !== 'upcoming' && openDay(d)}
+                      disabled={d.status === 'upcoming'}
+                      className="aspect-square rounded-lg border flex flex-col items-center justify-center transition-all disabled:cursor-default"
+                      style={{ background: st.bg, borderColor: st.fg + '30' }}>
+                      <span className="text-[11px] font-bold" style={{ color: st.fg }}>{dayNum}</span>
+                      {d.penalty_amount > 0 ? (
+                        <span className="text-[7px] font-black" style={{ color: st.fg }}>-₹{d.penalty_amount}</span>
+                      ) : d.earned_amount > 0 ? (
+                        <span className="text-[7px] font-black" style={{ color: st.fg }}>₹{d.earned_amount}</span>
+                      ) : null}
+                    </button>
+                  )
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!loading && days.length > 0 && (
+        <div>
+          <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">
+            Weekly Summary
+          </p>
+          <div className="rounded-xl border border-slate-200 overflow-hidden">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200">
+                  {['Week', 'Hours', 'Jobs', 'Earned', 'Penalty'].map(h => (
+                    <th key={h} className="text-left px-3 py-2 font-bold text-slate-400 uppercase tracking-wide text-[10px]">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {buildWeeklySummary(days).map((w, i) => (
+                  <tr key={i} className="border-b border-slate-100 last:border-0">
+                    <td className="px-3 py-2 font-semibold text-slate-600">{w.weekLabel}</td>
+                    <td className="px-3 py-2 font-bold text-cyan-700">{(w.totalMinutes / 60).toFixed(1)}h</td>
+                    <td className="px-3 py-2 font-bold text-slate-700">{w.totalJobs}</td>
+                    <td className="px-3 py-2 font-black text-green-700">₹{w.totalEarned.toLocaleString('en-IN')}</td>
+                    <td className="px-3 py-2 font-black" style={{ color: w.totalPenalty > 0 ? '#DC2626' : '#94A3B8' }}>
+                      {w.totalPenalty > 0 ? `-₹${w.totalPenalty}` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {selectedDay && (
+        <div className="rounded-xl border-2 border-amber-200 bg-amber-50/50 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-black text-amber-800">
+              {new Date(selectedDay.day + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}
+            </p>
+            <button onClick={() => setSelectedDay(null)} className="text-[11px] font-bold text-slate-400 hover:text-slate-600">✕ Close</button>
+          </div>
+
+          <div className="flex items-center gap-4 text-[11px] text-slate-500 flex-wrap">
+            <span>Worked: {Math.round(selectedDay.worked_minutes)} min</span>
+            <span>Jobs: {selectedDay.bookings_completed}</span>
+            <span>Earned: ₹{selectedDay.earned_amount.toLocaleString('en-IN')}</span>
+            <span>Status: {ATTENDANCE_STATUS_STYLE[selectedDay.status].label}</span>
+          </div>
+
+          {selectedDay.service_names.length > 0 && (
+            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1">Services done this day</p>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedDay.service_names.map((name, i) => (
+                  <span key={i} className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200">
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Mode toggle — set hours vs. mark holiday, both from this
+              same day panel so the admin never has to switch tabs. */}
+          <div className="flex gap-2">
+            <button onClick={() => setDayMode('schedule')}
+              className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
+              style={{
+                background: dayMode === 'schedule' ? '#0891B2' : '#fff',
+                color: dayMode === 'schedule' ? '#fff' : '#64748b',
+                border: '1px solid #CBD5E1',
+              }}>
+              🗓 Set Schedule
+            </button>
+            <button onClick={() => setDayMode('holiday')}
+              className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
+              style={{
+                background: dayMode === 'holiday' ? '#D97706' : '#fff',
+                color: dayMode === 'holiday' ? '#fff' : '#64748b',
+                border: '1px solid #CBD5E1',
+              }}>
+              🚫 Holiday & Penalty
+            </button>
+          </div>
+
+          {dayMode === 'schedule' ? (
+            schedLoading ? (
+              <div className="py-4 text-center text-xs text-slate-400">Loading current schedule…</div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex gap-2">
+                  <button onClick={() => setSchedEnabled(true)}
+                    className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
+                    style={{ background: schedEnabled ? '#0891B2' : '#fff', color: schedEnabled ? '#fff' : '#64748b', border: '1px solid #CBD5E1' }}>
+                    Working
+                  </button>
+                  <button onClick={() => setSchedEnabled(false)}
+                    className="flex-1 py-2 rounded-lg text-xs font-black transition-all"
+                    style={{ background: !schedEnabled ? '#64748b' : '#fff', color: !schedEnabled ? '#fff' : '#64748b', border: '1px solid #CBD5E1' }}>
+                    Day off
+                  </button>
+                </div>
+
+                {schedEnabled && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <p className="text-[10px] text-slate-500 mb-1">Start</p>
+                        <input type="time" value={schedStart} onChange={e => setSchedStart(e.target.value)}
+                          className="w-full px-2 py-1.5 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-[10px] text-slate-500 mb-1">End</p>
+                        <input type="time" value={schedEnd} onChange={e => setSchedEnd(e.target.value)}
+                          className="w-full px-2 py-1.5 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                      <input type="checkbox" checked={schedBreakOn} onChange={e => setSchedBreakOn(e.target.checked)} />
+                      15-min break starting at
+                      {schedBreakOn && (
+                        <input type="time" value={schedBreakFrom} onChange={e => setSchedBreakFrom(e.target.value)}
+                          className="px-2 py-1 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
+                      )}
+                    </label>
+                  </>
+                )}
+
+                <button onClick={saveSchedule} disabled={saving}
+                  className="w-full py-2.5 rounded-xl font-black text-white text-sm disabled:opacity-40"
+                  style={{ background: '#16a34a' }}>
+                  {saving ? '…' : 'Save schedule for this day'}
+                </button>
+              </div>
+            )
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <p className="text-[10px] text-slate-500 mb-1">Reason (optional)</p>
+                <input value={holidayReason} onChange={e => setHolidayReason(e.target.value)}
+                  placeholder="e.g. Sick leave, personal reasons"
+                  className="w-full px-3 py-2 rounded-lg text-sm text-slate-800 bg-white border border-slate-200 outline-none" />
+              </div>
+
+              <div>
+                <p className="text-[10px] text-slate-500 mb-1">Penalty amount (₹)</p>
+                <input type="number" min={0} value={holidayPenalty} onChange={e => setHolidayPenalty(e.target.value)}
+                  placeholder="0"
+                  className="w-full px-3 py-2 rounded-lg text-sm font-bold text-slate-800 bg-white border border-slate-200 outline-none" />
+                <p className="text-[10px] text-slate-400 mt-1">Deducted directly from this worker&apos;s payout total for the period.</p>
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                {selectedDay.is_holiday && (
+                  <button onClick={removeHoliday} disabled={saving}
+                    className="flex-1 py-2.5 rounded-xl font-bold text-white text-sm disabled:opacity-40"
+                    style={{ background: '#64748B' }}>
+                    {saving ? '…' : 'Remove holiday'}
+                  </button>
+                )}
+                <button onClick={saveHoliday} disabled={saving}
+                  className="flex-1 py-2.5 rounded-xl font-black text-white text-sm disabled:opacity-40"
+                  style={{ background: '#D97706' }}>
+                  {saving ? '…' : selectedDay.is_holiday ? 'Update holiday' : 'Mark as holiday'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 function money(n: number) { return '₹' + (n ?? 0).toLocaleString('en-IN') }
 function fmtDate(d?: string | null) {
@@ -707,7 +1183,6 @@ const PAYOUT_ST: Record<string, { bg: string; fg: string; label: string }> = {
   rejected:   { bg: '#fee2e2', fg: '#b91c1c', label: 'Rejected' },
 }
 
-// ── Payouts tab (actionable) ────────────────────────────────────
 function PayoutsTab({ workerId }: { workerId: string }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -793,7 +1268,6 @@ function PayoutsTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── Earnings tab (read-only breakdown) ──────────────────────────
 function EarningsTab({ workerId }: { workerId: string }) {
   const [m, setM] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -801,7 +1275,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
   async function load() {
     setLoading(true)
     try {
-      // Pull all four money sources for THIS worker in parallel.
       const [earnRes, claimRes, refRes, tierRes] = await Promise.all([
         fetch(`/api/payroll/earnings?worker_id=${workerId}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
         fetch(`/api/payroll/claims?status=all&worker_id=${workerId}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
@@ -809,12 +1282,9 @@ function EarningsTab({ workerId }: { workerId: string }) {
         fetch(`/api/tiers?status=all&worker_id=${workerId}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null),
       ])
 
-      // Base + Order — lifetime earned from the payroll engine (treated as the
-      // earned baseline). Payout requests track what was actually withdrawn.
       const e = earnRes?.earnings ?? earnRes ?? {}
       const baseOrderEarned = Number(e.base ?? 0) + Number(e.order ?? 0)
 
-      // Payout requests give the true paid vs pending on base/order/travel.
       const payRes = await fetch(`/api/payroll/payouts?status=all&worker_id=${workerId}`, { cache: 'no-store' }).then(r => r.json()).catch(() => null)
       const payouts = payRes?.requests ?? []
       let paidBaseOrder = 0, pendBaseOrder = 0, paidTravelPO = 0, pendTravelPO = 0
@@ -825,8 +1295,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
         else if (p.status !== 'rejected') { pendBaseOrder += bo; pendTravelPO += tv }
       }
 
-      // Travel claims — approved = paid, pending = pending. (Falls back to
-      // payout-embedded travel if no separate claims exist.)
       const claims = claimRes?.claims ?? []
       let paidTravel = 0, pendTravel = 0
       for (const c of claims) {
@@ -835,7 +1303,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
       }
       if (paidTravel === 0 && pendTravel === 0) { paidTravel = paidTravelPO; pendTravel = pendTravelPO }
 
-      // Referral rewards — paid vs earned.
       const refs = refRes?.referrals ?? refRes?.rows ?? []
       let paidRef = 0, pendRef = 0
       for (const r of refs) {
@@ -843,7 +1310,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
         else if (r.status === 'earned') pendRef += Number(r.amount ?? 0)
       }
 
-      // Tier bonuses — paid vs earned.
       const tiers = tierRes?.rewards ?? tierRes?.rows ?? []
       let paidTier = 0, pendTier = 0
       for (const t of tiers) {
@@ -851,7 +1317,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
         else if (t.status === 'earned') pendTier += Number(t.amount ?? 0)
       }
 
-      // If no payout requests exist yet, show earned base/order as pending.
       if (paidBaseOrder === 0 && pendBaseOrder === 0 && baseOrderEarned > 0) {
         pendBaseOrder = baseOrderEarned
       }
@@ -890,7 +1355,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
 
   return (
     <div className="p-5 space-y-4">
-      {/* Two headline totals */}
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-xl p-4 text-center" style={{ background: 'linear-gradient(135deg,#ECFDF5,#D1FAE5)' }}>
           <p className="text-[10px] font-black uppercase tracking-wider text-green-600">Total paid out</p>
@@ -902,7 +1366,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
         </div>
       </div>
 
-      {/* Source breakdown */}
       <div className="rounded-xl border border-slate-200 overflow-hidden">
         <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200">
           <p className="text-xs font-black text-slate-700">Breakdown by source</p>
@@ -924,7 +1387,6 @@ function EarningsTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── Referrals tab ───────────────────────────────────────────────
 function ReferralsTab({ workerId }: { workerId: string }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -997,7 +1459,6 @@ function ReferralsTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── Tier tab ────────────────────────────────────────────────────
 function TierTab({ workerId }: { workerId: string }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -1069,7 +1530,6 @@ function TierTab({ workerId }: { workerId: string }) {
   )
 }
 
-// ── SOS tab (direct query) ──────────────────────────────────────
 function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -1136,14 +1596,6 @@ function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   )
 }
 
-// ── Areas tab — assign this worker to pincodes ───────────────────
-// A worker only becomes eligible for bookings in a pincode once
-// they're explicitly assigned here (via worker_pincodes). Pincodes
-// with zero assignments impose no restriction at all (see
-// try_claim_slot) — so this tab is purely additive: assigning a
-// worker to a pincode here is what actually turns pincode-based
-// worker restriction "on" for that area. No map or drawing needed —
-// just type the pincode(s) this worker covers.
 function AreasTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   const [pincodes, setPincodes] = useState<{ id: string; pincode: string }[]>([])
   const [loading, setLoading] = useState(true)
@@ -1172,9 +1624,6 @@ function AreasTab({ workerId, supabase }: { workerId: string; supabase: any }) {
 
   function normalizePincode(raw: string): string | null {
     const trimmed = raw.trim()
-    // Indian pincodes are 6 digits — reject anything else rather than
-    // silently saving a malformed value that would never match a real
-    // address's pincode.
     if (!/^\d{6}$/.test(trimmed)) return null
     return trimmed
   }
@@ -1288,19 +1737,6 @@ function AreasTab({ workerId, supabase }: { workerId: string; supabase: any }) {
 }
 
 
-// ═══════════════════════════════════════════════════════════════
-// PAY RATES TAB — per-worker base/order/overtime hourly rate
-// overrides. Reads/writes worker_pay_rates directly via Supabase —
-// no API route needed, matching the pattern AreasTab already uses
-// in this file. Any field left blank uses the system default rate
-// (shown as placeholder text) rather than forcing every worker to
-// have every rate explicitly set.
-// ═══════════════════════════════════════════════════════════════
-
-// Mirrors the SQL fallbacks in cleenzo_rate_base_per_hour() (₹50),
-// cleenzo_rate_order_per_hour() (₹32), cleenzo_rate_overtime_per_hour()
-// (₹0) — shown as placeholder text so the admin can see what rate is
-// currently in effect even when this worker has no override set.
 const DEFAULT_RATES = {
   base: 50,
   order: 32,
@@ -1313,9 +1749,6 @@ function PayRatesTab({ workerId, supabase }: { workerId: string; supabase: any }
   const [err, setErr] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
-  // Empty string = "no override, use default" — kept distinct from '0'
-  // (an admin might deliberately want ₹0/hr for one of these, e.g. to
-  // pause order incentive for a specific worker without deleting the row).
   const [baseRate, setBaseRate] = useState('')
   const [orderRate, setOrderRate] = useState('')
   const [overtimeRate, setOvertimeRate] = useState('')
@@ -1349,7 +1782,7 @@ function PayRatesTab({ workerId, supabase }: { workerId: string; supabase: any }
 
   function parseRateInput(v: string): number | null {
     const t = v.trim()
-    if (t === '') return null // explicit "use default"
+    if (t === '') return null
     const n = Number(t)
     return Number.isFinite(n) && n >= 0 ? n : NaN
   }
@@ -1477,16 +1910,6 @@ function PayRatesTab({ workerId, supabase }: { workerId: string; supabase: any }
 }
 
 
-// ═══════════════════════════════════════════════════════════════════
-// ScheduleDateRequestTab — worker-initiated DATE-SPECIFIC schedule requests
-// Reads/writes worker_schedule_date_requests + worker_schedule_dates
-// directly via Supabase (no dependency on a server API route).
-//
-// UI: a date-strip selector + a single detail card for whichever date is
-// selected — mirrors the worker app's pattern (one date's info visible at
-// a time) instead of a horizontal scroll of every date's compact card.
-// ═══════════════════════════════════════════════════════════════════
-
 type DateEntry = {
   date: string; enabled: boolean; start: string; end: string
   breaks: { from: string; to: string }[]
@@ -1541,7 +1964,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
   const [err, setErr] = useState<string | null>(null)
   const [pendingSelected, setPendingSelected] = useState<string | null>(null)
 
-  // ── Admin "appoint schedule" calendar state ──
   const [calMonth, setCalMonth] = useState(() => {
     const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1)
   })
@@ -1600,10 +2022,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
     try {
       if (action === 'approve') {
         const entries: DateEntry[] = request.dates ?? []
-        // Write every date in the batch — including disabled ones — so a
-        // day the worker turned off is recorded as off, not just absent.
-        // This is the actual persistence step: proposed dates become the
-        // live, queryable schedule in worker_schedule_dates.
         const rows = entries.map(e => ({
           worker_id: workerId,
           date: e.date,
@@ -1633,7 +2051,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
     } finally { setBusy(false) }
   }
 
-  // ── Admin "appoint schedule" calendar helpers ──
   function dateKeyOf(d: Date): string {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   }
@@ -1662,8 +2079,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
       const next = new Set(prev)
       if (next.has(key)) { next.delete(key); return next }
       next.add(key)
-      // If this is the only selection and it already has a live entry,
-      // pre-fill the editor from it for convenience.
       if (next.size === 1 && entry) {
         setEditEnabled(entry.enabled)
         setEditStart(entry.start)
@@ -1725,10 +2140,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
   const pendingEntries: DateEntry[] = request?.dates ?? []
   const liveByDate: Record<string, DateEntry> = {}
   liveDates.forEach(e => { liveByDate[e.date] = e })
-  // Workers can now only request BREAK changes — enabled/start/end in a
-  // request always mirror the live schedule. Only show the dates whose
-  // break actually differs, so the admin sees "1 break change" instead of
-  // all 14 window dates looking like a full schedule resubmission.
   function breaksDiffer(a: DateEntry, b: DateEntry | undefined): boolean {
     const ab = a.breaks ?? []
     const bb = b?.breaks ?? []
@@ -1755,7 +2166,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
         </div>
       )}
 
-      {/* ── Appoint schedule: admin calendar ── */}
       <div>
         <div className="flex items-center justify-between mb-2">
           <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">
@@ -1772,7 +2182,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
           </div>
         </div>
 
-        {/* quick weekday bulk-select */}
         <div className="flex gap-1 mb-2">
           {WEEKDAY_LABELS.map((label, wi) => (
             <button key={label} onClick={() => selectAllWeekdayInMonth(wi)}
@@ -1783,7 +2192,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
           ))}
         </div>
 
-        {/* calendar grid */}
         <div className="rounded-xl border border-slate-200 p-2 bg-white">
           <div className="grid grid-cols-7 gap-1 mb-1">
             {WEEKDAY_LABELS.map(l => (
@@ -1825,7 +2233,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
           </div>
         </div>
 
-        {/* editor panel — appears once at least one date is selected */}
         {selectedDates.size > 0 && (
           <div className="mt-3 rounded-xl border-2 border-cyan-200 bg-cyan-50/50 p-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -1883,7 +2290,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
         )}
       </div>
 
-      {/* ── Pending break request ── */}
       {request ? (
         <div className="rounded-xl border-2 overflow-hidden" style={{ borderColor: '#FCD34D' }}>
           <div className="px-4 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between">
@@ -1949,7 +2355,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
         </div>
       )}
 
-      {/* ── History ── */}
       {history.length > 0 && (
         <div>
           <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-2">
@@ -1983,8 +2388,6 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
   )
 }
 
-/// Horizontally scrollable date-strip selector — tap a date to view its
-/// detail below. Mirrors the worker app's date-strip pattern.
 function DateStrip({ entries, selected, onSelect, highlight }: {
   entries: DateEntry[]; selected: string | null; onSelect: (date: string) => void; highlight?: boolean
 }) {
@@ -2015,7 +2418,6 @@ function DateStrip({ entries, selected, onSelect, highlight }: {
   )
 }
 
-/// Full detail for the single selected date — hours, break, net total.
 function DateDetailCard({ entry, highlight }: { entry: DateEntry; highlight?: boolean }) {
   const d = new Date(entry.date + 'T00:00:00')
   const fullWeekday = d.toLocaleDateString('en-IN', { weekday: 'long' })
@@ -2063,7 +2465,6 @@ function DateDetailCard({ entry, highlight }: { entry: DateEntry; highlight?: bo
 }
 
 
-// ── Worker Detail Panel ─────────────────────────────────────────
 function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling, onReload }: {
   w: Worker; index: number; onClose: () => void
   onEdit: () => void; onDelete: () => void
@@ -2078,7 +2479,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
   const todayMins    = todayNetMins(w.todaySchedule)
   const st           = statusOf(w)
 
-  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'hours'|'jobs'|'areas'|'payrates'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
+  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'attendance'|'hours'|'jobs'|'areas'|'payrates'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
   const [jobsShown, setJobsShown] = useState(10)
 
   useEffect(() => {
@@ -2090,6 +2491,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     { key: 'overview' as const, label: 'Overview', icon: '▦' },
     { key: 'approval' as const, label: 'Approval & KYC', icon: '✅' },
     { key: 'schedreq' as const, label: 'Schedule', icon: '🗓' },
+    { key: 'attendance' as const, label: 'Attendance', icon: '📆' },
     { key: 'hours'    as const, label: 'Hours',    icon: '⏱' },
     { key: 'jobs'     as const, label: 'Jobs',     icon: '≡' },
     { key: 'areas'    as const, label: 'Areas',    icon: '📍' },
@@ -2104,7 +2506,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
   return (
     <div className="bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm">
 
-      {/* ── Premium header ── */}
       <div className="relative px-6 pt-6 pb-5 overflow-hidden"
         style={{ background: `linear-gradient(135deg,${avatarBg}0D,transparent 60%)` }}>
         <button onClick={onClose}
@@ -2141,7 +2542,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
           </div>
         </div>
 
-        {/* live job banner */}
         {w.is_busy && w.current_service && w.work_started_at && (
           <div className="mt-4 px-3 py-2.5 rounded-xl bg-white border border-amber-200 flex items-center justify-between">
             <div className="min-w-0">
@@ -2152,7 +2552,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
           </div>
         )}
 
-        {/* action row */}
         <div className="flex gap-2 mt-4">
           {w.phone && (
             <a href={`tel:+91${w.phone}`} className="flex-1 h-9 rounded-lg flex items-center justify-center gap-1.5 text-xs font-bold bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:text-slate-800 transition-all">
@@ -2166,7 +2565,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
         </div>
       </div>
 
-      {/* ── OTP strip (if set) ── */}
       {w.worker_otp && (
         <div className="px-6 py-2.5 bg-violet-50/50 border-y border-violet-100 flex items-center justify-between">
           <span className="text-[11px] font-bold text-violet-500 uppercase tracking-wide">🔐 Worker OTP</span>
@@ -2174,7 +2572,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
         </div>
       )}
 
-      {/* ── Tabs ── */}
       <div className="flex gap-1 px-4 pt-3 border-b border-slate-100 overflow-x-auto">
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
@@ -2188,10 +2585,8 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
 
       <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 340px)' }}>
 
-        {/* ── OVERVIEW TAB ── */}
         {tab === 'overview' && (
           <div className="p-5 space-y-4">
-            {/* stat tiles */}
             <div className="grid grid-cols-2 gap-2.5">
               {[
                 { label: 'Revenue',   value: `₹${w.totalRevenue.toLocaleString('en-IN')}`, accent: '#0891B2' },
@@ -2206,7 +2601,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
               ))}
             </div>
 
-            {/* completion */}
             <div className="rounded-xl border border-slate-200 p-4">
               <div className="flex justify-between mb-2">
                 <p className="text-xs font-semibold text-slate-500">Completion rate</p>
@@ -2218,7 +2612,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
               <p className="text-[11px] text-slate-400 mt-1.5">{w.completed} of {w.totalOrders} jobs completed</p>
             </div>
 
-            {/* availability toggles */}
             <div className="grid grid-cols-2 gap-2.5">
               {[
                 { field: 'is_available' as const, label: w.is_busy ? 'On a Job' : w.is_available ? 'Mark Unavailable' : 'Mark Available', color: '#059669', on: w.is_available, disabled: w.is_busy || !w.is_active },
@@ -2235,7 +2628,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
               ))}
             </div>
 
-            {/* completed work by service */}
             {w.serviceBreakdown.length > 0 && (
               <div className="rounded-xl border border-slate-200 overflow-hidden">
                 <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
@@ -2258,7 +2650,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
               </div>
             )}
 
-            {/* member since */}
             {(w.joined_at || w.created_at) && (
               <div className="flex items-center justify-between px-4 py-3 rounded-xl border border-slate-200">
                 <p className="text-xs text-slate-400">Member since</p>
@@ -2268,17 +2659,16 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
           </div>
         )}
 
-        {/* ── SCHEDULE REQUEST TAB (worker-initiated schedule change requests) ── */}
         {tab === 'schedreq' && <ScheduleDateRequestTab workerId={w.id} supabase={createClient()} onChanged={onReload} />}
 
-        {/* ── HOURS TAB ── */}
+        {tab === 'attendance' && <AttendanceTab workerId={w.id} supabase={createClient()} />}
+
         {tab === 'hours' && (
           <div className="p-5">
             <WorkHoursPanel w={w}/>
           </div>
         )}
 
-        {/* ── JOBS TAB (completed work: date · income · hours) ── */}
         {tab === 'jobs' && (
           <div className="p-5">
             <p className="text-[11px] font-black uppercase tracking-wider text-slate-400 mb-2">Completed Jobs ({w.completedList.length})</p>
@@ -2319,10 +2709,8 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
           </div>
         )}
 
-        {/* ── APPROVAL TAB (details + documents + approve/reject) ── */}
         {tab === 'approval' && <ApprovalTab workerId={w.id} onChanged={onReload} />}
 
-        {/* ── UNIFIED TABS ── */}
         {tab === 'areas' && <AreasTab workerId={w.id} supabase={createClient()} />}
         {tab === 'payrates' && <PayRatesTab workerId={w.id} supabase={createClient()} />}
         {tab === 'payouts' && <PayoutsTab workerId={w.id} />}
@@ -2335,7 +2723,6 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     </div>
   )
 }
-// ── Worker Form ─────────────────────────────────────────────────
 function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init: any; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState(init)
   const [saving, setSaving] = useState(false)
@@ -2346,17 +2733,14 @@ function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init
     if (!form.full_name.trim()) { setErr('Name required'); return }
     if (form.phone.replace(/\D/g,'').length < 10) { setErr('Valid 10-digit phone required'); return }
 
-    // Worker OTP is required and must be unique across all workers.
     const code = (form.worker_otp ?? '').trim()
     if (code.length < 4) { setErr('Worker OTP is required (4 digits)'); return }
 
     setSaving(true); setErr('')
 
-    // Uniqueness check: does another worker already use this code?
     try {
       const sb = createClient()
       let q = sb.from('workers').select('user_id').eq('worker_otp', code)
-      // When editing, exclude this same worker from the check.
       if (mode === 'edit' && form.id) q = q.neq('user_id', form.id)
       const { data: clash } = await q.limit(1)
       if (clash && clash.length > 0) {
@@ -2365,8 +2749,6 @@ function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init
         return
       }
     } catch (e) {
-      // If the check itself fails, let the DB unique constraint be the backstop.
-      // (Do not block saving on a transient read error.)
     }
 
     const url  = mode === 'add' ? '/api/workers/create' : '/api/workers/update'
@@ -2377,7 +2759,6 @@ function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init
     const data = await res.json(); setSaving(false)
     if (!res.ok) {
       const msg = String(data.error || 'Error saving')
-      // Backstop: DB unique constraint rejected a duplicate code.
       if (msg.toLowerCase().includes('worker_otp') || msg.toLowerCase().includes('unique')) {
         setErr(`Code ${code} is already taken by another worker. Please choose a different code.`)
       } else {
@@ -2509,7 +2890,6 @@ function DeleteModal({ worker, onClose, onDone }: { worker: Worker; onClose: () 
   )
 }
 
-// ── Status colour (matches maps: green/amber/grey + more) ──────
 function statusOf(w: Worker): { color: string; label: string } {
   const inShift = isWorkingNow(w.todaySchedule)
   if (!w.is_active)                       return { color: '#DC2626', label: 'Inactive' }
@@ -2519,7 +2899,6 @@ function statusOf(w: Worker): { color: string; label: string } {
   return { color: '#94A3B8', label: 'Unavailable' }
 }
 
-// ── Main Page ───────────────────────────────────────────────────
 export default function AdminWorkers() {
   const [workers,  setWorkers]  = useState<Worker[]>([])
   const [loading,  setLoading]  = useState(true)
@@ -2572,7 +2951,6 @@ export default function AdminWorkers() {
         status: b.status, final_amount: b.final_amount ?? 0, scheduled_at: b.scheduled_at,
         work_started_at: b.work_started_at ?? null, work_ended_at: b.work_ended_at ?? null,
       }))
-      // by-service breakdown (all completed jobs)
       const svcMap: Record<string, ServiceStat> = {}
       for (const b of comp) {
         const nm = b.services?.name ?? 'Service'
@@ -2586,7 +2964,6 @@ export default function AdminWorkers() {
       }
       const serviceBreakdown = Object.values(svcMap).sort((a,b) => b.income - a.income)
 
-      // full completed list (newest first) for the Jobs tab pagination
       const completedList: RecentJob[] = comp
         .slice()
         .sort((a: any, b: any) => new Date(b.work_ended_at ?? b.scheduled_at).getTime() - new Date(a.work_ended_at ?? a.scheduled_at).getTime())
@@ -2619,14 +2996,12 @@ export default function AdminWorkers() {
     }).sort((a, b) => b.totalRevenue - a.totalRevenue)
 
     setWorkers(list)
-    // pending onboarding approvals (for the badge)
     try {
       const pr = await fetch('/api/worker-approval', { cache: 'no-store' })
       const pj = await pr.json()
       setPendingCount(pj.count ?? 0)
     } catch {}
     if (selected) { const updated = list.find(w => w.id === selected.id); if (updated) setSelected(updated) }
-    // sync total_work_seconds to workers table for each worker
     for (const w of list) {
       if (w.totalWorkSecs > 0) {
         supabase.from('workers').upsert(
@@ -2645,11 +3020,9 @@ export default function AdminWorkers() {
     if (field === 'is_active') {
       await supabase.from('users').update({ is_active: !w.is_active }).eq('id', w.id)
       if (w.is_active) {
-        // deactivating → mark unavailable too
         await supabase.from('workers').upsert({ user_id: w.id, is_available: false }, { onConflict: 'user_id' })
       }
     } else {
-      // upsert so it works even if workers row doesn't exist yet
       await supabase.from('workers').upsert(
         { user_id: w.id, is_available: !w.is_available },
         { onConflict: 'user_id' }
@@ -2658,7 +3031,6 @@ export default function AdminWorkers() {
     await load(); setToggling(null)
   }
 
-  // is worker truly available right now (today's schedule + is_available + not busy)?
   const isReallyAvailable = (w: Worker) => w.is_active && w.is_available && !w.is_busy && isWorkingNow(w.todaySchedule)
 
   const filtered   = workers.filter(w => w.full_name.toLowerCase().includes(search.toLowerCase()) || w.phone.includes(search))
@@ -2679,7 +3051,6 @@ export default function AdminWorkers() {
   return (
     <div className="min-h-screen px-4 md:px-8 py-7 bg-slate-50">
 
-      {/* header */}
       <div className="flex items-center justify-between gap-4 mb-5">
         <div className="flex items-center gap-3">
           <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl"
@@ -2703,7 +3074,6 @@ export default function AdminWorkers() {
         </div>
       </div>
 
-      {/* KPI row — dense */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
         {[
           { label: 'Total Workers',  value: workers.length, accent: '#0891B2', icon: '👷' },
@@ -2721,7 +3091,6 @@ export default function AdminWorkers() {
         ))}
       </div>
 
-      {/* legend */}
       <div className="flex gap-4 mb-3 px-1 flex-wrap">
         {[['#D97706','On job'],['#059669','Free & in shift'],['#F97316','Off shift'],['#94A3B8','Unavailable'],['#DC2626','Inactive']].map(([c,l]) => (
           <div key={l} className="flex items-center gap-1.5">
@@ -2762,7 +3131,6 @@ export default function AdminWorkers() {
                             onClick={() => { setSelected(isSel ? null : w); setSelIndex(i) }}
                             className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer"
                             style={{ background: isSel ? `${avatarBg}08` : undefined }}>
-                            {/* Worker */}
                             <td className="px-4 py-3.5">
                               <div className="flex items-center gap-2.5">
                                 <div className="relative shrink-0">
@@ -2778,7 +3146,6 @@ export default function AdminWorkers() {
                                 </div>
                               </div>
                             </td>
-                            {/* Status */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               <span className="inline-flex items-center gap-1.5 text-[11px] font-bold">
                                 <span className="w-2 h-2 rounded-full" style={{ background: st.color }}/>
@@ -2788,7 +3155,6 @@ export default function AdminWorkers() {
                                 )}
                               </span>
                             </td>
-                            {/* Location */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               {isLocationLive(w.locationUpdatedAt) ? (
                                 <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
@@ -2802,19 +3168,14 @@ export default function AdminWorkers() {
                                 </span>
                               )}
                             </td>
-                            {/* Verified */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               {w.is_verified
                                 ? <span className="text-[11px] font-bold text-cyan-700">✓ Verified</span>
                                 : <span className="text-[11px] text-slate-400">—</span>}
                             </td>
-                            {/* Jobs */}
                             <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-slate-700">{w.totalOrders}</td>
-                            {/* Done */}
                             <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-emerald-600">{w.completed}</td>
-                            {/* Revenue */}
                             <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">₹{w.totalRevenue.toLocaleString('en-IN')}</td>
-                            {/* OTP */}
                             <td className="px-4 py-3.5 whitespace-nowrap">
                               {w.worker_otp
                                 ? <span className="font-mono font-bold text-[12px] text-violet-700">{w.worker_otp}</span>

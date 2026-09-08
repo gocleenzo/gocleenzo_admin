@@ -107,10 +107,27 @@ function localDateStr(d: Date): string {
   return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
 }
 
-const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+// FIXED: previously used a hardcoded 3-letter month abbreviation array
+// ('Sep', etc.), while every other date comparison in this file (see
+// countForDate, dateAreaFiltered, todayLabel/tomorrowLabel/dayAfterLabel)
+// generates its label via toLocaleDateString('en-IN', {month:'short'}).
+// That locale's "short" month format renders September as "Sept" (4
+// letters) — different from every other month, which do match a plain
+// 3-letter abbreviation. The mismatch meant picking ANY date in
+// September via the custom 🗓️ picker silently matched zero bookings,
+// even when real bookings existed that day — every other month worked
+// fine by coincidence. Generating the label the exact same way as the
+// comparison side guarantees they can never drift apart again, for
+// September or any other month.
 function labelFromDateInput(yyyyMmDd: string): string {
   const [y, m, d] = yyyyMmDd.split('-').map(Number)
-  return `${d} ${MONTH_ABBR[m - 1]} ${y}`
+  // UTC-anchored construction avoids any risk of the label shifting by
+  // a day if the browser's local timezone differs from IST — the
+  // 'en-IN' + {month:'short'} locale formatting quirk that causes the
+  // "Sept" vs "Sep" mismatch is independent of which timeZone is
+  // passed, so anchoring to UTC here is safe and exact.
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-IN',
+    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 }
 
 const TIME_SLOTS = [
@@ -2529,6 +2546,15 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const [selected,  setSelected]  = useState<Booking | null>(null)
   const [mapFor,    setMapFor]    = useState<Booking | null>(null)
   const [selectedDate, setSelectedDate] = useState<string>('all')
+  // Tracks a real Date behind whichever quick-date button or the custom
+  // date picker is active, so load() can widen its fetch range to
+  // actually include that date even when scope === 'month' would
+  // otherwise silently exclude any date outside the current calendar
+  // month (previously: picking a past/future date via the 🗓️ picker
+  // showed "no bookings found" even when real bookings existed there,
+  // because the underlying query never fetched them at all — this was
+  // a pure client-side filter over an already-restricted dataset).
+  const [pinnedDate, setPinnedDate] = useState<Date | null>(null)
   const [selectedArea, setSelectedArea] = useState<string>('all')
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
@@ -2593,11 +2619,21 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     )
     if (scope === 'month') {
       const now = new Date()
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+      let rangeStart = new Date(now.getFullYear(), now.getMonth(), 1)
+      let rangeEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+      // Widen the fetch window to also cover a specific pinned date
+      // (Today/Tomorrow/Day After/custom picker) if it falls outside
+      // the current calendar month — otherwise that date's bookings
+      // were never fetched at all, past or future.
+      if (pinnedDate) {
+        const dayStart = new Date(pinnedDate.getFullYear(), pinnedDate.getMonth(), pinnedDate.getDate())
+        const dayEnd = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1)
+        if (dayStart < rangeStart) rangeStart = dayStart
+        if (dayEnd > rangeEnd) rangeEnd = dayEnd
+      }
       bookingsQuery = bookingsQuery
-        .gte('scheduled_at', monthStart.toISOString())
-        .lt('scheduled_at', monthEnd.toISOString())
+        .gte('scheduled_at', rangeStart.toISOString())
+        .lt('scheduled_at', rangeEnd.toISOString())
     }
     bookingsQuery = bookingsQuery.order('created_at', { ascending: false })
 
@@ -2715,7 +2751,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     })))
 
     setLoading(false)
-  }, [scope])
+  }, [scope, pinnedDate])
 
   useEffect(() => { load() }, [load])
 
@@ -3012,7 +3048,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       <div className="mb-4">
         <div className="flex items-center gap-2 overflow-x-auto pb-2">
           <button
-            onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
+            onClick={() => { setSelectedDate('all'); setSelectedArea('all'); setPinnedDate(null) }}
             className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
             style={{
               background: selectedDate === 'all' ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
@@ -3028,7 +3064,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           </button>
 
           <button
-            onClick={() => { setSelectedDate(todayLabel); setSelectedArea('all') }}
+            onClick={() => { setSelectedDate(todayLabel); setSelectedArea('all'); setPinnedDate(new Date()) }}
             className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
             style={{
               background: selectedDate === todayLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
@@ -3044,7 +3080,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           </button>
 
           <button
-            onClick={() => { setSelectedDate(tomorrowLabel); setSelectedArea('all') }}
+            onClick={() => { setSelectedDate(tomorrowLabel); setSelectedArea('all'); setPinnedDate(new Date(Date.now() + 86400000)) }}
             className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
             style={{
               background: selectedDate === tomorrowLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
@@ -3060,7 +3096,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           </button>
 
           <button
-            onClick={() => { setSelectedDate(dayAfterLabel); setSelectedArea('all') }}
+            onClick={() => { setSelectedDate(dayAfterLabel); setSelectedArea('all'); setPinnedDate(new Date(Date.now() + 2 * 86400000)) }}
             className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
             style={{
               background: selectedDate === dayAfterLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
@@ -3101,6 +3137,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                 if (!e.target.value) return
                 setSelectedDate(labelFromDateInput(e.target.value))
                 setSelectedArea('all')
+                setPinnedDate(new Date(e.target.value + 'T00:00:00'))
               }}
               className="absolute inset-0 w-9 h-9 opacity-0 pointer-events-none"
               tabIndex={-1}
@@ -3109,7 +3146,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
 
           {isCustomDate && (
             <button
-              onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
+              onClick={() => { setSelectedDate('all'); setSelectedArea('all'); setPinnedDate(null) }}
               className="flex-shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black whitespace-nowrap text-white"
               style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)', boxShadow: '0 4px 12px rgba(8,145,178,0.3)' }}>
               📅 {selectedDate}
