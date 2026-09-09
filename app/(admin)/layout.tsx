@@ -1,7 +1,7 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import SosWatcher from './sos_watcher'
 
@@ -25,6 +25,97 @@ const NAV = [
   { href: '/admin-complaints', emoji: '⚠️', label: 'Complaints', color: '#DC2626' },
 ]
 
+// ═══════════════════════════════════════════════════════════════
+// Below: lightweight copies of the same helpers/availability logic
+// used in bookings_dashboard.tsx. Kept here (rather than imported)
+// because this layout mounts globally across every admin page and
+// needs its own small, self-contained data fetch for the sidebar
+// widgets — not tied to whichever page is currently rendered.
+// ═══════════════════════════════════════════════════════════════
+
+const STATUS_META: Record<string, { label: string; bg: string; icon: string }> = {
+  pending:      { label: 'Pending',      bg: '#FEF3C7', icon: '⏳' },
+  accepted:     { label: 'Assigned',     bg: '#E0E7FF', icon: '👤' },
+  otp_verified: { label: 'OTP Verified', bg: '#EDE9FE', icon: '🔓' },
+  in_progress:  { label: 'In Progress',  bg: '#CFFAFE', icon: '⚡' },
+}
+
+type SidebarWorker = {
+  id: string; name: string
+  is_available: boolean
+  scheduleDates: Record<string, { enabled: boolean; start: string; end: string; breaks: { from: string; to: string }[] }> | null
+  hasAnyScheduleDates: boolean
+}
+type SidebarBooking = {
+  id: string; status: string; service_name: string; scheduled_at: string
+  worker_id: string | null; worker_name: string; final_amount: number
+  pincode: string | null; duration_mins: number
+}
+
+function localDateStr(d: Date): string {
+  const local = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+  return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
+}
+function timeToMins(t: string) {
+  const [h, m] = t.split(':').map(Number); return h * 60 + m
+}
+function isWorkerAvailableAt(
+  worker: SidebarWorker, scheduledAt: string, durationMins: number,
+  existingBookings: { worker_id: string; scheduled_at: string; duration_mins: number }[]
+): boolean {
+  if (!worker.is_available) return false
+  const slotDt    = new Date(scheduledAt)
+  const slotEnd   = new Date(slotDt.getTime() + durationMins * 60000)
+  const localSlot = new Date(slotDt.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+  const dateStr = localDateStr(slotDt)
+  const dayEntry = worker.scheduleDates?.[dateStr]
+  if (dayEntry) {
+    if (!dayEntry.enabled) return false
+    const slotMins = localSlot.getHours() * 60 + localSlot.getMinutes()
+    const slotEndMins = slotMins + durationMins
+    if (slotMins < timeToMins(dayEntry.start) || slotEndMins > timeToMins(dayEntry.end)) return false
+    for (const b of (dayEntry.breaks ?? [])) {
+      if (slotMins >= timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
+      if (slotEndMins > timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
+    }
+  } else if (worker.hasAnyScheduleDates) {
+    return false
+  }
+  for (const bk of existingBookings) {
+    if (bk.worker_id !== worker.id) continue
+    const bkDt  = new Date(bk.scheduled_at)
+    const bkEnd = new Date(bkDt.getTime() + bk.duration_mins * 60000)
+    if (slotDt < bkEnd && slotEnd > bkDt) return false
+  }
+  return true
+}
+
+// Small donut built from a CSS conic-gradient — no chart library needed.
+function StatusDonut({ live, completed, cancelled }: { live: number; completed: number; cancelled: number }) {
+  const total = live + completed + cancelled
+  if (total === 0) {
+    return <p className="text-[11px] text-gray-400 text-center py-2">Nothing to show yet.</p>
+  }
+  const liveDeg = (live / total) * 360
+  const completedDeg = (completed / total) * 360
+  const gradient = `conic-gradient(#2F9BF0 0deg ${liveDeg}deg, #22B07D ${liveDeg}deg ${liveDeg + completedDeg}deg, #E0507A ${liveDeg + completedDeg}deg 360deg)`
+  const completedPct = Math.round((completed / total) * 100)
+  return (
+    <div className="flex items-center gap-3">
+      <div className="rounded-full flex-shrink-0 flex items-center justify-center" style={{ width: 52, height: 52, background: gradient }}>
+        <div className="rounded-full bg-white flex items-center justify-center" style={{ width: 38, height: 38 }}>
+          <span className="text-[11px] font-black text-gray-800">{completedPct}%</span>
+        </div>
+      </div>
+      <div className="flex flex-col gap-1 text-[10.5px] text-gray-600">
+        <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: '#2F9BF0' }}/> Live · {live}</span>
+        <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: '#22B07D' }}/> Done · {completed}</span>
+        <span className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: '#E0507A' }}/> Cancelled · {cancelled}</span>
+      </div>
+    </div>
+  )
+}
+
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const [open,     setOpen]     = useState(false)
@@ -32,6 +123,16 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const [pending,  setPending]  = useState(0)
   const [time,     setTime]     = useState('')
   const supabase = createClient()
+
+  // ── Sidebar widgets state ──
+  const [statusCounts, setStatusCounts] = useState({ live: 0, completed: 0, cancelled: 0 })
+  const [upcoming, setUpcoming] = useState<SidebarBooking[]>([])
+  const [sidebarWorkers, setSidebarWorkers] = useState<SidebarWorker[]>([])
+  const [busyBookings, setBusyBookings] = useState<{ worker_id: string; scheduled_at: string; duration_mins: number }[]>([])
+  const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
+  const [assignOpenId, setAssignOpenId] = useState<string | null>(null)
+  const [assignPick, setAssignPick] = useState<Record<string,string>>({})
+  const [assigning, setAssigning] = useState<string | null>(null)
 
   useEffect(() => {
     const tick = () => setTime(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }))
@@ -48,6 +149,118 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     }
     fetch(); const t = setInterval(fetch, 20000); return () => clearInterval(t)
   }, [])
+
+  // NEW: feeds the Status Breakdown donut + Upcoming Schedule + inline
+  // quick-assign widgets moved here from the Bookings page's right panel,
+  // so they're visible from every admin screen, not just Bookings.
+  const loadSidebarWidgets = useCallback(async () => {
+    const todayStr = localDateStr(new Date())
+    const liveStatuses = ['pending','accepted','otp_verified','in_progress']
+
+    const [{ data: statusRows }, { data: upcomingRows }, { data: workerRows }, { data: availRows }, { data: schedRows }, { data: activeRows }] =
+      await Promise.all([
+        supabase.from('bookings').select('status'),
+        supabase.from('bookings')
+          .select('id,status,final_amount,scheduled_at,worker_id,service_duration_minutes,booking_duration_minutes,extra_time_mins,worker:users!worker_id(full_name),services(name),addresses(pincode)')
+          .in('status', liveStatuses)
+          .order('scheduled_at', { ascending: true })
+          .limit(6),
+        supabase.from('users').select('id,full_name').eq('role','worker'),
+        supabase.from('workers').select('user_id,is_available'),
+        supabase.from('worker_schedule_dates')
+          .select('worker_id,date,enabled,start_time,end_time,breaks')
+          .gte('date', todayStr),
+        supabase.from('bookings').select('worker_id,scheduled_at,service_duration_minutes,booking_duration_minutes,extra_time_mins')
+          .in('status', ['pending','accepted','in_progress']),
+      ])
+
+    if (statusRows) {
+      setStatusCounts({
+        live: statusRows.filter((b: any) => liveStatuses.includes(b.status)).length,
+        completed: statusRows.filter((b: any) => b.status === 'completed').length,
+        cancelled: statusRows.filter((b: any) => b.status === 'cancelled').length,
+      })
+    }
+
+    const availMap: Record<string, boolean> = {}
+    ;(availRows ?? []).forEach((w: any) => { availMap[w.user_id] = w.is_available })
+    const scheduleDatesMap: Record<string, Record<string, any>> = {}
+    ;(schedRows ?? []).forEach((r: any) => {
+      if (!scheduleDatesMap[r.worker_id]) scheduleDatesMap[r.worker_id] = {}
+      scheduleDatesMap[r.worker_id][r.date] = {
+        enabled: r.enabled === true, start: r.start_time ?? '09:00', end: r.end_time ?? '17:00', breaks: r.breaks ?? [],
+      }
+    })
+    if (workerRows) setSidebarWorkers(workerRows.map((w: any) => ({
+      id: w.id, name: w.full_name ?? 'Unknown',
+      is_available: availMap[w.id] !== undefined ? availMap[w.id] : true,
+      scheduleDates: scheduleDatesMap[w.id] ?? null,
+      hasAnyScheduleDates: !!scheduleDatesMap[w.id],
+    })))
+
+    if (activeRows) setBusyBookings(activeRows.map((b: any) => ({
+      worker_id: b.worker_id ?? '',
+      scheduled_at: b.scheduled_at,
+      duration_mins: (b.service_duration_minutes ?? b.booking_duration_minutes ?? 60) + (b.extra_time_mins ?? 0),
+    })))
+
+    if (upcomingRows) {
+      const list: SidebarBooking[] = upcomingRows.map((b: any) => ({
+        id: b.id, status: b.status,
+        service_name: b.services?.name ?? 'Service',
+        scheduled_at: b.scheduled_at,
+        worker_id: b.worker_id ?? null,
+        worker_name: b.worker?.full_name ?? 'Unassigned',
+        final_amount: b.final_amount ?? 0,
+        pincode: b.addresses?.pincode ?? null,
+        duration_mins: (b.service_duration_minutes ?? b.booking_duration_minutes ?? 60) + (b.extra_time_mins ?? 0),
+      }))
+      setUpcoming(list)
+
+      const uniquePincodes = Array.from(new Set(list.map(b => b.pincode).filter((p): p is string => !!p)))
+      if (uniquePincodes.length > 0) {
+        const { data: pinRows } = await supabase.from('worker_pincodes').select('pincode,worker_id').in('pincode', uniquePincodes)
+        const pincodeWorkerMap: Record<string, Set<string>> = {}
+        for (const row of (pinRows ?? []) as any[]) {
+          if (!pincodeWorkerMap[row.pincode]) pincodeWorkerMap[row.pincode] = new Set()
+          pincodeWorkerMap[row.pincode].add(row.worker_id)
+        }
+        const entries = list.map(b => [b.id, b.pincode && pincodeWorkerMap[b.pincode]?.size ? pincodeWorkerMap[b.pincode] : null] as const)
+        setZoneEligible(Object.fromEntries(entries))
+      } else {
+        setZoneEligible({})
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    loadSidebarWidgets()
+    const t = setInterval(loadSidebarWidgets, 20000)
+    const ch = supabase.channel('sidebar-bkng')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => loadSidebarWidgets())
+      .subscribe()
+    return () => { clearInterval(t); supabase.removeChannel(ch) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function assignFromSidebar(bookingId: string) {
+    const workerId = assignPick[bookingId]
+    if (!workerId) return
+    setAssigning(bookingId)
+    const { error, data } = await supabase.rpc('admin_assign_worker', {
+      p_booking_id: bookingId,
+      p_worker_id: workerId,
+    })
+    if (error || !data?.success) {
+      alert(error?.message ?? data?.message ?? 'Could not assign this worker.')
+      setAssigning(null)
+      return
+    }
+    setAssigning(null)
+    setAssignOpenId(null)
+    setAssignPick(p => { const n = { ...p }; delete n[bookingId]; return n })
+    loadSidebarWidgets()
+  }
 
   const badge = (href: string) => {
     if (href === '/admin-bookings' && pending  > 0) return pending
@@ -92,6 +305,87 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
               <p className="text-xs font-bold text-amber-700">{pending} need worker</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ══════════ Status Breakdown widget (moved from Bookings page) ══════════ */}
+      <div className="mx-3 mt-3 px-3 py-3 rounded-xl bg-gray-50 border border-gray-100">
+        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Status breakdown</p>
+        <StatusDonut live={statusCounts.live} completed={statusCounts.completed} cancelled={statusCounts.cancelled}/>
+      </div>
+
+      {/* ══════════ Upcoming Schedule widget (moved from Bookings page) ══════════ */}
+      {upcoming.length > 0 && (
+        <div className="mx-3 mt-3 px-3 py-3 rounded-xl bg-gray-50 border border-gray-100">
+          <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Upcoming schedule</p>
+          <div className="flex flex-col gap-2.5">
+            {upcoming.map(b => {
+              const isUnassigned = !b.worker_id
+              const zoneIds = zoneEligible[b.id] ?? null
+              const slotAvailable = isUnassigned
+                ? sidebarWorkers.filter(w =>
+                    isWorkerAvailableAt(w, b.scheduled_at, b.duration_mins, busyBookings) &&
+                    (zoneIds == null || zoneIds.has(w.id)))
+                : []
+              const isOpen = assignOpenId === b.id
+              const meta = STATUS_META[b.status] ?? STATUS_META.pending
+              return (
+                <div key={b.id}>
+                  <div
+                    onClick={() => isUnassigned ? setAssignOpenId(isOpen ? null : b.id) : undefined}
+                    className={`flex items-start gap-2 rounded-lg p-1 -m-1 ${isUnassigned ? 'cursor-pointer hover:bg-white' : ''}`}>
+                    <div className="w-6 h-6 rounded-md flex items-center justify-center text-[11px] flex-shrink-0" style={{ background: meta.bg }}>
+                      {meta.icon}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[11px] font-bold text-gray-800 truncate">{b.service_name}</p>
+                      <p className="text-[10px] truncate" style={{ color: isUnassigned ? '#B45309' : '#9CA3AF' }}>
+                        {isUnassigned ? '⏳ Unassigned — tap to assign' : b.worker_name.split(' ')[0]}
+                      </p>
+                    </div>
+                    <div className="flex-shrink-0 text-right">
+                      <p className="text-[10px] font-black text-blue-600">
+                        {new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                      {/* Date qualifier so a 9:30 AM item isn't assumed to be
+                          today when it's actually scheduled for tomorrow or
+                          later — "Today" is omitted since that's implicit. */}
+                      <p className="text-[9px] font-bold text-gray-400">
+                        {(() => {
+                          const dateLabel = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+                            { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })
+                          const todayLabel = new Date().toLocaleDateString('en-IN',
+                            { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })
+                          const tomorrowLabel = new Date(Date.now() + 86400000).toLocaleDateString('en-IN',
+                            { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })
+                          if (dateLabel === todayLabel) return null
+                          if (dateLabel === tomorrowLabel) return 'Tomorrow'
+                          return dateLabel
+                        })()}
+                      </p>
+                    </div>
+                  </div>
+
+                  {isOpen && (
+                    <div className="mt-1.5 ml-1 pl-2 flex items-center gap-1.5 flex-wrap" style={{ borderLeft: '2px dashed #FDE68A' }}>
+                      <select value={assignPick[b.id] ?? ''} onChange={e => setAssignPick(p => ({ ...p, [b.id]: e.target.value }))}
+                        className="flex-1 min-w-[90px] px-1.5 py-1 rounded-md text-[10px] outline-none bg-white"
+                        style={{ border: `1.5px solid ${slotAvailable.length > 0 ? '#FCD34D' : '#FECACA'}` }}>
+                        <option value="">{slotAvailable.length === 0 ? 'No workers free' : `${slotAvailable.length} free...`}</option>
+                        {slotAvailable.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                      </select>
+                      <button onClick={() => assignFromSidebar(b.id)}
+                        disabled={!assignPick[b.id] || assigning === b.id || slotAvailable.length === 0}
+                        className="px-2 py-1 rounded-md text-[10px] font-black text-white disabled:opacity-40"
+                        style={{ background: '#2F9BF0' }}>
+                        {assigning === b.id ? '...' : 'Assign'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         </div>
       )}
 
@@ -154,7 +448,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       <SosWatcher />
 
       {/* desktop sidebar */}
-      <aside className="hidden md:flex w-60 flex-col fixed h-full z-40 border-r border-gray-100 shadow-sm">
+      <aside className="hidden md:flex w-60 flex-col fixed h-full z-40 border-r border-gray-100 shadow-sm overflow-y-auto">
         <Sidebar/>
       </aside>
 
@@ -162,7 +456,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       {open && (
         <div className="fixed inset-0 z-50 md:hidden">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setOpen(false)}/>
-          <aside className="absolute left-0 top-0 bottom-0 w-64 shadow-2xl">
+          <aside className="absolute left-0 top-0 bottom-0 w-64 shadow-2xl overflow-y-auto">
             <Sidebar onNav={() => setOpen(false)}/>
           </aside>
         </div>
@@ -223,4 +517,4 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       </nav>
     </div>
   )
-}
+} 

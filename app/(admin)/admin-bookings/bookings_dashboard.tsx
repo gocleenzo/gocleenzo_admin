@@ -4,6 +4,11 @@ import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
 import RecurringPackageBadge from './recurring_package_badge'
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
+// Single source of truth for "revenue earned" — see file for why. Used
+// below to replace this page's old "Completed" stat, which previously
+// summed the currently-loaded (scheduled-date-filtered) list instead of
+// using completion-date attribution like the Overview page.
+import { fetchCompletedRevenue, getISTMonthStart } from '../_lib/revenue'
 
 type BookedService = { serviceId: string | null; name: string; qty: number; unit_price: number }
 
@@ -53,13 +58,16 @@ type CustomerMatch = {
 
 const SYSTEM_PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000001'
 
-const STATUS: Record<string, { label: string; color: string; bg: string; icon: string; step: number }> = {
-  pending:      { label: 'Pending',      color: '#D97706', bg: '#FEF3C7', icon: '⏳', step: 0 },
-  accepted:     { label: 'Assigned',     color: '#2563EB', bg: '#DBEAFE', icon: '👤', step: 1 },
-  otp_verified: { label: 'OTP Verified', color: '#7C3AED', bg: '#EDE9FE', icon: '🔓', step: 2 },
-  in_progress:  { label: 'In Progress',  color: '#0891B2', bg: '#CFFAFE', icon: '⚡', step: 3 },
-  completed:    { label: 'Completed',    color: '#059669', bg: '#D1FAE5', icon: '✓',  step: 4 },
-  cancelled:    { label: 'Cancelled',    color: '#DC2626', bg: '#FEE2E2', icon: '✕',  step: -1 },
+// NEW visual system: indigo/violet primary (was cyan), each status has its
+// own accent used consistently (card edge, dot, chip, icon tile) instead of
+// only in the small text badge. `edge` powers the new card's left color bar.
+const STATUS: Record<string, { label: string; color: string; bg: string; icon: string; step: number; edge: string }> = {
+  pending:      { label: 'Pending',      color: '#B45309', bg: '#FEF3C7', icon: '⏳', step: 0, edge: '#F59E0B' },
+  accepted:     { label: 'Assigned',     color: '#7C6FE8', bg: '#EDE8FB', icon: '👤', step: 1, edge: '#6366F1' },
+  otp_verified: { label: 'OTP Verified', color: '#6D28D9', bg: '#EDE9FE', icon: '🔓', step: 2, edge: '#8B5CF6' },
+  in_progress:  { label: 'In Progress',  color: '#0E7490', bg: '#CFFAFE', icon: '⚡', step: 3, edge: '#06B6D4' },
+  completed:    { label: 'Completed',    color: '#047857', bg: '#D1FAE5', icon: '✓',  step: 4, edge: '#10B981' },
+  cancelled:    { label: 'Cancelled',    color: '#BE123C', bg: '#FFE4E6', icon: '✕',  step: -1, edge: '#F43F5E' },
 }
 const STEPS = ['pending','accepted','otp_verified','in_progress','completed']
 
@@ -100,6 +108,36 @@ function elapsed(start: string | null, end?: string | null) {
 }
 function timeToMins(t: string) {
   const [h, m] = t.split(':').map(Number); return h * 60 + m
+}
+
+// NEW: powers the "Unassigned · in 2h" countdown chip in the table row,
+// and the red/urgent styling switch — replaces the old static amber pill
+// with something that actually communicates how soon action is needed.
+// NEW: friendly, time-aware greeting for the header — makes the dashboard
+// feel like a workspace someone is welcomed into, not a data console.
+function greetingForNow(): string {
+  const h = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false })
+  const hour = Number(h)
+  if (hour < 5) return 'Working late 🌙'
+  if (hour < 12) return 'Good morning ☀️'
+  if (hour < 17) return 'Good afternoon 🌤️'
+  if (hour < 21) return 'Good evening 🌆'
+  return 'Working late 🌙'
+}
+
+function timeUntilLabel(iso: string): string {
+  const diffMs = new Date(iso).getTime() - Date.now()
+  if (diffMs <= 0) return 'overdue'
+  const mins = Math.round(diffMs / 60000)
+  if (mins < 60) return `in ${mins}m`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `in ${hrs}h ${mins % 60}m`
+  const days = Math.floor(hrs / 24)
+  return `in ${days}d`
+}
+function isUrgentUnassigned(iso: string): boolean {
+  const diffMs = new Date(iso).getTime() - Date.now()
+  return diffMs > 0 && diffMs < 2 * 60 * 60 * 1000 // under 2 hours out
 }
 
 function localDateStr(d: Date): string {
@@ -222,6 +260,18 @@ function getOtpWindowStatus(scheduledAt: string, durationMins: number): {
   }
   if (now > windowEnd) return { status: 'expired', message: 'OTP window has expired' }
   return { status: 'open', message: 'Customer can enter OTP now' }
+}
+
+// NEW: a tiny celebratory pop shown for ~1.6s right after a booking is
+// marked complete — small reward moment so completing work feels good,
+// not just a status flipping in a table.
+function CelebrationBurst({ show }: { show: boolean }) {
+  if (!show) return null
+  return (
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
+      <span className="text-3xl animate-bounce">🎉</span>
+    </div>
+  )
 }
 
 function LiveTimer({ start, end, color = '#0891B2', large = false }: {
@@ -2661,6 +2711,22 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const [showEditModal, setShowEditModal] = useState(false)
   const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
   const [pincodeParentArea, setPincodeParentArea] = useState<Record<string, string>>({})
+  // NEW: ids of bookings that changed via the realtime subscription in
+  // the last ~3s. Used to briefly flash the row so the admin can SEE
+  // that the page is actually live, instead of only inferring it from
+  // the LiveTimer ticking somewhere else on the screen.
+  const [recentlyChangedIds, setRecentlyChangedIds] = useState<Set<string>>(new Set())
+  // NEW: ids currently showing the little 🎉 celebration burst after being
+  // marked complete — purely a delight moment, no effect on real state.
+  const [celebratingIds, setCelebratingIds] = useState<Set<string>>(new Set())
+  // FIXED: the "Completed · earned" stat card previously summed
+  // final_amount from whatever bookings happened to be in the currently
+  // loaded, scheduled-date-filtered list (`bookings`) — a different
+  // calculation basis than the Overview page's completion-date-based
+  // revenue, so the two pages could show different "Completed revenue"
+  // numbers for what an admin assumed was the same period. Now uses the
+  // exact same shared function as Overview.
+  const [sharedCompletedRev, setSharedCompletedRev] = useState(0)
   const dateInputRef = useRef<HTMLInputElement>(null)
   const supabase = createClient()
 
@@ -2882,7 +2948,14 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     setLoading(false)
   }, [scope, pinnedDate])
 
-  useEffect(() => { load() }, [load])
+  const loadSharedRevenue = useCallback(async () => {
+    const since = scope === 'month' ? getISTMonthStart() : new Date(0)
+    const rev = await fetchCompletedRevenue(supabase, since)
+    setSharedCompletedRev(rev)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope])
+
+  useEffect(() => { load(); loadSharedRevenue() }, [load, loadSharedRevenue])
 
   useEffect(() => {
     supabase.from('services').select('id,name,duration_minutes,base_price').order('name')
@@ -2902,11 +2975,27 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     // fan-out of queries. Debouncing collapses any burst of changes
     // within 800ms into a single reload, which is the fix for the most
     // likely cause of the site freezing under real usage.
+    //
+    // NEW: also captures the changed row's id (from payload.new/old)
+    // into recentlyChangedIds BEFORE debouncing the reload, so the
+    // affected row can flash immediately — independent of whether the
+    // debounced reload has actually landed yet.
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
     const ch = supabase.channel('bkng')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
+        const changedId = (payload.new as any)?.id ?? (payload.old as any)?.id
+        if (changedId) {
+          setRecentlyChangedIds(prev => new Set(prev).add(changedId))
+          setTimeout(() => {
+            setRecentlyChangedIds(prev => {
+              const n = new Set(prev)
+              n.delete(changedId)
+              return n
+            })
+          }, 3000)
+        }
         if (debounceTimer) clearTimeout(debounceTimer)
-        debounceTimer = setTimeout(() => { load() }, 800)
+        debounceTimer = setTimeout(() => { load(); loadSharedRevenue() }, 800)
       })
       .subscribe()
     return () => {
@@ -2969,6 +3058,12 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     }
     if (status === 'cancelled') u.work_ended_at = now
     await supabase.from('bookings').update(u).eq('id', bId)
+    if (status === 'completed') {
+      setCelebratingIds(prev => new Set(prev).add(bId))
+      setTimeout(() => {
+        setCelebratingIds(prev => { const n = new Set(prev); n.delete(bId); return n })
+      }, 1600)
+    }
     const bk = bookings.find(b => b.id === bId)
     if (bk) {
       if (status === 'completed') {
@@ -3050,8 +3145,11 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const liveCount      = bookings.filter(b => liveStatuses.includes(b.status)).length
   const completedCount = bookings.filter(b => b.status === 'completed').length
   const cancelledCount = bookings.filter(b => b.status === 'cancelled').length
-  const liveRevenue    = bookings.filter(b => b.status === 'in_progress').reduce((s,b) => s + b.final_amount, 0)
-  const completedRev   = bookings.filter(b => b.status === 'completed').reduce((s,b) => s + b.final_amount, 0)
+  // FIXED: previously only summed 'in_progress' bookings, so the ₹ shown on
+  // the Live/Active card didn't match liveCount (which includes pending,
+  // accepted, and otp_verified too) — a card showing "116 live" but only
+  // the in-progress slice's revenue. Now sums the same status set as the count.
+  const liveRevenue    = bookings.filter(b => liveStatuses.includes(b.status)).reduce((s,b) => s + b.final_amount, 0)
   const cancelledRev   = bookings.filter(b => b.status === 'cancelled').reduce((s,b) => s + b.final_amount, 0)
   const inProgressNow  = bookings.filter(b => b.status === 'in_progress').length
 
@@ -3066,115 +3164,96 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   )
 
   return (
-    <div className="min-h-screen px-4 md:px-8 py-7 bg-slate-50">
+    <div className="min-h-screen" style={{ background: '#F4F6FB' }}>
 
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
-        <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl"
-            style={{ background: '#0891B214', border: '1px solid #0891B225' }}>📋</div>
-          <div>
-            <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">
-              Bookings {scope === 'month' ? '— This Month' : '— All Time'}
-            </h1>
-            <p className="text-xs text-slate-400 font-medium">{bookings.length} total · {inProgressNow} working now</p>
-            <div className="flex gap-1.5 mt-1.5">
-              <a href="/admin-bookings-monthly"
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
-                  scope === 'month' ? 'bg-cyan-600 text-white' : 'bg-white text-slate-500 border border-slate-200'
-                }`}>
-                This Month
-              </a>
-              <a href="/admin-bookings"
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
-                  scope === 'all' ? 'bg-cyan-600 text-white' : 'bg-white text-slate-500 border border-slate-200'
-                }`}>
-                All Time
-              </a>
-            </div>
+      {/* ══════════ Top bar — clean white, blue accent (template style) ══════════ */}
+      <div className="bg-white px-4 md:px-8 py-3.5 flex items-center justify-between gap-3 sticky top-0 z-30" style={{ borderBottom: '1px solid #E7EBF3' }}>
+        <div className="flex items-center gap-2.5">
+          <div className="flex gap-1 p-0.5 rounded-lg" style={{ background: '#F1F5FB' }}>
+            <a href="/admin-bookings-monthly"
+              className="px-2.5 py-1 rounded-md text-[11px] font-bold transition-all"
+              style={{ background: scope === 'month' ? '#2F9BF0' : 'transparent', color: scope === 'month' ? '#fff' : '#6B7280' }}>
+              This Month
+            </a>
+            <a href="/admin-bookings"
+              className="px-2.5 py-1 rounded-md text-[11px] font-bold transition-all"
+              style={{ background: scope === 'all' ? '#2F9BF0' : 'transparent', color: scope === 'all' ? '#fff' : '#6B7280' }}>
+              All Time
+            </a>
           </div>
         </div>
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto">
-          <div className="flex items-center gap-2">
-            <button onClick={() => setShowPhoneModal(true)}
-              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black text-white active:scale-[0.98] transition-all whitespace-nowrap"
-              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)', boxShadow: '0 4px 12px rgba(8,145,178,0.25)' }}>
-              📞 Phone Booking
-            </button>
-            <button onClick={() => setShowRecurringPhoneModal(true)}
-              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black text-white active:scale-[0.98] transition-all whitespace-nowrap"
-              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)', boxShadow: '0 4px 12px rgba(124,58,237,0.25)' }}>
-              🔁 Recurring Package
-            </button>
-            <button onClick={() => setShowBlockModal(true)}
-              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-black text-white active:scale-[0.98] transition-all whitespace-nowrap"
-              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)', boxShadow: '0 4px 12px rgba(220,38,38,0.25)' }}>
-              🚫 Block Slot
-            </button>
-          </div>
+        <div className="flex items-center gap-2 flex-1 max-w-md">
           <input type="text" placeholder="Search service, customer, phone, worker..." value={search} onChange={e => setSearch(e.target.value)}
-            className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
+            className="w-full px-3.5 py-2 rounded-lg text-[13px] outline-none"
+            style={{ background: '#F1F5FB', border: '1px solid #E7EBF3', color: '#1F2937' }}/>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowPhoneModal(true)}
+            className="px-3 py-2 rounded-lg text-[11px] font-black text-white transition-all hover:opacity-90"
+            style={{ background: '#2F9BF0' }}>📞 Phone Booking</button>
+          <button onClick={() => setShowRecurringPhoneModal(true)}
+            className="px-3 py-2 rounded-lg text-[11px] font-black transition-all"
+            style={{ background: '#F1F5FB', color: '#2F9BF0' }}>🔁 Recurring</button>
+          <button onClick={() => setShowBlockModal(true)}
+            className="px-3 py-2 rounded-lg text-[11px] font-black transition-all"
+            style={{ background: '#FDEEF0', color: '#E0507A' }}>🚫 Block</button>
+          <div className="flex items-center gap-1.5 ml-1 pl-2" style={{ borderLeft: '1px solid #E7EBF3' }}>
+            <span className="w-8 h-8 rounded-full flex items-center justify-center text-[14px]" style={{ background: '#F1F5FB' }}>🔔</span>
+            <span className="w-8 h-8 rounded-full flex items-center justify-center text-[14px]" style={{ background: '#F1F5FB' }}>⚙️</span>
+            <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-[12px] font-black" style={{ background: '#2F9BF0' }}>A</span>
+          </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3 mb-4">
+      <div className="px-4 md:px-8 py-6">
+        <p className="text-[13px] mb-4" style={{ color: '#6B7280' }}>
+          <span className="font-black text-[18px]" style={{ color: '#1F2937' }}>{greetingForNow()}</span>
+          <span className="ml-2">{bookings.length} bookings on your plate{inProgressNow > 0 && ` · ${inProgressNow} in progress`}</span>
+        </p>
+
+      {/* ══════════ Stat cards — white template style ══════════ */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
         {[
-          { key: 'live',      icon: '⚡', label: 'Live / Active', count: liveCount, rev: liveRevenue, revLabel: 'ongoing',
-            activeGrad: 'linear-gradient(135deg,#0891B2,#0E7490)', activeBorder: '#0891B2', activeShadow: 'rgba(8,145,178,0.3)',
-            idleBorder: '#BAE6FD', textColor: '#0891B2', extra: inProgressNow > 0 ? `${inProgressNow} working` : null },
-          { key: 'completed', icon: '✅', label: 'Completed', count: completedCount, rev: completedRev, revLabel: 'earned',
-            activeGrad: 'linear-gradient(135deg,#059669,#047857)', activeBorder: '#059669', activeShadow: 'rgba(5,150,105,0.3)',
-            idleBorder: '#A7F3D0', textColor: '#059669', extra: null },
-          { key: 'cancelled', icon: '❌', label: 'Cancelled', count: cancelledCount, rev: cancelledRev, revLabel: 'lost',
-            activeGrad: 'linear-gradient(135deg,#DC2626,#B91C1C)', activeBorder: '#DC2626', activeShadow: 'rgba(220,38,38,0.3)',
-            idleBorder: '#FECACA', textColor: '#DC2626', extra: null },
+          { key: 'live',      icon: '⚡', label: 'Live / Active', count: liveCount, rev: liveRevenue, revLabel: 'total', accent: '#2F9BF0', bg: '#EAF4FE', extra: inProgressNow > 0 ? `${inProgressNow} working` : null },
+          { key: 'completed', icon: '✅', label: 'Completed', count: completedCount, rev: sharedCompletedRev, revLabel: 'earned', accent: '#22B07D', bg: '#E7F8F1', extra: null },
+          { key: 'cancelled', icon: '❌', label: 'Cancelled', count: cancelledCount, rev: cancelledRev, revLabel: 'lost', accent: '#E0507A', bg: '#FDEEF0', extra: null },
         ].map(tab => {
           const active = profile === tab.key
           return (
             <button key={tab.key}
               onClick={() => { setProfile(active ? 'all' : tab.key as any); setFilter('all') }}
-              className="rounded-2xl p-3.5 text-left transition-all hover:shadow-md active:scale-[0.98] relative overflow-hidden"
-              style={{
-                background: active ? tab.activeGrad : '#fff',
-                border:     `1.5px solid ${active ? tab.activeBorder : tab.idleBorder}`,
-                boxShadow:  active ? `0 8px 24px ${tab.activeShadow}` : '0 1px 4px rgba(0,0,0,0.04)',
-              }}>
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-base">{tab.icon}</span>
-                {tab.extra && (
-                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full"
-                    style={{ background: active ? 'rgba(255,255,255,0.2)' : '#CFFAFE',
-                      color: active ? '#fff' : tab.textColor }}>
-                    {tab.extra}
-                  </span>
-                )}
+              className="rounded-2xl bg-white p-4 text-left transition-all hover:shadow-md flex items-center gap-3.5"
+              style={{ border: active ? `1.5px solid ${tab.accent}` : '1px solid #E7EBF3' }}>
+              <div className="w-11 h-11 rounded-xl flex items-center justify-center text-lg flex-shrink-0" style={{ background: tab.bg }}>{tab.icon}</div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-2xl font-black leading-none" style={{ color: '#1F2937' }}>{tab.count}</p>
+                  {tab.extra && (
+                    <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full" style={{ background: tab.bg, color: tab.accent }}>{tab.extra}</span>
+                  )}
+                </div>
+                <p className="text-[12px] font-bold mt-0.5" style={{ color: '#6B7280' }}>{tab.label}</p>
+                <p className="text-[11px] font-mono mt-0.5" style={{ color: '#9CA3AF' }}>₹{tab.rev.toLocaleString('en-IN')} {tab.revLabel}</p>
               </div>
-              <p className="text-xl font-black leading-none mb-0.5"
-                style={{ color: active ? '#fff' : tab.textColor }}>{tab.count}</p>
-              <p className="text-[11px] font-bold"
-                style={{ color: active ? 'rgba(255,255,255,0.8)' : '#64748B' }}>{tab.label}</p>
-              <p className="text-[10px] mt-0.5 font-mono"
-                style={{ color: active ? 'rgba(255,255,255,0.6)' : '#94A3B8' }}>
-                ₹{tab.rev.toLocaleString('en-IN')} {tab.revLabel}
-              </p>
             </button>
           )
         })}
       </div>
 
       {profile === 'all' && (
-        <div className="flex gap-2 overflow-x-auto pb-3 mb-3">
+        <div className="flex gap-5 overflow-x-auto mb-3 bg-white rounded-2xl px-4" style={{ border: '1px solid #E7EBF3' }}>
           {Object.entries(STATUS).map(([k, v]) => {
             const cnt = bookings.filter(b => b.status === k).length
             if (!cnt && k !== 'pending') return null
+            const active = filter === k
             return (
               <button key={k} onClick={() => setFilter(filter === k ? 'all' : k)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap flex-shrink-0 transition-all"
+                className="py-3 text-[12.5px] font-bold whitespace-nowrap flex-shrink-0 transition-all"
                 style={{
-                  background: filter === k ? v.bg : '#fff',
-                  color:      filter === k ? v.color : '#64748B',
-                  border:     `1px solid ${filter === k ? v.color+'40' : '#E2E8F0'}`,
+                  color: active ? '#2F9BF0' : '#9CA3AF',
+                  borderBottom: `2px solid ${active ? '#2F9BF0' : 'transparent'}`,
                 }}>
-                {v.icon} {cnt} {v.label}
+                {v.icon} {v.label} <span style={{ color: active ? '#2F9BF0' : '#C1C7D2' }}>{cnt}</span>
               </button>
             )
           })}
@@ -3182,91 +3261,51 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       )}
 
       {profile === 'live' && (
-        <div className="flex gap-2 overflow-x-auto pb-3 mb-3">
+        <div className="flex gap-5 overflow-x-auto mb-3 bg-white rounded-2xl px-4" style={{ border: '1px solid #E7EBF3' }}>
           {['all',...liveStatuses].map(k => {
             const v   = STATUS[k]
             const cnt = k === 'all' ? liveCount : bookings.filter(b => b.status === k).length
             if (!cnt && k !== 'all') return null
+            const active = filter === k
             return (
               <button key={k} onClick={() => setFilter(k)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap flex-shrink-0 transition-all"
+                className="py-3 text-[12.5px] font-bold whitespace-nowrap flex-shrink-0 transition-all"
                 style={{
-                  background: filter === k ? (v?.bg ?? '#CFFAFE') : '#fff',
-                  color:      filter === k ? (v?.color ?? '#0891B2') : '#64748B',
-                  border:     `1px solid ${filter === k ? (v?.color ?? '#0891B2')+'40' : '#E2E8F0'}`,
+                  color: active ? '#2F9BF0' : '#9CA3AF',
+                  borderBottom: `2px solid ${active ? '#2F9BF0' : 'transparent'}`,
                 }}>
-                {v?.icon ?? '⚡'} {cnt} {v?.label ?? 'All Live'}
+                {v?.icon ?? '⚡'} {v?.label ?? 'All Live'} <span style={{ color: active ? '#2F9BF0' : '#C1C7D2' }}>{cnt}</span>
               </button>
             )
           })}
         </div>
       )}
 
-      <div className="mb-4">
-        <div className="flex items-center gap-2 overflow-x-auto pb-2">
-          <button
-            onClick={() => { setSelectedDate('all'); setSelectedArea('all'); setPinnedDate(null) }}
-            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
-            style={{
-              background: selectedDate === 'all' ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
-              color: selectedDate === 'all' ? '#fff' : '#64748B',
-              border: `1.5px solid ${selectedDate === 'all' ? '#0891B2' : '#E2E8F0'}`,
-              boxShadow: selectedDate === 'all' ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
-            }}>
-            📅 All Dates
-            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
-              style={{ background: selectedDate === 'all' ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === 'all' ? '#fff' : '#0891B2' }}>
-              {filtered.length}
-            </span>
-          </button>
-
-          <button
-            onClick={() => { setSelectedDate(todayLabel); setSelectedArea('all'); setPinnedDate(new Date()) }}
-            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
-            style={{
-              background: selectedDate === todayLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
-              color: selectedDate === todayLabel ? '#fff' : '#64748B',
-              border: `1.5px solid ${selectedDate === todayLabel ? '#0891B2' : '#BAE6FD'}`,
-              boxShadow: selectedDate === todayLabel ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
-            }}>
-            🟢 Today
-            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
-              style={{ background: selectedDate === todayLabel ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === todayLabel ? '#fff' : '#0891B2' }}>
-              {countForDate(todayLabel)}
-            </span>
-          </button>
-
-          <button
-            onClick={() => { setSelectedDate(tomorrowLabel); setSelectedArea('all'); setPinnedDate(new Date(Date.now() + 86400000)) }}
-            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
-            style={{
-              background: selectedDate === tomorrowLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
-              color: selectedDate === tomorrowLabel ? '#fff' : '#64748B',
-              border: `1.5px solid ${selectedDate === tomorrowLabel ? '#0891B2' : '#E2E8F0'}`,
-              boxShadow: selectedDate === tomorrowLabel ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
-            }}>
-            🔵 Tomorrow
-            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
-              style={{ background: selectedDate === tomorrowLabel ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === tomorrowLabel ? '#fff' : '#0891B2' }}>
-              {countForDate(tomorrowLabel)}
-            </span>
-          </button>
-
-          <button
-            onClick={() => { setSelectedDate(dayAfterLabel); setSelectedArea('all'); setPinnedDate(new Date(Date.now() + 2 * 86400000)) }}
-            className="flex-shrink-0 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap"
-            style={{
-              background: selectedDate === dayAfterLabel ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
-              color: selectedDate === dayAfterLabel ? '#fff' : '#64748B',
-              border: `1.5px solid ${selectedDate === dayAfterLabel ? '#0891B2' : '#E2E8F0'}`,
-              boxShadow: selectedDate === dayAfterLabel ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
-            }}>
-            🟣 Day After
-            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
-              style={{ background: selectedDate === dayAfterLabel ? 'rgba(255,255,255,0.2)' : '#CFFAFE', color: selectedDate === dayAfterLabel ? '#fff' : '#0891B2' }}>
-              {countForDate(dayAfterLabel)}
-            </span>
-          </button>
+      {/* ══════════ Date + area toolbar ══════════ */}
+      <div className="rounded-2xl bg-white px-4 py-3 mb-4" style={{ border: '1px solid #EDEBF7' }}>
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          {[
+            { label: '📅 All Dates', val: 'all', onClick: () => { setSelectedDate('all'); setSelectedArea('all'); setPinnedDate(null) }, cnt: filtered.length },
+            { label: '🟢 Today', val: todayLabel, onClick: () => { setSelectedDate(todayLabel); setSelectedArea('all'); setPinnedDate(new Date()) }, cnt: countForDate(todayLabel) },
+            { label: '🔵 Tomorrow', val: tomorrowLabel, onClick: () => { setSelectedDate(tomorrowLabel); setSelectedArea('all'); setPinnedDate(new Date(Date.now() + 86400000)) }, cnt: countForDate(tomorrowLabel) },
+            { label: '🟣 Day After', val: dayAfterLabel, onClick: () => { setSelectedDate(dayAfterLabel); setSelectedArea('all'); setPinnedDate(new Date(Date.now() + 2 * 86400000)) }, cnt: countForDate(dayAfterLabel) },
+          ].map(opt => {
+            const active = selectedDate === opt.val
+            return (
+              <button key={opt.val} onClick={opt.onClick}
+                className="flex-shrink-0 px-3.5 py-1.5 rounded-xl text-[12px] font-black transition-all whitespace-nowrap"
+                style={{
+                  background: active ? '#2F9BF0' : '#F6F5FB',
+                  color: active ? '#fff' : '#52525B',
+                }}>
+                {opt.label}
+                <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-black"
+                  style={{ background: active ? 'rgba(255,255,255,0.22)' : '#E4E4E7', color: active ? '#fff' : '#71717A' }}>
+                  {opt.cnt}
+                </span>
+              </button>
+            )
+          })}
 
           <div className="relative flex-shrink-0">
             <button
@@ -3279,12 +3318,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
               }}
               title="Pick a specific date"
               className="w-9 h-9 rounded-xl flex items-center justify-center text-sm transition-all"
-              style={{
-                background: isCustomDate ? 'linear-gradient(135deg,#0891B2,#0E7490)' : '#fff',
-                color: isCustomDate ? '#fff' : '#64748B',
-                border: `1.5px solid ${isCustomDate ? '#0891B2' : '#E2E8F0'}`,
-                boxShadow: isCustomDate ? '0 4px 12px rgba(8,145,178,0.3)' : '0 1px 3px rgba(0,0,0,0.04)',
-              }}>
+              style={{ background: isCustomDate ? '#2F9BF0' : '#F6F5FB', color: isCustomDate ? '#fff' : '#52525B' }}>
               🗓️
             </button>
             <input
@@ -3304,364 +3338,325 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           {isCustomDate && (
             <button
               onClick={() => { setSelectedDate('all'); setSelectedArea('all'); setPinnedDate(null) }}
-              className="flex-shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black whitespace-nowrap text-white"
-              style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)', boxShadow: '0 4px 12px rgba(8,145,178,0.3)' }}>
+              className="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12px] font-black whitespace-nowrap text-white"
+              style={{ background: '#2F9BF0' }}>
               📅 {selectedDate}
-              <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black" style={{ background: 'rgba(255,255,255,0.2)' }}>
+              <span className="px-1.5 py-0.5 rounded-full text-[9px] font-black" style={{ background: 'rgba(255,255,255,0.22)' }}>
                 {countForDate(selectedDate)}
               </span>
               <span className="ml-0.5">✕</span>
             </button>
           )}
-        </div>
 
-        {allAreas.length > 1 && (
-          <div className="flex items-center gap-2 overflow-x-auto pt-2">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex-shrink-0">Area:</span>
-            <button
-              onClick={() => setSelectedArea('all')}
-              className="flex-shrink-0 px-3 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap"
-              style={{
-                background: selectedArea === 'all' ? '#CFFAFE' : '#fff',
-                color: selectedArea === 'all' ? '#0891B2' : '#64748B',
-                border: `1px solid ${selectedArea === 'all' ? '#0891B2' : '#E2E8F0'}`,
-              }}>
-              All Areas ({dateAreaFiltered.length})
-            </button>
-            {allAreas.map(area => {
-              const cnt = filtered.filter(b => {
-                const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
-                  { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
-                const matchDate = selectedDate === 'all' || dateStr === selectedDate
-                return matchDate && resolveGroupName(b) === area
-              }).length
-              return (
-                <button key={area}
-                  onClick={() => setSelectedArea(area)}
-                  className="flex-shrink-0 px-3 py-1 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap"
-                  style={{
-                    background: selectedArea === area ? '#CFFAFE' : '#fff',
-                    color: selectedArea === area ? '#0891B2' : '#64748B',
-                    border: `1px solid ${selectedArea === area ? '#0891B2' : '#E2E8F0'}`,
-                  }}>
-                  📍 {area} ({cnt})
-                </button>
-              )
-            })}
-          </div>
-        )}
+          {allAreas.length > 1 && (
+            <select value={selectedArea} onChange={e => setSelectedArea(e.target.value)}
+              className="flex-shrink-0 ml-auto px-3 py-1.5 rounded-xl text-[12px] font-bold outline-none"
+              style={{ background: selectedArea !== 'all' ? '#EAF4FE' : '#F6F5FB', color: selectedArea !== 'all' ? '#2F9BF0' : '#52525B' }}>
+              <option value="all">📍 All Areas ({dateAreaFiltered.length})</option>
+              {allAreas.map(area => {
+                const cnt = filtered.filter(b => {
+                  const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+                    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+                  const matchDate = selectedDate === 'all' || dateStr === selectedDate
+                  return matchDate && resolveGroupName(b) === area
+                }).length
+                return <option key={area} value={area}>📍 {area} ({cnt})</option>
+              })}
+            </select>
+          )}
+        </div>
       </div>
 
       {dateAreaFiltered.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center shadow-sm">
-          <p className="text-4xl mb-3">
-            {profile === 'live' ? '⚡' : profile === 'completed' ? '✅' : profile === 'cancelled' ? '❌' : '📋'}
+        <div className="bg-white rounded-3xl p-16 text-center" style={{ border: '1px solid #EFEAFB' }}>
+          <p className="text-5xl mb-3">
+            {profile === 'live' ? '⚡' : profile === 'completed' ? '🎉' : profile === 'cancelled' ? '🙈' : '☕'}
           </p>
-          <p className="text-slate-700 font-bold">No bookings found</p>
-          <p className="text-sm text-slate-400 mt-1">
+          <p className="font-black text-[16px]" style={{ color: '#3D3266' }}>
+            {profile === 'completed' ? 'Nothing completed here yet' : 'All quiet here'}
+          </p>
+          <p className="text-sm mt-1" style={{ color: '#8B85A8' }}>
             {selectedDate !== 'all' || selectedArea !== 'all'
               ? <button onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
-                  className="text-cyan-600 font-bold hover:underline">Clear filters</button>
-              : 'Try changing the filter'}
+                  className="font-bold hover:underline" style={{ color: '#2F9BF0' }}>Clear filters</button>
+              : 'Take a breather — nothing needs you right now.'}
           </p>
         </div>
       ) : (
-        <div className="space-y-4">
-          {Object.entries(groupedByArea).map(([area, areaBookings]) => (
-            <div key={area} className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-              {(() => {
-                const liveInArea = areaBookings.filter(b => b.status === 'in_progress').length
-                const pendingInArea = areaBookings.filter(b => b.status === 'pending').length
-                const areaTotal = areaBookings.reduce((s, b) => s + b.final_amount, 0)
-                const mapsUrl = `https://maps.google.com/?q=${encodeURIComponent(area)}`
-                return (
-                  <div className="flex items-center justify-between px-5 py-4 border-b border-cyan-100/50"
-                    style={{ background: 'linear-gradient(135deg,#ECFEFF 0%,#F0FDFF 50%,#EFF6FF 100%)' }}>
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
-                        style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)', boxShadow: '0 4px 10px rgba(8,145,178,0.3)' }}>
-                        📍
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-black text-[15px] text-slate-800">{area}</h3>
-                          {liveInArea > 0 && (
-                            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black bg-cyan-500 text-white animate-pulse">
-                              ● {liveInArea} LIVE
-                            </span>
-                          )}
-                          {pendingInArea > 0 && (
-                            <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-amber-100 text-amber-700 border border-amber-200">
-                              ⏳ {pendingInArea} pending
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          {areaBookings.length} booking{areaBookings.length > 1 ? 's' : ''} · ₹{areaTotal.toLocaleString('en-IN')} total
-                        </p>
-                      </div>
+        <div className="space-y-5">
+          {Object.entries(groupedByArea).map(([area, areaBookings]) => {
+            const liveInArea = areaBookings.filter(b => b.status === 'in_progress').length
+            const pendingInArea = areaBookings.filter(b => b.status === 'pending').length
+            const areaTotal = areaBookings.reduce((s, b) => s + b.final_amount, 0)
+            const mapsUrl = `https://maps.google.com/?q=${encodeURIComponent(area)}`
+            return (
+              <div key={area}>
+                {/* ── Area section header — soft badge instead of gradient banner ── */}
+                <div className="flex items-center justify-between px-1 mb-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-xl flex items-center justify-center text-sm flex-shrink-0"
+                      style={{ background: '#2F9BF0', boxShadow: '0 4px 10px rgba(67,56,202,0.25)' }}>
+                      <span className="text-white">📍</span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
-                        onClick={e => e.stopPropagation()}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold bg-white text-teal-700 border border-teal-200 hover:bg-teal-50 transition-all shadow-sm"
-                        title="Open area in Google Maps">
-                        🗺 View Area
-                      </a>
-                      <button
-                        onClick={e => {
-                          e.stopPropagation()
-                          const shareText = areaBookings.map(b => {
-                            const addr = [b.flat_no, b.building, b.full_address || b.area].filter(Boolean).join(', ')
-                            const link = b.latitude && b.longitude
-                              ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
-                              : `https://maps.google.com/?q=${encodeURIComponent(addr)}`
-                            return `• ${b.customer} (${b.service_name}) - ${b.scheduled_at ? new Date(b.scheduled_at).toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'}) : ''} → ${link}`
-                          }).join('\n')
-                          navigator.clipboard.writeText(`📍 ${area} Bookings:\n${shareText}`)
-                          alert(`All ${area} booking addresses copied!`)
-                        }}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 transition-all shadow-sm"
-                        title="Copy maps link">
-                        🔗 Share
-                      </button>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-black text-[14px]" style={{ color: '#1E1B4B' }}>{area}</h3>
+                        {liveInArea > 0 && (
+                          <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black text-white animate-pulse" style={{ background: '#6366F1' }}>
+                            ● {liveInArea} LIVE
+                          </span>
+                        )}
+                        {pendingInArea > 0 && (
+                          <span className="px-2 py-0.5 rounded-full text-[9px] font-black" style={{ background: '#FEF3C7', color: '#B45309' }}>
+                            ⏳ {pendingInArea} pending
+                          </span>
+                        )}
+                        <span className="text-[11px] text-zinc-400">
+                          {areaBookings.length} booking{areaBookings.length > 1 ? 's' : ''} · ₹{areaTotal.toLocaleString('en-IN')}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                )
-              })()}
+                  <div className="flex items-center gap-1.5">
+                    <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white transition-all"
+                      style={{ color: '#0E7490', border: '1px solid #EDEBF7' }}
+                      title="Open area in Google Maps">
+                      🗺 Map
+                    </a>
+                    <button
+                      onClick={() => {
+                        const shareText = areaBookings.map(b => {
+                          const addr = [b.flat_no, b.building, b.full_address || b.area].filter(Boolean).join(', ')
+                          const link = b.latitude && b.longitude
+                            ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
+                            : `https://maps.google.com/?q=${encodeURIComponent(addr)}`
+                          return `• ${b.customer} (${b.service_name}) - ${b.scheduled_at ? new Date(b.scheduled_at).toLocaleTimeString('en-IN', {hour:'2-digit', minute:'2-digit', timeZone:'Asia/Kolkata'}) : ''} → ${link}`
+                        }).join('\n')
+                        navigator.clipboard.writeText(`📍 ${area} Bookings:\n${shareText}`)
+                        alert(`All ${area} booking addresses copied!`)
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-white transition-all"
+                      style={{ color: '#2F9BF0', border: '1px solid #EDEBF7' }}
+                      title="Copy maps link">
+                      🔗 Share
+                    </button>
+                  </div>
+                </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm border-collapse">
-                  <thead>
-                    <tr className="border-b border-slate-100 bg-slate-50/50">
-                      {['Service / Customer','Schedule','Location','Status','Worker','Amount','Timer','Actions'].map(c => (
-                        <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {areaBookings.map(b => {
-                      const cfg         = STATUS[b.status] ?? STATUS.pending
-                      const needsW      = !b.worker_id && ['pending','accepted'].includes(b.status)
-                      const isLive      = b.status === 'in_progress'
-                      const isDone      = b.status === 'completed' && b.work_started_at && b.work_ended_at
-                      const isCancelled = b.status === 'cancelled'
-                      const totalSec    = isDone ? elapsed(b.work_started_at, b.work_ended_at) : 0
-                      const zoneIds     = zoneEligible[b.id] ?? null
-                      const slotAvailable = workers.filter(w =>
-                        isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings) &&
-                        (zoneIds == null || zoneIds.has(w.id))
-                      )
-                      const canQuickStartWork = b.is_manual_booking && b.status === 'accepted' && !!b.worker_id
+                {/* ── Booking cards — full-width, bold single column ── */}
+                <div className="flex flex-col gap-3">
+                  {areaBookings.map(b => {
+                    const cfg         = STATUS[b.status] ?? STATUS.pending
+                    const needsW      = !b.worker_id && ['pending','accepted'].includes(b.status)
+                    const isLive      = b.status === 'in_progress'
+                    const isDone      = b.status === 'completed' && b.work_started_at && b.work_ended_at
+                    const isCancelled = b.status === 'cancelled'
+                    const totalSec    = isDone ? elapsed(b.work_started_at, b.work_ended_at) : 0
+                    const zoneIds     = zoneEligible[b.id] ?? null
+                    const slotAvailable = workers.filter(w =>
+                      isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings) &&
+                      (zoneIds == null || zoneIds.has(w.id))
+                    )
+                    const canQuickStartWork = b.is_manual_booking && b.status === 'accepted' && !!b.worker_id
+                    const justChanged = recentlyChangedIds.has(b.id)
 
-                      return (
-                        <Fragment key={b.id}>
-                          <tr
-                            className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
-                            onClick={() => setSelected(b)}
-                            style={{ opacity: isCancelled ? 0.7 : 1 }}>
-                            <td className="px-4 py-3.5">
-                              <div className="flex items-center gap-2.5">
-                                <div className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center text-base"
-                                  style={{ background: cfg.bg, border: `1px solid ${cfg.color}30` }}>
-                                  {isLive ? <span className="animate-pulse">{cfg.icon}</span> : cfg.icon}
-                                </div>
-                                <div className="min-w-0">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <p className="font-black text-slate-800 text-[13px] truncate max-w-[160px]">{b.service_name}</p>
-                                    {b.services.length > 1 && (
-                                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200 flex-shrink-0">
-                                        +{b.services.length - 1} more
-                                      </span>
-                                    )}
-                                                                        {b.is_manual_booking && (
-                                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200 flex-shrink-0">
-                                        📞 Phone
-                                      </span>
-                                    )}
-                                    <RecurringPackageBadge bookingId={b.id} />
-                                    {b.extra_time_mins > 0 && (
-                                      <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 border border-violet-200 flex-shrink-0">
-                                        +{b.extra_time_mins}m {b.extra_time_payment_status === 'paid' ? '✓' : '⏳'}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-1.5 mt-0.5">
-                                    <span className="text-[11px] font-semibold text-slate-600">{b.customer}</span>
-                                    <span className="text-slate-300">·</span>
-                                    <a href={`tel:${b.customer_phone}`}
-                                      onClick={e => e.stopPropagation()}
-                                      className="text-[11px] text-cyan-600 font-bold hover:underline">
-                                      {b.customer_phone}
-                                    </a>
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
-                              <div className="flex items-center gap-1.5 mb-0.5">
-                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                                  style={{ background: isLive ? '#0891B2' : b.status === 'completed' ? '#059669' : '#F59E0B' }}/>
-                                <p className="text-[13px] text-slate-700 font-bold">
-                                  {new Date(b.scheduled_at).toLocaleDateString('en-IN',
-                                    { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}
+                    // Conflict badge: does the assigned worker actually have
+                    // another overlapping booking? Reuses the same
+                    // isWorkerAvailableAt check used everywhere else in this
+                    // file — since slimBookings includes this booking too,
+                    // the function only returns false when a genuinely
+                    // DIFFERENT booking for the same worker overlaps this slot.
+                    const assignedWorker = b.worker_id ? workers.find(w => w.id === b.worker_id) : null
+                    const hasWorkerConflict = assignedWorker
+                      ? !isWorkerAvailableAt(assignedWorker, b.scheduled_at, b.service_duration || 60, slimBookings)
+                      : false
+
+                    return (
+                      <div key={b.id}
+                        onClick={() => setSelected(b)}
+                        className="relative rounded-2xl bg-white overflow-hidden cursor-pointer transition-all hover:shadow-xl hover:-translate-y-0.5"
+                        style={{
+                          opacity: isCancelled ? 0.65 : 1,
+                          border: `1px solid ${justChanged ? cfg.edge : '#EFEAFB'}`,
+                          boxShadow: justChanged ? `0 0 0 3px ${cfg.edge}25` : '0 1px 3px rgba(124,111,232,0.06)',
+                          transition: 'box-shadow 1.5s ease, border-color 1.5s ease, transform 0.2s ease',
+                        }}>
+                        <CelebrationBurst show={celebratingIds.has(b.id)}/>
+                        {/* left color edge = status — thicker for a bolder look */}
+                        <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: cfg.edge }}/>
+
+                        <div className="pl-5 pr-4 py-4">
+                          {/* top row: service + status pill */}
+                          <div className="flex items-start justify-between gap-2 mb-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                                <p className="font-black text-[16px] truncate max-w-[360px]" style={{ color: '#1E1B4B' }}>
+                                  {isLive && <span className="animate-pulse mr-1">{cfg.icon}</span>}
+                                  {b.service_name}
                                 </p>
+                                {b.services.length > 1 && (
+                                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full flex-shrink-0" style={{ background: '#EAF4FE', color: '#2F9BF0' }}>
+                                    +{b.services.length - 1} more
+                                  </span>
+                                )}
+                                {b.is_manual_booking && (
+                                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full flex-shrink-0" style={{ background: '#F4F4F5', color: '#71717A' }}>
+                                    📞 Phone
+                                  </span>
+                                )}
+                                <RecurringPackageBadge bookingId={b.id} />
+                                {b.extra_time_mins > 0 && (
+                                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full flex-shrink-0" style={{ background: '#F5F3FF', color: '#6D28D9' }}>
+                                    +{b.extra_time_mins}m {b.extra_time_payment_status === 'paid' ? '✓' : '⏳'}
+                                  </span>
+                                )}
                               </div>
-                              <p className="text-[12px] text-cyan-600 font-bold">
-                                🕐 {new Date(b.scheduled_at).toLocaleTimeString('en-IN',
-                                  { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
-                              </p>
-                            </td>
-                            <td className="px-4 py-3.5" onClick={e => e.stopPropagation()}>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-[11.5px] font-semibold" style={{ color: '#52525B' }}>{b.customer}</span>
+                                <span className="text-zinc-300">·</span>
+                                <a href={`tel:${b.customer_phone}`}
+                                  onClick={e => e.stopPropagation()}
+                                  className="text-[11.5px] font-bold hover:underline" style={{ color: '#2F9BF0' }}>
+                                  {b.customer_phone}
+                                </a>
+                              </div>
+                            </div>
+                            <span className="flex-shrink-0 text-[11.5px] font-black px-2.5 py-1.5 rounded-full whitespace-nowrap"
+                              style={{ background: cfg.bg, color: cfg.color }}>
+                              {cfg.icon} {cfg.label}
+                            </span>
+                          </div>
+
+                          {/* middle row: schedule, location, worker */}
+                          <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 mb-3 text-[13px]">
+                            <span className="font-bold" style={{ color: '#3F3F46' }}>
+                              🕐 {new Date(b.scheduled_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}
+                              {' · '}
+                              {new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
+                            </span>
+                            <span className="text-zinc-400 truncate max-w-[160px]" title={[b.flat_no, b.building, b.full_address, b.area].filter(Boolean).join(', ')}>
+                              📍 {[b.flat_no, b.building].filter(Boolean).join(', ') || b.area}
+                            </span>
+                          </div>
+
+                          {/* worker row */}
+                          <div className="flex items-center justify-between gap-2 mb-2.5">
+                            {b.worker !== 'Unassigned' ? (
                               <div className="flex items-center gap-1.5">
-                                <div className="min-w-0">
-                                  <p className="text-[12px] font-bold text-slate-700 truncate max-w-[130px]" title={[b.flat_no, b.building, b.full_address, b.area].filter(Boolean).join(', ')}>
-                                    📍 {b.area}
-                                  </p>
-                                  {(b.flat_no || b.building) && (
-                                    <p className="text-[10px] text-slate-500 truncate max-w-[130px]">
-                                      {[b.flat_no, b.building].filter(Boolean).join(', ')}
-                                    </p>
-                                  )}
-                                  {b.city && <p className="text-[10px] text-slate-400 truncate max-w-[130px]">{b.city}{b.pincode ? ` - ${b.pincode}` : ''}</p>}
+                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-black flex-shrink-0"
+                                  style={{ background: '#F59E0B' }}>
+                                  {b.worker[0]?.toUpperCase()}
                                 </div>
-                                <div className="flex items-center gap-1 flex-shrink-0">
-                                  <button
-                                    onClick={() => setMapFor(b)}
-                                    title="View on map"
-                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100 transition-all hover:scale-105">
-                                    🗺
-                                  </button>
-                                  <a
-                                    href={b.latitude && b.longitude
-                                      ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
-                                      : `https://maps.google.com/?q=${encodeURIComponent([b.flat_no, b.building, b.full_address || b.area, b.city].filter(Boolean).join(', '))}`}
-                                    target="_blank" rel="noopener noreferrer"
-                                    onClick={e => e.stopPropagation()}
-                                    title="Open exact location in Google Maps"
-                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition-all hover:scale-105">
-                                    📌
-                                  </a>
-                                  <button
-                                    onClick={() => {
-                                      const parts = [b.flat_no, b.building, b.full_address || b.area, b.city, b.pincode].filter(Boolean)
-                                      const fullAddr = parts.join(', ')
-                                      const mapsUrl = b.latitude && b.longitude
-                                        ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
-                                        : `https://maps.google.com/?q=${encodeURIComponent(fullAddr)}`
-                                      const shareText = `${b.customer} - ${b.service_name}\n📍 ${fullAddr}\n🗺 ${mapsUrl}`
-                                      if (navigator.share) {
-                                        navigator.share({ title: `Cleenzo Booking - ${b.customer}`, text: shareText, url: mapsUrl })
-                                      } else {
-                                        navigator.clipboard.writeText(shareText)
-                                        alert('Address & maps link copied!')
-                                      }
-                                    }}
-                                    title="Share full address"
-                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 transition-all hover:scale-105">
-                                    🔗
-                                  </button>
-                                </div>
+                                <span className="text-[12px] font-semibold" style={{ color: '#3F3F46' }}>{b.worker.split(' ')[0]}</span>
+                                {hasWorkerConflict && (
+                                  <span title="This worker has another overlapping job"
+                                    className="text-[9px] font-black px-1.5 py-0.5 rounded-full flex-shrink-0" style={{ background: '#FFE4E6', color: '#BE123C' }}>
+                                    ⚠️ conflict
+                                  </span>
+                                )}
                               </div>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <span className="text-[11px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
-                                style={{ background: cfg.bg, color: cfg.color }}>
-                                {cfg.icon} {cfg.label}
+                            ) : (
+                              <span className={`text-[10.5px] font-black px-2 py-0.5 rounded-full inline-flex items-center gap-1 whitespace-nowrap ${
+                                isUrgentUnassigned(b.scheduled_at) ? 'animate-pulse' : ''
+                              }`}
+                                style={isUrgentUnassigned(b.scheduled_at)
+                                  ? { background: '#FFE4E6', color: '#BE123C' }
+                                  : { background: '#FEF3C7', color: '#B45309' }}>
+                                {isUrgentUnassigned(b.scheduled_at) ? '🔴' : '⏳'} Unassigned · {timeUntilLabel(b.scheduled_at)}
                               </span>
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
-                              {b.worker !== 'Unassigned'
-                                ? <div className="flex items-center gap-1.5">
-                                    <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-black flex-shrink-0"
-                                      style={{ background: 'linear-gradient(135deg,#F59E0B,#D97706)' }}>
-                                      {b.worker[0]?.toUpperCase()}
-                                    </div>
-                                    <span className="text-[12px] font-semibold text-slate-700">{b.worker.split(' ')[0]}</span>
-                                  </div>
-                                : <span className="text-[11px] text-amber-600 font-bold bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Unassigned</span>}
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
-                              <span className={`text-[13px] font-black ${isCancelled ? 'text-red-400 line-through' : 'text-cyan-700'}`}>
-                                ₹{b.final_amount.toLocaleString('en-IN')}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
+                            )}
+                            <span className={`text-[18px] font-black ${isCancelled ? 'line-through' : ''}`}
+                              style={{ color: isCancelled ? '#D4D4D8' : '#2F9BF0' }}>
+                              ₹{b.final_amount.toLocaleString('en-IN')}
+                            </span>
+                          </div>
+
+                          {/* bottom row: timer + actions */}
+                          <div className="flex items-center justify-between gap-2 pt-2.5" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
+                            <div>
                               {isLive && b.work_started_at
-                                ? <LiveTimer start={b.work_started_at} end={null} color="#0891B2"/>
+                                ? <LiveTimer start={b.work_started_at} end={null} color="#6366F1"/>
                                 : isDone && totalSec > 0
-                                  ? <span className="font-mono font-bold text-[12px] text-green-700">{durShort(totalSec)}</span>
-                                  : <span className="text-slate-300 text-xs">—</span>}
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
-                              <div className="flex items-center gap-1.5">
-                                {canQuickStartWork && (
-                                  <button onClick={() => setSelected(b)}
-                                    title="Open to start work (phone booking has no customer OTP step)"
-                                    className="px-2.5 py-1 rounded-lg text-[11px] font-black bg-cyan-100 text-cyan-700 border border-cyan-200 hover:bg-cyan-200 transition-all">
-                                    ▶️ Start
-                                  </button>
-                                )}
-                                {b.status === 'in_progress' && (
-                                  <button onClick={() => {
-                                    if (!window.confirm(
-                                      `Mark "${b.service_name}" for ${b.customer} as complete?\n\n` +
-                                      'This will stop the timer, mark payment as paid, and notify the customer immediately.'
-                                    )) return
-                                    quickAct(b.id,'completed')
-                                  }}
-                                    className="px-2.5 py-1 rounded-lg text-[11px] font-black bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-all">
-                                    ✓ Done
-                                  </button>
-                                )}
-                                {['pending','accepted','otp_verified','in_progress'].includes(b.status) && (
-                                  <button onClick={() => quickAct(b.id,'cancelled')}
-                                    className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">✕</button>
-                                )}
-                                <button onClick={() => setSelected(b)}
-                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">
-                                  Details
+                                  ? <span className="font-mono font-bold text-[12px]" style={{ color: '#10B981' }}>⏱ {durShort(totalSec)}</span>
+                                  : <span className="text-zinc-300 text-xs">—</span>}
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <div className="flex items-center gap-1 mr-1">
+                                <a
+                                  href={b.latitude && b.longitude
+                                    ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
+                                    : `https://maps.google.com/?q=${encodeURIComponent([b.flat_no, b.building, b.full_address || b.area, b.city].filter(Boolean).join(', '))}`}
+                                  target="_blank" rel="noopener noreferrer"
+                                  title="Open in Google Maps"
+                                  className="w-7 h-7 rounded-lg flex items-center justify-center text-xs transition-all hover:scale-105" style={{ background: '#F0FDFA', color: '#0F766E' }}>
+                                  📌
+                                </a>
+                                <button onClick={() => setMapFor(b)} title="View on map"
+                                  className="w-7 h-7 rounded-lg flex items-center justify-center text-xs transition-all hover:scale-105" style={{ background: '#EAF4FE', color: '#2F9BF0' }}>
+                                  🗺
                                 </button>
                               </div>
-                            </td>
-                          </tr>
+                              {canQuickStartWork && (
+                                <button onClick={() => setSelected(b)}
+                                  title="Open to start work"
+                                  className="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all" style={{ background: '#EAF4FE', color: '#2F9BF0' }}>
+                                  ▶️ Start
+                                </button>
+                              )}
+                              {b.status === 'in_progress' && (
+                                <button onClick={() => {
+                                  if (!window.confirm(
+                                    `Mark "${b.service_name}" for ${b.customer} as complete?\n\n` +
+                                    'This will stop the timer, mark payment as paid, and notify the customer immediately.'
+                                  )) return
+                                  quickAct(b.id,'completed')
+                                }}
+                                  className="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all" style={{ background: '#D1FAE5', color: '#047857' }}>
+                                  ✓ Done
+                                </button>
+                              )}
+                              {['pending','accepted','otp_verified','in_progress'].includes(b.status) && (
+                                <button onClick={() => quickAct(b.id,'cancelled')}
+                                  className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black transition-all" style={{ background: '#FFE4E6', color: '#BE123C' }}>✕</button>
+                              )}
+                              <button onClick={() => setSelected(b)}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all" style={{ background: '#F4F4F5', color: '#52525B' }}>
+                                Details
+                              </button>
+                            </div>
+                          </div>
 
                           {needsW && (
-                            <tr className="border-b border-slate-50 bg-amber-50/40">
-                              <td colSpan={8} className="px-4 py-2" onClick={e => e.stopPropagation()}>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[11px] text-slate-500 font-medium whitespace-nowrap">
-                                    {zoneIds != null && '📐 '}
-                                    {slotAvailable.length > 0
-                                      ? `${slotAvailable.length} free at this slot:`
-                                      : 'No workers free at this slot'}
-                                  </span>
-                                  <select value={assignMap[b.id] ?? ''} onChange={e => setAssignMap(p => ({ ...p, [b.id]: e.target.value }))}
-                                    className="flex-1 max-w-xs px-3 py-1.5 rounded-lg text-[13px] text-slate-800 outline-none bg-white"
-                                    style={{ border: `1.5px solid ${slotAvailable.length > 0 ? '#FCD34D' : '#FECACA'}` }}>
-                                    <option value="">{slotAvailable.length === 0 ? 'No workers free' : 'Assign worker...'}</option>
-                                    {slotAvailable.map(w => (
-                                      <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
-                                    ))}
-                                  </select>
-                                  <button onClick={() => quickAssign(b.id)}
-                                    disabled={!assignMap[b.id] || assigning === b.id || slotAvailable.length === 0}
-                                    className="px-3 py-1.5 rounded-lg text-[11px] font-black text-white disabled:opacity-40 active:scale-95 whitespace-nowrap"
-                                    style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-                                    {assigning === b.id ? '...' : 'Assign 🔔'}
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
+                            <div className="mt-2.5 pt-2.5 flex items-center gap-2 flex-wrap" style={{ borderTop: '1px dashed #FDE68A' }} onClick={e => e.stopPropagation()}>
+                              <span className="text-[10.5px] font-medium whitespace-nowrap" style={{ color: '#B45309' }}>
+                                {zoneIds != null && '📐 '}
+                                {slotAvailable.length > 0 ? `${slotAvailable.length} free:` : 'No workers free'}
+                              </span>
+                              <select value={assignMap[b.id] ?? ''} onChange={e => setAssignMap(p => ({ ...p, [b.id]: e.target.value }))}
+                                className="flex-1 min-w-[140px] px-2.5 py-1.5 rounded-lg text-[12px] outline-none bg-white"
+                                style={{ border: `1.5px solid ${slotAvailable.length > 0 ? '#FCD34D' : '#FECACA'}`, color: '#3F3F46' }}>
+                                <option value="">{slotAvailable.length === 0 ? 'No workers free' : 'Assign worker...'}</option>
+                                {slotAvailable.map(w => (
+                                  <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
+                                ))}
+                              </select>
+                              <button onClick={() => quickAssign(b.id)}
+                                disabled={!assignMap[b.id] || assigning === b.id || slotAvailable.length === 0}
+                                className="px-3 py-1.5 rounded-lg text-[11px] font-black text-white disabled:opacity-40 active:scale-95 whitespace-nowrap"
+                                style={{ background: '#2F9BF0' }}>
+                                {assigning === b.id ? '...' : 'Assign 🔔'}
+                              </button>
+                            </div>
                           )}
-                        </Fragment>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -3754,6 +3749,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           onDone={() => { setShowBlockModal(false); load() }}
         />
       )}
+    </div>
     </div>
   )
 }
