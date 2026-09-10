@@ -272,7 +272,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   }
 
   const Sidebar = ({ onNav }: { onNav?: () => void }) => (
-    <div className="flex flex-col h-full bg-white">
+    <div className="flex flex-col bg-white">
       {/* logo */}
       <div className="px-5 pt-6 pb-5 border-b border-gray-100">
         <div className="flex items-center gap-3">
@@ -398,7 +398,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       </div>
 
       {/* nav */}
-      <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto">
+      <nav className="px-3 space-y-0.5">
         {NAV.map(item => {
           const isActive = pathname.startsWith(item.href)
           const b = badge(item.href)
