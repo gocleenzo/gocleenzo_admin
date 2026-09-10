@@ -2361,7 +2361,6 @@ function DateDetailCard({ entry, highlight }: { entry: DateEntry; highlight?: bo
   )
 }
 
-
 function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling, onReload }: {
   w: Worker; index: number; onClose: () => void
   onEdit: () => void; onDelete: () => void
@@ -2796,6 +2795,95 @@ function statusOf(w: Worker): { color: string; label: string } {
   return { color: '#94A3B8', label: 'Unavailable' }
 }
 
+// NEW: shared table body renderer for both the Active and Inactive
+// worker sections, so the two tables can never visually drift apart
+// from each other over time — one component, two data sets.
+function WorkersTable({ list, selected, selIndex, onSelectRow }: {
+  list: Worker[]
+  selected: Worker | null
+  selIndex: number
+  onSelectRow: (w: Worker, i: number) => void
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr className="border-b border-slate-100 bg-slate-50/50">
+            {['Worker','Status','Location','Verified','Jobs','Done','Revenue','OTP'].map(c => (
+              <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {list.map((w, i) => {
+            const st = statusOf(w)
+            const avatarColors = ['#0891B2','#0E7490','#06B6D4','#0891B2','#155E75','#0E7490']
+            const avatarBg = avatarColors[i % avatarColors.length]
+            const isSel = selected?.id === w.id
+            return (
+              <tr key={w.id}
+                onClick={() => onSelectRow(w, i)}
+                className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer"
+                style={{ background: isSel ? `${avatarBg}08` : undefined }}>
+                <td className="px-4 py-3.5">
+                  <div className="flex items-center gap-2.5">
+                    <div className="relative shrink-0">
+                      <div className="w-9 h-9 rounded-lg flex items-center justify-center font-black text-sm text-white"
+                        style={{ background: `linear-gradient(135deg,${avatarBg},${avatarBg}CC)`, opacity: w.is_active ? 1 : 0.5 }}>
+                        {w.full_name[0]?.toUpperCase()}
+                      </div>
+                      <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white" style={{ background: st.color }}/>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="font-bold text-slate-800 text-[13px] truncate max-w-[150px]">{w.full_name}</p>
+                      <p className="text-[11px] text-slate-400">+91 {w.phone}</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-3.5 whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1.5 text-[11px] font-bold">
+                    <span className="w-2 h-2 rounded-full" style={{ background: st.color }}/>
+                    <span style={{ color: st.color }}>{st.label}</span>
+                    {w.is_busy && w.work_started_at && (
+                      <LiveTimer start={w.work_started_at} color="#D97706"/>
+                    )}
+                  </span>
+                </td>
+                <td className="px-4 py-3.5 whitespace-nowrap">
+                  {isLocationLive(w.locationUpdatedAt) ? (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"/>
+                      📍 On
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-red-500">
+                      <span className="w-2 h-2 rounded-full bg-red-400"/>
+                      Off · {locationAgoLabel(w.locationUpdatedAt)}
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3.5 whitespace-nowrap">
+                  {w.is_verified
+                    ? <span className="text-[11px] font-bold text-cyan-700">✓ Verified</span>
+                    : <span className="text-[11px] text-slate-400">—</span>}
+                </td>
+                <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-slate-700">{w.totalOrders}</td>
+                <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-emerald-600">{w.completed}</td>
+                <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">₹{w.totalRevenue.toLocaleString('en-IN')}</td>
+                <td className="px-4 py-3.5 whitespace-nowrap">
+                  {w.worker_otp
+                    ? <span className="font-mono font-bold text-[12px] text-violet-700">{w.worker_otp}</span>
+                    : <span className="text-[11px] text-red-400">not set</span>}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export default function AdminWorkers() {
   const [workers,  setWorkers]  = useState<Worker[]>([])
   const [loading,  setLoading]  = useState(true)
@@ -2806,6 +2894,7 @@ export default function AdminWorkers() {
   const [toDelete, setToDelete] = useState<Worker | null>(null)
   const [toggling, setToggling] = useState<string | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
+  const [showInactive, setShowInactive] = useState(false)
   const supabase = createClient()
 
   async function load() {
@@ -2899,10 +2988,6 @@ export default function AdminWorkers() {
       setPendingCount(pj.count ?? 0)
     } catch {}
     if (selected) { const updated = list.find(w => w.id === selected.id); if (updated) setSelected(updated) }
-    // PERF: previously fired one upsert call PER worker, every single
-    // time this page loaded — with dozens of workers that's dozens of
-    // separate write round-trips on every load, fire-and-forget with
-    // no error handling. Batched into one upsert with all rows at once.
     const workSecsRows = list
       .filter(w => w.totalWorkSecs > 0)
       .map(w => ({ user_id: w.id, total_work_seconds: w.totalWorkSecs }))
@@ -2933,10 +3018,17 @@ export default function AdminWorkers() {
   const isReallyAvailable = (w: Worker) => w.is_active && w.is_available && !w.is_busy && isWorkingNow(w.todaySchedule)
 
   const filtered   = workers.filter(w => w.full_name.toLowerCase().includes(search.toLowerCase()) || w.phone.includes(search))
+  const activeFiltered   = filtered.filter(w => w.is_active)
+  const inactiveFiltered = filtered.filter(w => !w.is_active)
   const busyCount  = workers.filter(w => w.is_busy).length
   const freeCount  = workers.filter(w => isReallyAvailable(w)).length
   const offShift   = workers.filter(w => w.is_active && w.is_available && !w.is_busy && !isWorkingNow(w.todaySchedule) && w.todaySchedule).length
   const totalRev   = workers.reduce((s, w) => s + w.totalRevenue, 0)
+
+  function selectRow(w: Worker, i: number) {
+    setSelected(selected?.id === w.id ? null : w)
+    setSelIndex(i)
+  }
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -3000,8 +3092,9 @@ export default function AdminWorkers() {
       </div>
 
       <div className="flex flex-col lg:flex-row gap-4">
-        <div className={`${selected ? 'hidden lg:block lg:w-1/2' : 'w-full'}`}>
-          {filtered.length === 0
+        <div className={`${selected ? 'hidden lg:block lg:w-1/2' : 'w-full'} space-y-4`}>
+
+          {activeFiltered.length === 0 && inactiveFiltered.length === 0
             ? (
               <div className="rounded-xl p-16 text-center bg-white border border-slate-200">
                 <p className="text-4xl mb-3">👷</p>
@@ -3009,84 +3102,41 @@ export default function AdminWorkers() {
                 <button onClick={() => setDrawer('add')} className="mt-4 px-6 py-2.5 rounded-xl text-white font-black text-sm" style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)' }}>+ Add First Worker</button>
               </div>
             ) : (
-              <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm border-collapse">
-                    <thead>
-                      <tr className="border-b border-slate-100 bg-slate-50/50">
-                        {['Worker','Status','Location','Verified','Jobs','Done','Revenue','OTP'].map(c => (
-                          <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filtered.map((w, i) => {
-                        const st = statusOf(w)
-                        const avatarColors = ['#0891B2','#0E7490','#06B6D4','#0891B2','#155E75','#0E7490']
-                        const avatarBg = avatarColors[i % avatarColors.length]
-                        const isSel = selected?.id === w.id
-                        return (
-                          <tr key={w.id}
-                            onClick={() => { setSelected(isSel ? null : w); setSelIndex(i) }}
-                            className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer"
-                            style={{ background: isSel ? `${avatarBg}08` : undefined }}>
-                            <td className="px-4 py-3.5">
-                              <div className="flex items-center gap-2.5">
-                                <div className="relative shrink-0">
-                                  <div className="w-9 h-9 rounded-lg flex items-center justify-center font-black text-sm text-white"
-                                    style={{ background: `linear-gradient(135deg,${avatarBg},${avatarBg}CC)`, opacity: w.is_active ? 1 : 0.5 }}>
-                                    {w.full_name[0]?.toUpperCase()}
-                                  </div>
-                                  <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white" style={{ background: st.color }}/>
-                                </div>
-                                <div className="min-w-0">
-                                  <p className="font-bold text-slate-800 text-[13px] truncate max-w-[150px]">{w.full_name}</p>
-                                  <p className="text-[11px] text-slate-400">+91 {w.phone}</p>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
-                              <span className="inline-flex items-center gap-1.5 text-[11px] font-bold">
-                                <span className="w-2 h-2 rounded-full" style={{ background: st.color }}/>
-                                <span style={{ color: st.color }}>{st.label}</span>
-                                {w.is_busy && w.work_started_at && (
-                                  <LiveTimer start={w.work_started_at} color="#D97706"/>
-                                )}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
-                              {isLocationLive(w.locationUpdatedAt) ? (
-                                <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
-                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"/>
-                                  📍 On
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-red-500">
-                                  <span className="w-2 h-2 rounded-full bg-red-400"/>
-                                  Off · {locationAgoLabel(w.locationUpdatedAt)}
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
-                              {w.is_verified
-                                ? <span className="text-[11px] font-bold text-cyan-700">✓ Verified</span>
-                                : <span className="text-[11px] text-slate-400">—</span>}
-                            </td>
-                            <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-slate-700">{w.totalOrders}</td>
-                            <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-emerald-600">{w.completed}</td>
-                            <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">₹{w.totalRevenue.toLocaleString('en-IN')}</td>
-                            <td className="px-4 py-3.5 whitespace-nowrap">
-                              {w.worker_otp
-                                ? <span className="font-mono font-bold text-[12px] text-violet-700">{w.worker_otp}</span>
-                                : <span className="text-[11px] text-red-400">not set</span>}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <>
+                {activeFiltered.length === 0 ? (
+                  <div className="rounded-xl p-10 text-center bg-white border border-slate-200">
+                    <p className="text-3xl mb-2">👷</p>
+                    <p className="text-slate-500 font-semibold text-sm">No active workers match this search</p>
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
+                    <WorkersTable list={activeFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow}/>
+                  </div>
+                )}
+
+                {inactiveFiltered.length > 0 && (
+                  <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
+                    <button
+                      onClick={() => setShowInactive(s => !s)}
+                      className="w-full flex items-center justify-between px-4 py-3.5 bg-red-50/50 hover:bg-red-50 transition-colors">
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: '#DC2626' }}/>
+                        <span className="text-sm font-black text-red-700">
+                          Inactive Workers ({inactiveFiltered.length})
+                        </span>
+                      </div>
+                      <span className="text-red-400 text-sm transition-transform" style={{ transform: showInactive ? 'rotate(180deg)' : 'none' }}>
+                        ▾
+                      </span>
+                    </button>
+                    {showInactive && (
+                      <div className="border-t border-red-100">
+                        <WorkersTable list={inactiveFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow}/>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
             )
           }
         </div>
