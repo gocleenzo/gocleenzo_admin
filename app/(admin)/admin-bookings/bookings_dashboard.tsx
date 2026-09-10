@@ -3404,7 +3404,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           </p>
         </div>
       ) : (
-        <div className="space-y-5">
+        <div className="space-y-4">
           {Object.entries(groupedByArea).map(([area, areaBookings]) => {
             const liveInArea = areaBookings.filter(b => b.status === 'in_progress').length
             const pendingInArea = areaBookings.filter(b => b.status === 'pending').length
@@ -3465,8 +3465,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                   </div>
                 </div>
 
-                {/* ── Booking cards — full-width, bold single column ── */}
-                <div className="flex flex-col gap-3">
+                {/* ── Booking cards — compact single column for easy scrolling ── */}
+                <div className="flex flex-col gap-2">
                   {areaBookings.map(b => {
                     const cfg         = STATUS[b.status] ?? STATUS.pending
                     const needsW      = !b.worker_id && ['pending','accepted'].includes(b.status)
@@ -3504,26 +3504,40 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                       (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
                       + (b.extra_time_mins ?? 0)
 
+                    // Full-card light background tint by status — extended
+                    // from "completed only" to also cover Cancelled (red)
+                    // and In Progress (yellow), so all three read at a
+                    // glance while scrolling, not just completed jobs.
+                    // Pending/Assigned/OTP-verified stay plain white —
+                    // only these three were requested to get a tint.
+                    const cardTint: Record<string, { bg: string; border: string }> = {
+                      completed:   { bg: '#ECFDF5', border: '#A7F3D0' }, // green
+                      cancelled:   { bg: '#FEF2F2', border: '#FECACA' }, // red
+                      in_progress: { bg: '#FEF3C7', border: '#FCD34D' }, // yellow (more visible than pale amber-50)
+                    }
+                    const tint = cardTint[b.status]
+
                     return (
                       <div key={b.id}
                         onClick={() => setSelected(b)}
-                        className="relative rounded-2xl bg-white overflow-hidden cursor-pointer transition-all hover:shadow-xl hover:-translate-y-0.5"
+                        className="relative rounded-xl overflow-hidden cursor-pointer transition-all hover:shadow-md hover:-translate-y-0.5"
                         style={{
                           opacity: isCancelled ? 0.65 : 1,
-                          border: `1px solid ${justChanged ? cfg.edge : '#EFEAFB'}`,
-                          boxShadow: justChanged ? `0 0 0 3px ${cfg.edge}25` : '0 1px 3px rgba(124,111,232,0.06)',
+                          background: tint ? tint.bg : '#fff',
+                          border: `1px solid ${justChanged ? cfg.edge : tint ? tint.border : '#EFEAFB'}`,
+                          boxShadow: justChanged ? `0 0 0 3px ${cfg.edge}25` : '0 1px 2px rgba(124,111,232,0.05)',
                           transition: 'box-shadow 1.5s ease, border-color 1.5s ease, transform 0.2s ease',
                         }}>
                         <CelebrationBurst show={celebratingIds.has(b.id)}/>
-                        {/* left color edge = status — thicker for a bolder look */}
+                        {/* left color edge = status */}
                         <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: cfg.edge }}/>
 
-                        <div className="pl-5 pr-4 py-4">
+                        <div className="pl-3.5 pr-2.5 py-2">
                           {/* top row: service + status pill */}
-                          <div className="flex items-start justify-between gap-2 mb-2">
+                          <div className="flex items-start justify-between gap-2 mb-0.5">
                             <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-1.5 flex-wrap mb-1">
-                                <p className="font-black text-[16px] truncate max-w-[360px]" style={{ color: '#1E1B4B' }}>
+                              <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                                <p className="font-black text-[14px] truncate max-w-[360px]" style={{ color: '#1E1B4B' }}>
                                   {isLive && <span className="animate-pulse mr-1">{cfg.icon}</span>}
                                   {b.service_name}
                                 </p>
@@ -3561,7 +3575,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                           </div>
 
                           {/* middle row: schedule, duration, location */}
-                          <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 mb-3 text-[13px]">
+                          <div className="flex items-center flex-wrap gap-x-3 gap-y-1 mb-1 text-[11.5px]">
                             <span className="font-bold" style={{ color: '#3F3F46' }}>
                               🕐 {new Date(b.scheduled_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}
                               {' · '}
@@ -3570,25 +3584,25 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             <span className="font-bold flex items-center gap-1" style={{ color: '#7C3AED' }} title="Planned service duration">
                               ⏱ {formatPlannedDuration(plannedDurationMins)}
                               {b.extra_time_mins > 0 && (
-                                <span className="text-[10px] font-black" style={{ color: '#9CA3AF' }}>
-                                  (+{b.extra_time_mins}m extra)
+                                <span className="text-[9.5px] font-black" style={{ color: '#9CA3AF' }}>
+                                  (+{b.extra_time_mins}m)
                                 </span>
                               )}
                             </span>
-                            <span className="text-zinc-400 truncate max-w-[160px]" title={[b.flat_no, b.building, b.full_address, b.area].filter(Boolean).join(', ')}>
+                            <span className="text-zinc-400 truncate max-w-[140px]" title={[b.flat_no, b.building, b.full_address, b.area].filter(Boolean).join(', ')}>
                               📍 {[b.flat_no, b.building].filter(Boolean).join(', ') || b.area}
                             </span>
                           </div>
 
                           {/* worker row */}
-                          <div className="flex items-center justify-between gap-2 mb-2.5">
+                          <div className="flex items-center justify-between gap-2 mb-1">
                             {b.worker !== 'Unassigned' ? (
                               <div className="flex items-center gap-1.5">
-                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-black flex-shrink-0"
+                                <div className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-black flex-shrink-0"
                                   style={{ background: '#F59E0B' }}>
                                   {b.worker[0]?.toUpperCase()}
                                 </div>
-                                <span className="text-[12px] font-semibold" style={{ color: '#3F3F46' }}>{b.worker.split(' ')[0]}</span>
+                                <span className="text-[11.5px] font-semibold" style={{ color: '#3F3F46' }}>{b.worker.split(' ')[0]}</span>
                                 {hasWorkerConflict && (
                                   <span title="This worker has another overlapping job"
                                     className="text-[9px] font-black px-1.5 py-0.5 rounded-full flex-shrink-0" style={{ background: '#FFE4E6', color: '#BE123C' }}>
@@ -3597,7 +3611,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                 )}
                               </div>
                             ) : (
-                              <span className={`text-[10.5px] font-black px-2 py-0.5 rounded-full inline-flex items-center gap-1 whitespace-nowrap ${
+                              <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-full inline-flex items-center gap-1 whitespace-nowrap ${
                                 isUrgentUnassigned(b.scheduled_at) ? 'animate-pulse' : ''
                               }`}
                                 style={isUrgentUnassigned(b.scheduled_at)
@@ -3606,34 +3620,34 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                 {isUrgentUnassigned(b.scheduled_at) ? '🔴' : '⏳'} Unassigned · {timeUntilLabel(b.scheduled_at)}
                               </span>
                             )}
-                            <span className={`text-[18px] font-black ${isCancelled ? 'line-through' : ''}`}
+                            <span className={`text-[15px] font-black ${isCancelled ? 'line-through' : ''}`}
                               style={{ color: isCancelled ? '#D4D4D8' : '#2F9BF0' }}>
                               ₹{b.final_amount.toLocaleString('en-IN')}
                             </span>
                           </div>
 
                           {/* bottom row: timer + actions */}
-                          <div className="flex items-center justify-between gap-2 pt-2.5" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
+                          <div className="flex items-center justify-between gap-2 pt-1.5" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
                             <div>
                               {isLive && b.work_started_at
                                 ? <LiveTimer start={b.work_started_at} end={null} color="#6366F1"/>
                                 : isDone && totalSec > 0
-                                  ? <span className="font-mono font-bold text-[12px]" style={{ color: '#10B981' }}>⏱ {durShort(totalSec)}</span>
+                                  ? <span className="font-mono font-bold text-[11px]" style={{ color: '#10B981' }}>⏱ {durShort(totalSec)}</span>
                                   : <span className="text-zinc-300 text-xs">—</span>}
                             </div>
-                            <div className="flex items-center gap-1.5">
-                              <div className="flex items-center gap-1 mr-1">
+                            <div className="flex items-center gap-1">
+                              <div className="flex items-center gap-1 mr-0.5">
                                 <a
                                   href={b.latitude && b.longitude
                                     ? `https://maps.google.com/?q=${b.latitude},${b.longitude}`
                                     : `https://maps.google.com/?q=${encodeURIComponent([b.flat_no, b.building, b.full_address || b.area, b.city].filter(Boolean).join(', '))}`}
                                   target="_blank" rel="noopener noreferrer"
                                   title="Open in Google Maps"
-                                  className="w-7 h-7 rounded-lg flex items-center justify-center text-xs transition-all hover:scale-105" style={{ background: '#F0FDFA', color: '#0F766E' }}>
+                                  className="w-6 h-6 rounded-md flex items-center justify-center text-xs transition-all hover:scale-105" style={{ background: '#F0FDFA', color: '#0F766E' }}>
                                   📌
                                 </a>
                                 <button onClick={() => setMapFor(b)} title="View on map"
-                                  className="w-7 h-7 rounded-lg flex items-center justify-center text-xs transition-all hover:scale-105" style={{ background: '#EAF4FE', color: '#2F9BF0' }}>
+                                  className="w-6 h-6 rounded-md flex items-center justify-center text-xs transition-all hover:scale-105" style={{ background: '#EAF4FE', color: '#2F9BF0' }}>
                                   🗺
                                 </button>
                               </div>
@@ -3668,7 +3682,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                           </div>
 
                           {needsW && (
-                            <div className="mt-2.5 pt-2.5 flex items-center gap-2 flex-wrap" style={{ borderTop: '1px dashed #FDE68A' }} onClick={e => e.stopPropagation()}>
+                            <div className="mt-1.5 pt-1.5 flex items-center gap-2 flex-wrap" style={{ borderTop: '1px dashed #FDE68A' }} onClick={e => e.stopPropagation()}>
                               <span className="text-[10.5px] font-medium whitespace-nowrap" style={{ color: '#B45309' }}>
                                 {zoneIds != null && '📐 '}
                                 {slotAvailable.length > 0 ? `${slotAvailable.length} free:` : 'No workers free'}
