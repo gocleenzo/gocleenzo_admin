@@ -59,6 +59,16 @@ function localDateStr(d: Date): string {
 function timeToMins(t: string) {
   const [h, m] = t.split(':').map(Number); return h * 60 + m
 }
+// NEW: formats a booking's planned duration (minutes) as '1h 30m' / '45m'
+// for the sidebar's Upcoming Schedule duration chip.
+function formatSidebarDuration(mins: number): string {
+  const h = Math.floor(mins / 60)
+  const m = Math.round(mins % 60)
+  if (h && m) return `${h}h ${m}m`
+  if (h) return `${h}h`
+  return `${m}m`
+}
+
 function isWorkerAvailableAt(
   worker: SidebarWorker, scheduledAt: string, durationMins: number,
   existingBookings: { worker_id: string; scheduled_at: string; duration_mins: number }[]
@@ -345,8 +355,18 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                       <p className="text-[10px] truncate" style={{ color: isUnassigned ? '#B45309' : '#9CA3AF' }}>
                         {isUnassigned ? '⏳ Unassigned — tap to assign' : b.worker_name.split(' ')[0]}
                       </p>
+                      {/* NEW: planned service duration, so it's clear how
+                          long this visit is expected to take, not just
+                          when it starts. */}
+                      <p className="text-[9.5px] font-bold" style={{ color: '#7C3AED' }}>
+                        ⏱ {formatSidebarDuration(b.duration_mins)}
+                      </p>
                     </div>
                     <div className="flex-shrink-0 text-right">
+                      {/* NEW: explicit "Start" label so the time reads as
+                          "when this visit begins", distinct from the
+                          duration chip on the left. */}
+                      <p className="text-[8.5px] font-bold text-gray-400 uppercase tracking-wide">Start</p>
                       <p className="text-[10px] font-black text-blue-600">
                         {new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                       </p>
