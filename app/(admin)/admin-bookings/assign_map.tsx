@@ -83,6 +83,14 @@ export default function AssignMap({
   const workerMarkersRef   = useRef<Map<string, google.maps.Marker>>(new Map())
   const workerInfosRef     = useRef<Map<string, google.maps.InfoWindow>>(new Map())
   const openInfoRef        = useRef<google.maps.InfoWindow | null>(null)
+  // NEW: previously fitBounds() ran on every single data refresh (every
+  // 10s, via the load() interval below), silently resetting any zoom/pan
+  // the admin had just done to look closely at a specific area — annoying
+  // "auto zoom" behavior. Now bounds are only auto-fit ONCE, the first
+  // time real marker data appears, so the admin's manual pan/zoom is
+  // respected on every subsequent live refresh. Fitting again is still
+  // always available via the explicit "Fit all" (⊞) button.
+  const hasAutoFitRef      = useRef(false)
 
   const load = useCallback(async () => {
     try {
@@ -233,12 +241,23 @@ export default function AssignMap({
       }
     })
 
-    // Auto-fit bounds
-    if (customer || workers.length) {
+    // FIXED: previously called fitBounds() unconditionally on every
+    // marker update — including the automatic 10s refresh triggered by
+    // load()'s setInterval — which silently reset any manual zoom/pan
+    // the admin had just done to inspect a specific worker or area. Now
+    // only auto-fits ONCE, the first time real data actually arrives.
+    // Every later refresh (worker moved slightly, new worker appeared,
+    // etc.) just updates marker positions in place without touching the
+    // camera. The explicit "Fit all" (⊞) button still calls fitBounds
+    // directly any time the admin actually wants to re-fit.
+    if (!hasAutoFitRef.current && (customer || workers.length)) {
       const bounds = new google.maps.LatLngBounds()
       if (customer) bounds.extend({ lat: customer.lat, lng: customer.lng })
       workers.forEach(w => bounds.extend({ lat: w.current_lat, lng: w.current_lng }))
-      if (!bounds.isEmpty()) map.fitBounds(bounds, 80)
+      if (!bounds.isEmpty()) {
+        map.fitBounds(bounds, 80)
+        hasAutoFitRef.current = true
+      }
     }
   }, [isLoaded, customer, workers, selectedWorkerId, onSelectWorker])
 
@@ -315,8 +334,10 @@ export default function AssignMap({
         </div>
       </div>
 
-      {/* ── Map canvas ── */}
-      <div style={{ height: isFullscreen ? 'calc(100% - 220px)' : '320px' }} className="bg-slate-100 relative">
+      {/* ── Map canvas — increased from 320px to 520px so there's
+          actually room to see spread-out workers without constantly
+          zooming/panning; fullscreen height unchanged. ── */}
+      <div style={{ height: isFullscreen ? 'calc(100% - 220px)' : '520px' }} className="bg-slate-100 relative">
         {isLoaded && (customer || workers.length) ? (
           <GoogleMap
             mapContainerStyle={{ width: '100%', height: '100%' }}

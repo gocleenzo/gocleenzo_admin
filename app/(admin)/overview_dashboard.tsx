@@ -291,7 +291,10 @@ export default function OverviewDashboard({
   // this page to refetch, same debounce-free pattern as elsewhere since
   // this page's queries are cheap aggregate counts, not a full table scan.
   useEffect(() => {
-    const ch = supabase.channel('overview-live')
+    // FIXED: same React Strict Mode + Supabase channel-name-reuse race as
+    // bookings_dashboard.tsx — see that file for the full explanation.
+    // Unique name per mount avoids it entirely.
+    const ch = supabase.channel(`overview-live-${Date.now()}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => {
         loadStats()
         loadTrend(trendPeriod)

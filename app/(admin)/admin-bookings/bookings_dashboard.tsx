@@ -98,6 +98,18 @@ function dur(sec: number) {
   const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60
   if (h) return `${h}h ${m}m ${s}s`; if (m) return `${m}m ${s}s`; return `${s}s`
 }
+// NEW: formats a booking's planned/booked duration (in minutes) as a
+// short "1h 30m" / "45m" label for the card's duration chip — separate
+// from durShort()/dur() above, which format actual ELAPSED seconds off
+// a live timer, not a fixed planned-minutes total.
+function formatPlannedDuration(mins: number): string {
+  const h = Math.floor(mins / 60)
+  const m = Math.round(mins % 60)
+  if (h && m) return `${h}h ${m}m`
+  if (h) return `${h}h`
+  return `${m}m`
+}
+
 function durShort(sec: number) {
   const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60
   if (h) return `${h}h ${m}m`; if (m) return `${m}m ${s}s`; return `${s}s`
@@ -2981,7 +2993,16 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     // affected row can flash immediately — independent of whether the
     // debounced reload has actually landed yet.
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
-    const ch = supabase.channel('bkng')
+    // FIXED: "cannot add postgres_changes callbacks ... after subscribe()".
+    // React 18 Strict Mode runs effects mount → cleanup → mount again in
+    // dev. If the first channel's removeChannel() cleanup hasn't fully
+    // finished before the second mount creates a channel with the SAME
+    // name, Supabase's client returns the same already-subscribed channel
+    // object for that name instead of a fresh one — and calling .on() on
+    // an already-subscribed channel throws this exact error. A unique
+    // name per mount sidesteps the whole race entirely (harmless in
+    // production too, where this collision can't happen anyway).
+    const ch = supabase.channel(`bkng-${Date.now()}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
         const changedId = (payload.new as any)?.id ?? (payload.old as any)?.id
         if (changedId) {
@@ -3472,6 +3493,17 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                       ? !isWorkerAvailableAt(assignedWorker, b.scheduled_at, b.service_duration || 60, slimBookings)
                       : false
 
+                    // NEW: this card's planned service duration — same
+                    // fallback priority used everywhere else in this file
+                    // (actual service duration -> reserved slot duration ->
+                    // catalog default -> 60 min), plus any Extra Time added.
+                    // Requested as "planned/booked duration", not actual
+                    // elapsed work time, so this does NOT use
+                    // work_started_at/work_ended_at.
+                    const plannedDurationMins =
+                      (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
+                      + (b.extra_time_mins ?? 0)
+
                     return (
                       <div key={b.id}
                         onClick={() => setSelected(b)}
@@ -3528,12 +3560,20 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             </span>
                           </div>
 
-                          {/* middle row: schedule, location, worker */}
+                          {/* middle row: schedule, duration, location */}
                           <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 mb-3 text-[13px]">
                             <span className="font-bold" style={{ color: '#3F3F46' }}>
                               🕐 {new Date(b.scheduled_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}
                               {' · '}
                               {new Date(b.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
+                            </span>
+                            <span className="font-bold flex items-center gap-1" style={{ color: '#7C3AED' }} title="Planned service duration">
+                              ⏱ {formatPlannedDuration(plannedDurationMins)}
+                              {b.extra_time_mins > 0 && (
+                                <span className="text-[10px] font-black" style={{ color: '#9CA3AF' }}>
+                                  (+{b.extra_time_mins}m extra)
+                                </span>
+                              )}
                             </span>
                             <span className="text-zinc-400 truncate max-w-[160px]" title={[b.flat_no, b.building, b.full_address, b.area].filter(Boolean).join(', ')}>
                               📍 {[b.flat_no, b.building].filter(Boolean).join(', ') || b.area}
@@ -3663,7 +3703,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       {mapFor && (
         <>
           <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" onClick={() => setMapFor(null)} />
-          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-2xl max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
             <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
               <div>
                 <p className="font-black text-slate-800 text-sm">{mapFor.service_name}</p>

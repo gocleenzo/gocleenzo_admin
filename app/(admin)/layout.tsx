@@ -236,7 +236,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   useEffect(() => {
     loadSidebarWidgets()
     const t = setInterval(loadSidebarWidgets, 20000)
-    const ch = supabase.channel('sidebar-bkng')
+    // FIXED: same React Strict Mode + Supabase channel-name-reuse race as
+    // bookings_dashboard.tsx — see that file for the full explanation.
+    // Unique name per mount avoids it entirely.
+    const ch = supabase.channel(`sidebar-bkng-${Date.now()}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => loadSidebarWidgets())
       .subscribe()
     return () => { clearInterval(t); supabase.removeChannel(ch) }
@@ -517,4 +520,4 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       </nav>
     </div>
   )
-} 
+}
