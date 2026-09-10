@@ -6,7 +6,7 @@ import { Card, Toast } from './_ui'
 // Single source of truth for "revenue earned" — see file for why this
 // exists (three pages were previously computing it three different
 // ways, based on three different dates).
-import { fetchCompletedRevenue, fetchCompletedRevenueBuckets, getISTMonthStart } from './_lib/revenue'
+import { fetchCompletedRevenue, fetchCompletedRevenueBucketsSplit, getISTMonthStart } from './_lib/revenue'
 
 interface AppSettings {
   platform_fee: number
@@ -34,6 +34,14 @@ interface TrendDay {
   label: string
   count: number
   revenue: number
+  // NEW: phone/manual bookings' share of this bucket — drawn as a
+  // separate line on the chart, and summed for a period-total badge.
+  phoneRevenue: number
+  phoneCount: number
+  // NEW: the customer-app share of this bucket's revenue — always
+  // revenue - phoneRevenue, kept as its own field so chart code can
+  // treat App/Phone/Total identically instead of subtracting inline.
+  appRevenue: number
 }
 
 // NEW: live status split feeding the donut widget — same three buckets
@@ -263,7 +271,7 @@ export default function OverviewDashboard({
         .select('created_at')
         .gte('created_at', buckets[0].start.toISOString())
         .lt('created_at', buckets[buckets.length - 1].end.toISOString()),
-      fetchCompletedRevenueBuckets(supabase, buckets),
+      fetchCompletedRevenueBucketsSplit(supabase, buckets),
     ])
 
     const countRows = (countRes.data ?? []) as { created_at: string }[]
@@ -275,7 +283,13 @@ export default function OverviewDashboard({
         const t = new Date(r.created_at).getTime()
         return t >= startMs && t < endMs
       }).length
-      return { label, count, revenue: revenues[i] }
+      return {
+        label, count,
+        revenue: revenues[i].revenue,
+        phoneRevenue: revenues[i].phoneRevenue,
+        phoneCount: revenues[i].phoneCount,
+        appRevenue: revenues[i].revenue - revenues[i].phoneRevenue,
+      }
     })
     setTrend(result)
   }, [supabase])
@@ -448,7 +462,8 @@ export default function OverviewDashboard({
         </div>
       )}
 
-      {/* ══════════ NEW: charts row — revenue trend + status breakdown ══════════ */}
+      {/* ══════════ Revenue trend — App, Phone, and Total combined into
+          one chart, plus booking volume and the status donut ══ */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
         <div className="lg:col-span-2">
           <Card
@@ -459,7 +474,7 @@ export default function OverviewDashboard({
               yearly: 'Last 5 years',
             }[trendPeriod]}
             subtitle="Bookings by date placed · revenue by date completed">
-            <div className="px-4 pt-3 flex gap-1.5">
+            <div className="px-4 pt-3 flex items-center gap-1.5 flex-wrap">
               {([
                 { key: 'daily',   label: 'Daily' },
                 { key: 'weekly',  label: 'Weekly' },
@@ -475,8 +490,14 @@ export default function OverviewDashboard({
                   {opt.label}
                 </button>
               ))}
+              {/* Total phone/manual bookings completed across the whole
+                  period currently shown. */}
+              <span className="ml-auto px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1"
+                style={{ background: '#FDF2F8', color: '#BE185D' }}>
+                📞 {trend.reduce((s, d) => s + d.phoneCount, 0)} phone bookings
+              </span>
             </div>
-            <TrendChart data={trend} />
+            <CombinedRevenueChart data={trend} />
           </Card>
         </div>
         <Card title="Status breakdown" subtitle={`${range === 'month' ? 'This month' : 'All time'}`}>
@@ -686,45 +707,59 @@ function formatCompactINR(n: number): string {
   return `₹${Math.round(n)}`
 }
 
-function TrendChart({ data }: { data: TrendDay[] }) {
+// ═══════════════════════════════════════════════════════════════
+// MiniTrendChart — a compact single-line revenue chart, reused three
+// times (App / Phone / Total) each with its own color and valueKey, so
+// the three numbers are visually separate rather than overlaid lines
+// competing for attention on one crowded chart.
+// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// CombinedRevenueChart — booking-count bars plus three revenue lines
+// (App, Phone, Total) all on one chart, sharing a single legend and a
+// single revenue scale so their relative heights are directly
+// comparable (e.g. App reaching halfway up Total's height on a given
+// day visually means App made about half that day's revenue).
+// ═══════════════════════════════════════════════════════════════
+function CombinedRevenueChart({ data }: { data: TrendDay[] }) {
   if (data.length === 0) {
     return <div className="p-8 text-center text-sm text-slate-400">Loading trend…</div>
   }
   const width = 560
-  const height = 200
+  const height = 210
   const padX = 28
-  // Extra top padding so every point's value label has room above the
-  // line, not just the last one.
   const padY = 34
   const chartW = width - padX * 2
   const chartH = height - padY - 20
   const maxCount = Math.max(1, ...data.map(d => d.count))
   const maxRevenue = Math.max(1, ...data.map(d => d.revenue))
   const barW = (chartW / data.length) * (data.length > 10 ? 0.4 : 0.5)
+  const stepX = chartW / (data.length - 1 || 1)
+  const labelFontSize = data.length > 10 ? 8 : 10
+  const showEvery = data.length > 10 ? 2 : 1 // thin out value labels on dense (14-point) charts
 
-  const points = data.map((d, i) => {
-    const x = padX + (chartW / (data.length - 1 || 1)) * i
-    const y = padY + chartH - (d.revenue / maxRevenue) * chartH
-    return { x, y, d }
-  })
-  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
-  // Smaller label font once there are many points, so 14+ labels still fit.
-  const labelFontSize = data.length > 10 ? 9 : 11
+  const series: { key: 'appRevenue' | 'phoneRevenue' | 'revenue'; color: string; label: string; dash?: string }[] = [
+    { key: 'revenue', color: '#4F46E5', label: 'Total Revenue' },
+  ]
+
+  const pointsFor = (key: typeof series[number]['key']) =>
+    data.map((d, i) => ({ x: padX + stepX * i, y: padY + chartH - (d[key] / maxRevenue) * chartH }))
 
   return (
     <div className="p-4">
-      <div className="flex items-center gap-4 mb-2 text-[11px] font-bold">
+      <div className="flex items-center gap-4 mb-2 text-[11px] font-bold flex-wrap">
         <span className="flex items-center gap-1.5 text-slate-500">
           <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ background: '#BAE6FD' }} /> Bookings
         </span>
-        <span className="flex items-center gap-1.5 text-slate-500">
-          <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: '#4F46E5' }} /> Revenue
-        </span>
+        {series.map(s => (
+          <span key={s.key} className="flex items-center gap-1.5 text-slate-500">
+            <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: s.color }} /> {s.label}
+          </span>
+        ))}
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto" preserveAspectRatio="xMidYMid meet">
-        {/* bars = booking count */}
+        {/* bars = booking count (placed date) */}
         {data.map((d, i) => {
-          const x = padX + (chartW / (data.length - 1 || 1)) * i - barW / 2
+          const x = padX + stepX * i - barW / 2
           const barH = (d.count / maxCount) * (chartH - 24)
           const y = padY + chartH - barH
           return (
@@ -732,31 +767,43 @@ function TrendChart({ data }: { data: TrendDay[] }) {
               fill="#BAE6FD" opacity={i === data.length - 1 ? 1 : 0.7} />
           )
         })}
-        {/* line = revenue */}
-        <path d={linePath} fill="none" stroke="#4F46E5" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
-        {points.map((p, i) => (
-          <circle key={`pt-${i}`} cx={p.x} cy={p.y} r={i === points.length - 1 ? 4 : 2.5}
-            fill="#4F46E5" stroke="#fff" strokeWidth={i === points.length - 1 ? 2 : 0} />
-        ))}
-        {/* NEW: every point's revenue value, always visible — not just
-            the last one. Alternates a small vertical offset on dense
-            (14-point) charts so adjacent labels don't collide when the
-            line zig-zags closely. */}
-        {points.map((p, i) => (
-          <text key={`val-${i}`} x={p.x} y={Math.max(10, p.y - 8 - (data.length > 10 && i % 2 === 1 ? 9 : 0))}
-            textAnchor="middle" fontSize={labelFontSize} fontWeight="700" fill="#4338CA">
-            {data.length > 10 ? formatCompactINR(data[i].revenue) : `₹${data[i].revenue.toLocaleString('en-IN')}`}
-          </text>
-        ))}
-        {/* x-axis labels */}
-        {data.map((d, i) => {
-          const x = padX + (chartW / (data.length - 1 || 1)) * i
+        {/* three revenue lines, sharing one scale */}
+        {series.map(s => {
+          const pts = pointsFor(s.key)
+          const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
           return (
-            <text key={`lbl-${i}`} x={x} y={height - 4} textAnchor="middle" fontSize="10" fill="#94A3B8">
-              {d.label}
-            </text>
+            <g key={s.key}>
+              <path d={path} fill="none" stroke={s.color} strokeWidth={s.key === 'revenue' ? 2.5 : 2}
+                strokeDasharray={s.dash} strokeLinecap="round" strokeLinejoin="round" />
+              {pts.map((p, i) => (
+                data[i][s.key] > 0 ? (
+                  <circle key={`${s.key}-pt-${i}`} cx={p.x} cy={p.y}
+                    r={i === pts.length - 1 ? (s.key === 'revenue' ? 4 : 3) : (s.key === 'revenue' ? 2.5 : 1.8)}
+                    fill={s.color} stroke="#fff" strokeWidth={i === pts.length - 1 ? 1.5 : 0} />
+                ) : null
+              ))}
+              {/* value labels only for Total (every point) and the
+                  latest point of App/Phone — showing every line's every
+                  label would overwhelm a 14-point chart. */}
+              {pts.map((p, i) => {
+                const showLabel = s.key === 'revenue' ? i % showEvery === 0 : i === pts.length - 1
+                if (!showLabel || data[i][s.key] <= 0) return null
+                return (
+                  <text key={`${s.key}-val-${i}`} x={p.x} y={Math.max(10, p.y - 7)}
+                    textAnchor="middle" fontSize={labelFontSize} fontWeight="700" fill={s.color}>
+                    {formatCompactINR(data[i][s.key])}
+                  </text>
+                )
+              })}
+            </g>
           )
         })}
+        {/* x-axis labels */}
+        {data.map((d, i) => (
+          <text key={`lbl-${i}`} x={padX + stepX * i} y={height - 4} textAnchor="middle" fontSize="10" fill="#94A3B8">
+            {d.label}
+          </text>
+        ))}
       </svg>
     </div>
   )

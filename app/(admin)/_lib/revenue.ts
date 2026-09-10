@@ -29,7 +29,70 @@ export interface CompletedRevenueRow {
   final_amount: number | null
   created_at: string
   work_ended_at: string | null
+  scheduled_at: string | null
   status: string
+  is_manual_booking: boolean | null
+}
+
+/**
+ * Which date a completed booking's revenue should count toward, in
+ * priority order:
+ *   1. work_ended_at — when the job was actually finished (best answer)
+ *   2. scheduled_at  — when the job was supposed to happen (good proxy
+ *      when work_ended_at is missing, e.g. an older record or a data
+ *      gap in a particular completion flow)
+ *   3. created_at    — when the booking was originally placed (last
+ *      resort only; for a RECURRING package visit this can be days or
+ *      weeks before the actual visit, so it's the worst of the three —
+ *      see the real bug this fixed: a Day-6-of-7 recurring visit
+ *      missing work_ended_at was landing its revenue on the day the
+ *      whole 7-day package was first booked, not the visit's own day)
+ */
+function effectiveCompletionDate(r: CompletedRevenueRow): string {
+  return r.work_ended_at ?? r.scheduled_at ?? r.created_at
+}
+
+/**
+ * FIXED: previously each caller ran a single unbounded
+ * .select(...).eq('status','completed') query. Supabase/PostgREST caps
+ * any query without an explicit range at roughly 1000 rows by default,
+ * and without an .order() clause the rows that come back aren't
+ * guaranteed to be the most recent ones. In practice this meant: once a
+ * business had more than ~1000 completed bookings total, Daily/Weekly
+ * views (which need the most RECENT completions) could silently lose
+ * data to the cap, while Monthly/Yearly (spanning a full year) looked
+ * closer to correct simply because more of what survived the cap fell
+ * within a 12-month window. This helper now pages through the full
+ * table in batches of 1000 until a batch comes back short, guaranteeing
+ * every completed booking is included regardless of table size — this
+ * is the single place that fetch happens, so every caller gets the fix
+ * automatically.
+ */
+async function fetchAllCompletedRows(supabase: any): Promise<CompletedRevenueRow[]> {
+  const PAGE_SIZE = 1000
+  const rows: CompletedRevenueRow[] = []
+  let from = 0
+  // Ordered explicitly so pagination is deterministic — without this,
+  // two consecutive .range() calls aren't guaranteed to partition the
+  // table consistently if rows are being inserted/updated concurrently.
+  for (;;) {
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('final_amount, created_at, work_ended_at, scheduled_at, status, is_manual_booking')
+      .eq('status', 'completed')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1)
+
+    if (error) {
+      console.error('fetchAllCompletedRows: query failed', error)
+      break
+    }
+    const batch = (data ?? []) as CompletedRevenueRow[]
+    rows.push(...batch)
+    if (batch.length < PAGE_SIZE) break
+    from += PAGE_SIZE
+  }
+  return rows
 }
 
 /**
@@ -68,12 +131,7 @@ export async function fetchCompletedRevenue(
   supabase: any,
   sinceDate: Date
 ): Promise<number> {
-  const { data } = await supabase
-    .from('bookings')
-    .select('final_amount, created_at, work_ended_at, status')
-    .eq('status', 'completed')
-
-  const rows = (data ?? []) as CompletedRevenueRow[]
+  const rows = await fetchAllCompletedRows(supabase)
   const sinceMs = sinceDate.getTime()
 
   return rows
@@ -83,7 +141,7 @@ export async function fetchCompletedRevenue(
     // loosened or bypassed by a future edit.
     .filter(r => r.status === 'completed')
     .filter(r => {
-      const completedAt = r.work_ended_at ?? r.created_at
+      const completedAt = effectiveCompletionDate(r)
       return new Date(completedAt).getTime() >= sinceMs
     })
     .reduce((sum, r) => sum + (r.final_amount ?? 0), 0)
@@ -99,22 +157,47 @@ export async function fetchCompletedRevenueBuckets(
   supabase: any,
   buckets: { start: Date; end: Date }[]
 ): Promise<number[]> {
-  const { data } = await supabase
-    .from('bookings')
-    .select('final_amount, created_at, work_ended_at, status')
-    .eq('status', 'completed')
-
-  const rows = ((data ?? []) as CompletedRevenueRow[]).filter(r => r.status === 'completed')
+  const rows = (await fetchAllCompletedRows(supabase)).filter(r => r.status === 'completed')
 
   return buckets.map(({ start, end }) => {
     const startMs = start.getTime()
     const endMs = end.getTime()
     return rows
       .filter(r => {
-        const completedAt = r.work_ended_at ?? r.created_at
+        const completedAt = effectiveCompletionDate(r)
         const t = new Date(completedAt).getTime()
         return t >= startMs && t < endMs
       })
       .reduce((sum, r) => sum + (r.final_amount ?? 0), 0)
+  })
+}
+
+/**
+ * Same as fetchCompletedRevenueBuckets, but also splits out the portion
+ * of each bucket's revenue that came from phone/manual bookings
+ * (is_manual_booking = true) — used to draw a separate "Phone revenue"
+ * line alongside the main revenue line on the Overview trend chart, and
+ * to total up a phone-booking count for the period.
+ */
+export async function fetchCompletedRevenueBucketsSplit(
+  supabase: any,
+  buckets: { start: Date; end: Date }[]
+): Promise<{ revenue: number; phoneRevenue: number; phoneCount: number }[]> {
+  const rows = (await fetchAllCompletedRows(supabase)).filter(r => r.status === 'completed')
+
+  return buckets.map(({ start, end }) => {
+    const startMs = start.getTime()
+    const endMs = end.getTime()
+    const bucketRows = rows.filter(r => {
+      const completedAt = effectiveCompletionDate(r)
+      const t = new Date(completedAt).getTime()
+      return t >= startMs && t < endMs
+    })
+    const phoneRows = bucketRows.filter(r => r.is_manual_booking === true)
+    return {
+      revenue: bucketRows.reduce((sum, r) => sum + (r.final_amount ?? 0), 0),
+      phoneRevenue: phoneRows.reduce((sum, r) => sum + (r.final_amount ?? 0), 0),
+      phoneCount: phoneRows.length,
+    }
   })
 }
