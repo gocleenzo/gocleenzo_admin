@@ -2797,6 +2797,18 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const dateInputRef = useRef<HTMLInputElement>(null)
   const supabase = createClient()
 
+  // NEW: bulk "unassign all workers for this date" feature. Shows a
+  // confirmation modal (rather than acting immediately) since this is
+  // a destructive, multi-booking action — the admin picks which
+  // statuses to include each time, since sometimes they only want to
+  // clear still-pending "Accepted" assignments, and other times also
+  // want to pull workers off jobs already "In Progress" (e.g. a
+  // worker called in sick and everything they were assigned needs to
+  // go back into the pool, including anything they'd already started).
+  const [showUnassignDateModal, setShowUnassignDateModal] = useState(false)
+  const [unassignIncludeInProgress, setUnassignIncludeInProgress] = useState(false)
+  const [unassigningDate, setUnassigningDate] = useState(false)
+
   const slimBookings = bookings
     .filter(b => ['pending','accepted','in_progress'].includes(b.status))
     .map(b => ({
@@ -3207,6 +3219,49 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     ).length
   }
 
+  // NEW: bookings on the currently selected date that actually HAVE a
+  // worker assigned and are in a status this action is allowed to
+  // touch. Deliberately ignores the area filter (selectedArea) — "for
+  // this date" means the whole day, not just whichever area group the
+  // admin happens to be looking at right now.
+  function assignedBookingsForSelectedDate(includeInProgress: boolean) {
+    if (selectedDate === 'all') return []
+    const allowedStatuses = includeInProgress
+      ? ['accepted', 'in_progress']
+      : ['accepted']
+    return filtered.filter(b => {
+      const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+        { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+      return dateStr === selectedDate
+        && !!b.worker_id
+        && allowedStatuses.includes(b.status)
+    })
+  }
+
+  async function bulkUnassignForSelectedDate() {
+    const targets = assignedBookingsForSelectedDate(unassignIncludeInProgress)
+    if (targets.length === 0) { setShowUnassignDateModal(false); return }
+    setUnassigningDate(true)
+    try {
+      const { error } = await supabase
+        .from('bookings')
+        .update({ worker_id: null, status: 'pending' })
+        .in('id', targets.map(b => b.id))
+      if (error) {
+        alert(`Could not unassign: ${error.message}`)
+        setUnassigningDate(false)
+        return
+      }
+      setShowUnassignDateModal(false)
+      setUnassignIncludeInProgress(false)
+      await load()
+    } catch (e: any) {
+      alert(`Could not unassign: ${e?.message ?? 'unknown error'}`)
+    } finally {
+      setUnassigningDate(false)
+    }
+  }
+
   const allAreas = Array.from(new Set(filtered.map(b => resolveGroupName(b)).filter(a => a && a !== '—'))).sort()
 
   const dateAreaFiltered = filtered.filter(b => {
@@ -3432,6 +3487,20 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                 {countForDate(selectedDate)}
               </span>
               <span className="ml-0.5">✕</span>
+            </button>
+          )}
+
+          {/* NEW: bulk "unassign all workers for this date" — only makes
+              sense once a specific day is picked, not on "All Dates"
+              (which could span months and would be far too broad/risky
+              for a single confirmation). */}
+          {selectedDate !== 'all' && (
+            <button
+              onClick={() => setShowUnassignDateModal(true)}
+              title="Unassign all workers for this date"
+              className="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12px] font-black whitespace-nowrap"
+              style={{ background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}>
+              🚫 Unassign All
             </button>
           )}
 
@@ -3702,16 +3771,16 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             </span>
                           </div>
 
-                          {/* bottom row: timer + actions */}
-                          <div className="flex items-center justify-between gap-2 pt-1.5" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
-                            <div>
+                          {/* bottom row: timer (centered, large) + actions below */}
+                          <div className="pt-1.5" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
+                            <div className="flex items-center justify-center py-1">
                               {isLive && b.work_started_at
-                                ? <LiveTimer start={b.work_started_at} end={null} color="#6366F1"/>
+                                ? <LiveTimer start={b.work_started_at} end={null} color="#6366F1" large/>
                                 : isDone && totalSec > 0
-                                  ? <span className="font-mono font-bold text-[11px]" style={{ color: '#10B981' }}>⏱ {durShort(totalSec)}</span>
+                                  ? <span className="font-mono font-black text-xl" style={{ color: '#10B981' }}>⏱ {durShort(totalSec)}</span>
                                   : <span className="text-zinc-300 text-xs">—</span>}
                             </div>
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center justify-end gap-1 mt-1">
                               <div className="flex items-center gap-1 mr-0.5">
                                 <a
                                   href={b.latitude && b.longitude
@@ -3879,6 +3948,60 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           onDone={() => { setShowBlockModal(false); load() }}
         />
       )}
+
+      {/* NEW: bulk "unassign all workers for this date" confirmation.
+          Recomputes the target list live as the admin toggles the
+          "include In Progress" checkbox, so the count shown always
+          matches exactly what will actually be touched. */}
+      {showUnassignDateModal && (() => {
+        const targets = assignedBookingsForSelectedDate(unassignIncludeInProgress)
+        const inProgressCount = assignedBookingsForSelectedDate(true).length
+          - assignedBookingsForSelectedDate(false).length
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(15,15,25,0.45)' }}
+            onClick={() => !unassigningDate && setShowUnassignDateModal(false)}>
+            <div className="w-full max-w-md rounded-3xl bg-white p-6" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-3 mb-1">
+                <span className="text-2xl">🚫</span>
+                <h3 className="text-lg font-black text-zinc-900">Unassign all workers?</h3>
+              </div>
+              <p className="text-sm text-zinc-500 mb-4">
+                For <strong>{selectedDate}</strong> — every affected booking goes back to <strong>Pending</strong> with no worker, ready to be reassigned.
+              </p>
+
+              <label className="flex items-center gap-2.5 mb-2 px-3 py-2.5 rounded-xl cursor-pointer" style={{ background: '#F6F5FB' }}>
+                <input type="checkbox" checked readOnly className="w-4 h-4 accent-blue-600"/>
+                <span className="text-sm font-bold text-zinc-700">Accepted (assigned, not started)</span>
+              </label>
+              <label className="flex items-center gap-2.5 mb-4 px-3 py-2.5 rounded-xl cursor-pointer" style={{ background: unassignIncludeInProgress ? '#FEF2F2' : '#F6F5FB' }}>
+                <input type="checkbox" checked={unassignIncludeInProgress}
+                  onChange={e => setUnassignIncludeInProgress(e.target.checked)}
+                  className="w-4 h-4 accent-red-600"/>
+                <span className="text-sm font-bold" style={{ color: unassignIncludeInProgress ? '#DC2626' : '#3F3F46' }}>
+                  Also include In Progress ({inProgressCount})
+                  {unassignIncludeInProgress && <span className="block text-[11px] font-semibold mt-0.5" style={{ color: '#B91C1C' }}>⚠️ Worker may already be on-site for these jobs</span>}
+                </span>
+              </label>
+
+              <div className="rounded-xl px-4 py-3 mb-5 text-center" style={{ background: targets.length > 0 ? '#EFF6FF' : '#F6F5FB' }}>
+                <span className="text-2xl font-black" style={{ color: targets.length > 0 ? '#2F9BF0' : '#A1A1AA' }}>{targets.length}</span>
+                <span className="text-sm font-bold text-zinc-500 ml-1.5">booking{targets.length === 1 ? '' : 's'} will be unassigned</span>
+              </div>
+
+              <div className="flex gap-3">
+                <button onClick={() => setShowUnassignDateModal(false)} disabled={unassigningDate}
+                  className="flex-1 py-3 rounded-xl font-bold text-sm disabled:opacity-50" style={{ background: '#F6F5FB', color: '#52525B' }}>
+                  Cancel
+                </button>
+                <button onClick={bulkUnassignForSelectedDate} disabled={unassigningDate || targets.length === 0}
+                  className="flex-1 py-3 rounded-xl font-black text-sm text-white disabled:opacity-40" style={{ background: '#DC2626' }}>
+                  {unassigningDate ? 'Unassigning…' : `Unassign ${targets.length || ''}`}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
     </div>
   )
