@@ -212,7 +212,22 @@ function nextDays(n: number): Date[] {
 
 function isWorkerAvailableAt(
   worker: Worker, scheduledAt: string, durationMins: number,
-  existingBookings: { worker_id: string; scheduled_at: string; duration_mins?: number }[]
+  existingBookings: { worker_id: string; scheduled_at: string; duration_mins?: number; pincode?: string | null; full_address?: string | null; extra_time_mins?: number; id?: string }[],
+  // NEW: the address of the booking being checked FOR — needed to
+  // detect the same-address exception. Optional and defaults to
+  // undefined; when omitted, behaves as "no same-address match
+  // possible", which is the safe (slightly conservative) direction —
+  // see the buffer comment below for why that's fine.
+  newBookingAddress?: { pincode?: string | null; full_address?: string | null },
+  // NEW: id of the booking being checked FOR, if it already exists —
+  // excluded from the comparison loop below so a booking never
+  // conflicts with ITSELF. Before this, adding the travel buffer meant
+  // every already-assigned booking's own row satisfied its own
+  // buffered overlap check (since a buffer > 0 always overlaps an
+  // identical start/end time), making every assigned worker show a
+  // false "conflict" and every unassigned booking show "No workers
+  // free" — this fixes that regression.
+  excludeBookingId?: string
 ): boolean {
   if (!worker.is_available) return false
   const slotDt    = new Date(scheduledAt)
@@ -242,6 +257,9 @@ function isWorkerAvailableAt(
 
   for (const bk of existingBookings) {
     if (bk.worker_id !== worker.id) continue
+    // FIXED: skip comparing a booking against itself — see the
+    // excludeBookingId param comment above for why this is now needed.
+    if (excludeBookingId && bk.id === excludeBookingId) continue
     const bkDt  = new Date(bk.scheduled_at)
     // FIXED: previously used the NEW booking's own duration to estimate
     // how long this OTHER, unrelated booking occupies the worker — so
@@ -252,7 +270,26 @@ function isWorkerAvailableAt(
     // other booking's duration wasn't provided at all).
     const bkDurMins = bk.duration_mins ?? durationMins
     const bkEnd = new Date(bkDt.getTime() + bkDurMins * 60000)
-    if (slotDt < bkEnd && slotEnd > bkDt) return false
+    // FIXED: this check previously only tested for a literal time
+    // overlap, with no gap required between two different jobs. The
+    // server-side check (check_slot_availability / admin_assign_worker)
+    // requires a buffer between two different jobs for the same
+    // worker: 30 minutes by default, reduced to 0 if both jobs are at
+    // the SAME address (no travel needed), or 10 minutes if the other
+    // job had Extra Time added. Without replicating this exactly, a
+    // blanket 30-minute buffer would falsely HIDE a worker the server
+    // would still accept for a same-address back-to-back job — which
+    // is exactly what caused "no worker is seen to assign" right after
+    // fixing the earlier false-positive bug. This now mirrors the
+    // server's rule precisely instead of guessing conservatively.
+    const sameAddress = !!newBookingAddress?.pincode && !!bk.pincode
+      && !!newBookingAddress?.full_address && !!bk.full_address
+      && newBookingAddress.pincode.trim().toLowerCase() === bk.pincode.trim().toLowerCase()
+      && newBookingAddress.full_address.trim().toLowerCase() === bk.full_address.trim().toLowerCase()
+    const bufferMins = sameAddress ? 0 : (bk.extra_time_mins ?? 0) > 0 ? 10 : 30
+    const bkEndBuffered = new Date(bkEnd.getTime() + bufferMins * 60000)
+    const bkStartBuffered = new Date(bkDt.getTime() - bufferMins * 60000)
+    if (slotDt < bkEndBuffered && slotEnd > bkStartBuffered) return false
   }
   return true
 }
@@ -2145,7 +2182,7 @@ function Drawer({
   b, workers, allBookings, zoneWorkerIds, onClose, onDone, onEditManual
 }: {
   b: Booking; workers: Worker[]
-  allBookings: { worker_id: string; scheduled_at: string }[]
+  allBookings: { worker_id: string; scheduled_at: string; duration_mins?: number; pincode?: string | null; full_address?: string | null; extra_time_mins?: number }[]
   zoneWorkerIds: Set<string> | null
   onClose: () => void; onDone: () => void
   onEditManual: () => void
@@ -2157,10 +2194,28 @@ function Drawer({
   const [rescheduleError, setRescheduleError] = useState<string | null>(null)
   const supabase = createClient()
   const cfg = STATUS[b.status] ?? STATUS.pending
-  const durationMins = b.service_duration || 60
+  // FIXED: previously used b.service_duration — the generic CATALOG
+  // DEFAULT duration for this service type, not this specific
+  // booking's actual duration. If the catalog default differs from
+  // what was actually booked (e.g. a phone booking customized to a
+  // shorter/longer time, or the service's default changed after this
+  // booking was made), this extended or shrank the checked slot beyond
+  // the real one — which could make a genuinely free worker appear
+  // busy (checking too long a window) or a genuinely busy worker
+  // appear free (checking too short a window). Now uses the same
+  // accurate per-booking duration formula already used for the ⏱
+  // duration chip and for slimBookings' own duration_mins elsewhere in
+  // this file: actual service duration -> reserved slot duration ->
+  // catalog default -> 60 min, plus any Extra Time actually added.
+  const durationMins = (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
+    + (b.extra_time_mins ?? 0)
+  // Passed into every isWorkerAvailableAt() call below so the
+  // same-address exception (0-minute buffer instead of 30) applies
+  // correctly for THIS booking's own address.
+  const thisBookingAddress = { pincode: b.pincode, full_address: b.full_address }
   const availableForSlot = workers.filter(w =>
     w.id === b.worker_id ||
-    (isWorkerAvailableAt(w, b.scheduled_at, durationMins, allBookings) &&
+    (isWorkerAvailableAt(w, b.scheduled_at, durationMins, allBookings, thisBookingAddress, b.id) &&
       (zoneWorkerIds == null || zoneWorkerIds.has(w.id)))
   )
   const canAssign  = ['pending','accepted'].includes(b.status)
@@ -2494,7 +2549,7 @@ function Drawer({
                         <option key={w.id} value={w.id}>
                           {w.name} — {w.phone}
                           {w.id === b.worker_id ? ' (current)' : ''}
-                          {!isWorkerAvailableAt(w, b.scheduled_at, durationMins, allBookings) && w.id !== b.worker_id ? ' ⚠️ busy' : ''}
+                          {!isWorkerAvailableAt(w, b.scheduled_at, durationMins, allBookings, thisBookingAddress, b.id) && w.id !== b.worker_id ? ' ⚠️ busy' : ''}
                         </option>
                       ))}
                     </select>
@@ -2747,6 +2802,10 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     .map(b => ({
       worker_id: b.worker_id ?? '',
       scheduled_at: b.scheduled_at,
+      // NEW: needed so isWorkerAvailableAt can exclude a booking from
+      // comparing against ITSELF — see the buffer fix below for why
+      // this became necessary.
+      id: b.id,
       // FIXED: previously omitted entirely, forcing isWorkerAvailableAt
       // to guess this booking's duration using whatever NEW booking's
       // duration was being checked against it. Same fallback priority
@@ -2755,6 +2814,13 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       // -> 60 min, plus any Extra Time actually added.
       duration_mins: (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
         + (b.extra_time_mins ?? 0),
+      // NEW: needed to replicate the server's same-address exception
+      // (0-minute buffer instead of 30) so the client-side "free
+      // workers" preview doesn't hide someone the server would still
+      // accept for a back-to-back job at the same building.
+      pincode: b.pincode || null,
+      full_address: b.full_address || null,
+      extra_time_mins: b.extra_time_mins ?? 0,
     }))
 
   function stripDirectionalSuffix(name: string): string {
@@ -3475,8 +3541,29 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                     const isCancelled = b.status === 'cancelled'
                     const totalSec    = isDone ? elapsed(b.work_started_at, b.work_ended_at) : 0
                     const zoneIds     = zoneEligible[b.id] ?? null
+                    // FIXED: previously used b.service_duration || 60 for
+                    // the availability check — the generic CATALOG
+                    // DEFAULT duration for this service type, not this
+                    // specific booking's actual duration. A booking whose
+                    // real duration differs from the catalog default
+                    // (customized phone bookings, or the catalog default
+                    // changing after this booking was made) would check
+                    // the wrong-length slot, either hiding a genuinely
+                    // free worker or showing a genuinely busy one as
+                    // free. Moved up from further below and reused for
+                    // both the ⏱ duration chip and the availability
+                    // check, so they can never disagree with each other.
+                    const plannedDurationMins =
+                      (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
+                      + (b.extra_time_mins ?? 0)
+                    // Passed into isWorkerAvailableAt() below so the
+                    // same-address exception (0-minute buffer instead of
+                    // 30) applies correctly for THIS booking's address —
+                    // without this, a worker with a back-to-back job at
+                    // the same building would be wrongly hidden as "busy".
+                    const thisBookingAddress = { pincode: b.pincode, full_address: b.full_address }
                     const slotAvailable = workers.filter(w =>
-                      isWorkerAvailableAt(w, b.scheduled_at, b.service_duration || 60, slimBookings) &&
+                      isWorkerAvailableAt(w, b.scheduled_at, plannedDurationMins, slimBookings, thisBookingAddress) &&
                       (zoneIds == null || zoneIds.has(w.id))
                     )
                     const canQuickStartWork = b.is_manual_booking && b.status === 'accepted' && !!b.worker_id
@@ -3490,19 +3577,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                     // DIFFERENT booking for the same worker overlaps this slot.
                     const assignedWorker = b.worker_id ? workers.find(w => w.id === b.worker_id) : null
                     const hasWorkerConflict = assignedWorker
-                      ? !isWorkerAvailableAt(assignedWorker, b.scheduled_at, b.service_duration || 60, slimBookings)
+                      ? !isWorkerAvailableAt(assignedWorker, b.scheduled_at, plannedDurationMins, slimBookings, thisBookingAddress, b.id)
                       : false
-
-                    // NEW: this card's planned service duration — same
-                    // fallback priority used everywhere else in this file
-                    // (actual service duration -> reserved slot duration ->
-                    // catalog default -> 60 min), plus any Extra Time added.
-                    // Requested as "planned/booked duration", not actual
-                    // elapsed work time, so this does NOT use
-                    // work_started_at/work_ended_at.
-                    const plannedDurationMins =
-                      (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
-                      + (b.extra_time_mins ?? 0)
 
                     // Full-card light background tint by status — extended
                     // from "completed only" to also cover Cancelled (red)
