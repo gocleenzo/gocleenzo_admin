@@ -6,20 +6,27 @@ import { createClient } from '@/lib/supabase/client'
 // ============================================================================
 // Admin Slots page
 // ============================================================================
-// Shows the SAME time-slot grid the customer app's booking flow shows
-// (07:00 AM - 07:00 PM, 30-min blocks, green = available / grey = full)
-// for a chosen pincode/area and date — powered by
-// admin_get_area_slot_grid(), which uses the EXACT SAME capacity-counting
-// logic as try_claim_slot/check_slot_availability server-side. This is a
-// read-only operational view: "how much room is left in this area, on
-// this day" — not a booking tool itself.
+// Two modes, toggled at the top:
 //
-// NEW: tapping a free slot opens a popup listing exactly which worker(s)
-// are free at that time, via admin_get_free_workers_for_slot() — which
-// re-runs the identical eligibility/schedule/conflict logic the grid
-// itself uses, so the two always agree on who counts as "free." For each
-// worker it also shows the gap between this slot ending and whatever
-// they're doing next (their next booking that day, or shift-end if none).
+//  - Single Booking: the ORIGINAL view — shows the same 07:00 AM-07:00 PM
+//    grid the customer app's regular booking flow shows, for a chosen
+//    pincode/area and date, powered by admin_get_area_slot_grid(). Tapping
+//    a free slot opens a popup listing exactly which worker(s) are free.
+//
+//  - Recurring Package: NEW — shows the same full/partial/none grid the
+//    customer app's WEEKLY PACKAGE picker shows, for a chosen pincode and
+//    START date (the package runs 7 consecutive days from there), powered
+//    by admin_get_area_recurring_slot_grid(). That function does NOT
+//    re-implement the worker/booking overlap rule a fourth time — it
+//    simply calls admin_get_area_slot_grid() once per day and aggregates
+//    the 7 results, so this view can never drift out of sync with the
+//    Single Booking view or the customer app; there is exactly one place
+//    the actual availability rule lives.
+//
+// The free-workers-for-a-slot popup only applies to Single Booking mode —
+// "who's free" for a recurring package varies day by day across the whole
+// week, so that lookup isn't a single answer the same way it is for one
+// specific date/time.
 // ============================================================================
 
 type AreaOption = {
@@ -33,6 +40,16 @@ type SlotRow = {
   free_count: number
 }
 
+// NEW: one row of the recurring (7-day) grid — mirrors the same
+// full/partial/none status the customer app's get_recurring_slot_grid
+// returns, plus a raw days_covered count for a more precise caption
+// than the customer app shows (which only needs the 3-way status).
+type RecurringSlotRow = {
+  time_slot: string   // 'HH:MM' 24hr
+  status: 'full' | 'partial' | 'none'
+  days_covered: number
+}
+
 type FreeWorker = {
   worker_id: string
   full_name: string
@@ -41,6 +58,8 @@ type FreeWorker = {
   free_minutes: number
   free_until_label: string  // e.g. "2:30 PM"
 }
+
+type SlotMode = 'single' | 'recurring'
 
 const DURATION_OPTIONS = [
   { label: '30 min', value: 30 },
@@ -83,6 +102,16 @@ function freeDurationLabel(mins: number): string {
   return `${h}h ${m}m`
 }
 
+// Formats a start date + 6 days as e.g. "13 Sep - 19 Sep" so the admin
+// can see the exact week a recurring grid describes at a glance.
+function weekRangeLabel(startDateStr: string): string {
+  const start = new Date(startDateStr + 'T00:00:00')
+  const end = new Date(start)
+  end.setDate(end.getDate() + 6)
+  const fmt = (d: Date) => d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+  return `${fmt(start)} – ${fmt(end)}`
+}
+
 export default function AdminSlotsPage() {
   const supabase = createClient()
 
@@ -92,11 +121,17 @@ export default function AdminSlotsPage() {
   const [selectedDate, setSelectedDate] = useState(todayStr())
   const [duration, setDuration] = useState(60)
 
+  // NEW: which grid is being shown. Switching modes re-triggers
+  // loadGrid via the effect below, since it's in that callback's
+  // dependency array.
+  const [mode, setMode] = useState<SlotMode>('single')
+
   const [grid, setGrid] = useState<SlotRow[]>([])
+  const [recurringGrid, setRecurringGrid] = useState<RecurringSlotRow[]>([])
   const [gridLoading, setGridLoading] = useState(false)
   const [gridError, setGridError] = useState<string | null>(null)
 
-  // ── Free-workers popup state ────────────────────────────────────
+  // ── Free-workers popup state (Single Booking mode only) ─────────
   const [popupSlot, setPopupSlot] = useState<SlotRow | null>(null)
   const [popupWorkers, setPopupWorkers] = useState<FreeWorker[]>([])
   const [popupLoading, setPopupLoading] = useState(false)
@@ -136,20 +171,39 @@ export default function AdminSlotsPage() {
     if (!selectedPincode || !selectedDate) return
     setGridLoading(true)
     setGridError(null)
-    const { data, error } = await supabase.rpc('admin_get_area_slot_grid', {
-      p_pincode: selectedPincode,
-      p_date: selectedDate,
-      p_duration_mins: duration,
-    })
-    if (error) {
-      console.error('Load slot grid error:', error)
-      setGridError(error.message)
-      setGrid([])
+
+    if (mode === 'single') {
+      const { data, error } = await supabase.rpc('admin_get_area_slot_grid', {
+        p_pincode: selectedPincode,
+        p_date: selectedDate,
+        p_duration_mins: duration,
+      })
+      if (error) {
+        console.error('Load slot grid error:', error)
+        setGridError(error.message)
+        setGrid([])
+      } else {
+        setGrid((data ?? []) as SlotRow[])
+      }
     } else {
-      setGrid((data ?? []) as SlotRow[])
+      // NEW: recurring (7-day) grid — same pincode/duration inputs,
+      // but the date field means "start date" here, and the function
+      // itself aggregates 7 days internally.
+      const { data, error } = await supabase.rpc('admin_get_area_recurring_slot_grid', {
+        p_pincode: selectedPincode,
+        p_start_date: selectedDate,
+        p_duration_mins: duration,
+      })
+      if (error) {
+        console.error('Load recurring slot grid error:', error)
+        setGridError(error.message)
+        setRecurringGrid([])
+      } else {
+        setRecurringGrid((data ?? []) as RecurringSlotRow[])
+      }
     }
     setGridLoading(false)
-  }, [supabase, selectedPincode, selectedDate, duration])
+  }, [supabase, selectedPincode, selectedDate, duration, mode])
 
   useEffect(() => { loadGrid() }, [loadGrid])
 
@@ -186,9 +240,9 @@ export default function AdminSlotsPage() {
     }
   }, [supabase, loadGrid])
 
-  // ── Free-workers popup ──────────────────────────────────────────
+  // ── Free-workers popup (Single Booking mode only) ────────────────
   async function openSlot(slot: SlotRow) {
-    if (!slot.available) return // Full slots have nothing to show.
+    if (mode !== 'single' || !slot.available) return
     setPopupSlot(slot)
     setPopupWorkers([])
     setPopupError(null)
@@ -215,7 +269,15 @@ export default function AdminSlotsPage() {
   }
 
   const availableCount = grid.filter(s => s.available).length
+  const recurringFullCount = recurringGrid.filter(s => s.status === 'full').length
+  const recurringPartialCount = recurringGrid.filter(s => s.status === 'partial').length
   const selectedAreaLabel = areas.find(a => a.pincode === selectedPincode)?.label ?? selectedPincode
+
+  const RECURRING_STATUS_STYLE: Record<RecurringSlotRow['status'], { bg: string; border: string; text: string; sub: string; label: string }> = {
+    full:    { bg: '#ECFEFF', border: '#06B6D4', text: '#0891B2', sub: '#0891B2', label: 'All 7 days' },
+    partial: { bg: '#FFFBEB', border: '#F59E0B', text: '#B45309', sub: '#B45309', label: 'days' },
+    none:    { bg: '#F8FAFC', border: '#E2E8F0', text: '#CBD5E1', sub: '#CBD5E1', label: 'Full' },
+  }
 
   return (
     <div className="min-h-screen px-4 md:px-8 py-7 bg-slate-50">
@@ -230,6 +292,23 @@ export default function AdminSlotsPage() {
           <span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse" />
           Live
         </span>
+      </div>
+
+      {/* NEW: Single Booking / Recurring Package mode toggle */}
+      <div className="flex gap-1 p-1 rounded-2xl bg-white border border-slate-200/80 shadow-sm mb-5 w-fit">
+        {([
+          { key: 'single' as const, label: '📋 Single Booking' },
+          { key: 'recurring' as const, label: '🔁 Recurring Package' },
+        ]).map(opt => (
+          <button key={opt.key} onClick={() => setMode(opt.key)}
+            className="px-4 py-2 rounded-xl text-sm font-black transition-all"
+            style={{
+              background: mode === opt.key ? 'linear-gradient(135deg,#0891B2,#4F46E5)' : 'transparent',
+              color: mode === opt.key ? '#fff' : '#64748B',
+            }}>
+            {opt.label}
+          </button>
+        ))}
       </div>
 
       {/* Controls */}
@@ -255,7 +334,7 @@ export default function AdminSlotsPage() {
 
           <div>
             <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-1.5 block">
-              Date
+              {mode === 'single' ? 'Date' : 'Start Date'}
             </label>
             <input
               type="date"
@@ -263,6 +342,9 @@ export default function AdminSlotsPage() {
               onChange={e => setSelectedDate(e.target.value)}
               className="w-full h-10 px-3 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"
             />
+            {mode === 'recurring' && (
+              <p className="text-[10px] text-slate-400 mt-1">Package runs {weekRangeLabel(selectedDate)}</p>
+            )}
           </div>
 
           <div>
@@ -295,22 +377,46 @@ export default function AdminSlotsPage() {
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
           <div>
-            <p className="font-bold text-slate-800 text-sm">{selectedAreaLabel}</p>
+            <p className="font-bold text-slate-800 text-sm">
+              {selectedAreaLabel}
+              {mode === 'recurring' && <span className="text-slate-400 font-semibold"> · {weekRangeLabel(selectedDate)}</span>}
+            </p>
             <p className="text-[11px] text-slate-400">
               {gridLoading
                 ? 'Checking availability…'
-                : `${availableCount} of ${grid.length} slots available · ${duration} min service · tap a free slot to see who's available`}
+                : mode === 'single'
+                  ? `${availableCount} of ${grid.length} slots available · ${duration} min service · tap a free slot to see who's available`
+                  : `${recurringFullCount} full-week, ${recurringPartialCount} partial-week slots · ${duration} min service across all 7 days`}
             </p>
           </div>
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
-              <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#06B6D4' }} />
-              Available
-            </span>
-            <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
-              <span className="w-2.5 h-2.5 rounded-full bg-slate-200" />
-              Full
-            </span>
+            {mode === 'single' ? (
+              <>
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#06B6D4' }} />
+                  Available
+                </span>
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                  <span className="w-2.5 h-2.5 rounded-full bg-slate-200" />
+                  Full
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#06B6D4' }} />
+                  All 7 days
+                </span>
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#F59E0B' }} />
+                  Some days
+                </span>
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                  <span className="w-2.5 h-2.5 rounded-full bg-slate-200" />
+                  No days
+                </span>
+              </>
+            )}
           </div>
         </div>
 
@@ -327,41 +433,73 @@ export default function AdminSlotsPage() {
                 <div key={i} className="h-16 rounded-xl bg-slate-100 animate-pulse" />
               ))}
             </div>
-          ) : grid.length === 0 && !gridError ? (
-            <div className="py-16 text-center">
-              <p className="text-3xl mb-2">🔍</p>
-              <p className="text-slate-500 text-sm">No slot data for this selection</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-2.5">
-              {grid.map(slot => (
-                <button
-                  key={slot.time_slot}
-                  onClick={() => openSlot(slot)}
-                  disabled={!slot.available}
-                  className="h-16 rounded-xl flex flex-col items-center justify-center border transition-all disabled:cursor-not-allowed hover:enabled:scale-[1.03] hover:enabled:shadow-md"
-                  style={{
-                    background: slot.available ? '#ECFEFF' : '#F8FAFC',
-                    borderColor: slot.available ? '#06B6D4' : '#E2E8F0',
-                    cursor: slot.available ? 'pointer' : 'not-allowed',
-                  }}>
-                  <span className="text-[13px] font-black"
-                    style={{ color: slot.available ? '#0891B2' : '#CBD5E1' }}>
-                    {pretty12h(slot.time_slot)}
-                  </span>
-                  {slot.available ? (
-                    <span className="text-[10px] font-bold text-cyan-600 mt-0.5">
-                      {slot.free_count} free
+          ) : mode === 'single' ? (
+            grid.length === 0 && !gridError ? (
+              <div className="py-16 text-center">
+                <p className="text-3xl mb-2">🔍</p>
+                <p className="text-slate-500 text-sm">No slot data for this selection</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-2.5">
+                {grid.map(slot => (
+                  <button
+                    key={slot.time_slot}
+                    onClick={() => openSlot(slot)}
+                    disabled={!slot.available}
+                    className="h-16 rounded-xl flex flex-col items-center justify-center border transition-all disabled:cursor-not-allowed hover:enabled:scale-[1.03] hover:enabled:shadow-md"
+                    style={{
+                      background: slot.available ? '#ECFEFF' : '#F8FAFC',
+                      borderColor: slot.available ? '#06B6D4' : '#E2E8F0',
+                      cursor: slot.available ? 'pointer' : 'not-allowed',
+                    }}>
+                    <span className="text-[13px] font-black"
+                      style={{ color: slot.available ? '#0891B2' : '#CBD5E1' }}>
+                      {pretty12h(slot.time_slot)}
                     </span>
-                  ) : (
-                    <span className="text-[10px] font-bold text-slate-400 mt-0.5">Full</span>
-                  )}
-                </button>
-              ))}
-            </div>
+                    {slot.available ? (
+                      <span className="text-[10px] font-bold text-cyan-600 mt-0.5">
+                        {slot.free_count} free
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold text-slate-400 mt-0.5">Full</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )
+          ) : (
+            // NEW: recurring (7-day) grid — informational only, no
+            // click-through popup, since "who's free" varies per day
+            // across the week rather than being one single answer.
+            recurringGrid.length === 0 && !gridError ? (
+              <div className="py-16 text-center">
+                <p className="text-3xl mb-2">🔍</p>
+                <p className="text-slate-500 text-sm">No slot data for this selection</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-2.5">
+                {recurringGrid.map(slot => {
+                  const st = RECURRING_STATUS_STYLE[slot.status]
+                  return (
+                    <div
+                      key={slot.time_slot}
+                      title={`${slot.days_covered} of 7 days available`}
+                      className="h-16 rounded-xl flex flex-col items-center justify-center border"
+                      style={{ background: st.bg, borderColor: st.border }}>
+                      <span className="text-[13px] font-black" style={{ color: st.text }}>
+                        {pretty12h(slot.time_slot)}
+                      </span>
+                      <span className="text-[10px] font-bold mt-0.5" style={{ color: st.sub }}>
+                        {slot.status === 'none' ? 'Full' : `${slot.days_covered}/7 days`}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            )
           )}
 
-          {!gridLoading && grid.length > 0 && availableCount === 0 && (
+          {!gridLoading && mode === 'single' && grid.length > 0 && availableCount === 0 && (
             <div className="mt-4 rounded-xl px-4 py-3 bg-amber-50 border border-amber-200 flex items-center gap-3">
               <span className="text-xl">⚠️</span>
               <div>
@@ -372,10 +510,22 @@ export default function AdminSlotsPage() {
               </div>
             </div>
           )}
+
+          {!gridLoading && mode === 'recurring' && recurringGrid.length > 0 && recurringFullCount === 0 && (
+            <div className="mt-4 rounded-xl px-4 py-3 bg-amber-50 border border-amber-200 flex items-center gap-3">
+              <span className="text-xl">⚠️</span>
+              <div>
+                <p className="text-sm font-bold text-amber-800">No time works for a full 7-day package this week</p>
+                <p className="text-[11px] text-amber-600">
+                  Some slots may still work for {recurringPartialCount > 0 ? 'part of the week (with alternate times on the conflicting days)' : 'nothing'} — customers can pick alternate times per day in the app.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Free-workers popup */}
+      {/* Free-workers popup (Single Booking mode only) */}
       {popupSlot && (
         <>
           <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={closePopup} />
