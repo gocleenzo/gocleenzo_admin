@@ -59,6 +59,19 @@ type FreeWorker = {
   free_until_label: string  // e.g. "2:30 PM"
 }
 
+// NEW: one (day, worker) row from admin_get_free_workers_for_recurring_slot
+// — the frontend groups these by worker_id to show "free on X of 7
+// days" plus the exact dates, rather than a flat unstructured list.
+type RecurringFreeWorkerRow = {
+  day_number: number
+  day_date: string          // 'YYYY-MM-DD'
+  worker_id: string
+  full_name: string
+  phone: string
+  free_minutes: number
+  free_until_label: string
+}
+
 type SlotMode = 'single' | 'recurring'
 
 const DURATION_OPTIONS = [
@@ -136,6 +149,14 @@ export default function AdminSlotsPage() {
   const [popupWorkers, setPopupWorkers] = useState<FreeWorker[]>([])
   const [popupLoading, setPopupLoading] = useState(false)
   const [popupError, setPopupError] = useState<string | null>(null)
+
+  // NEW: same idea, for Recurring Package mode — one popup showing
+  // every worker free on at least one of the 7 remaining days,
+  // grouped with a "X of 7 days" count and the exact dates.
+  const [recurringPopupSlot, setRecurringPopupSlot] = useState<RecurringSlotRow | null>(null)
+  const [recurringPopupRows, setRecurringPopupRows] = useState<RecurringFreeWorkerRow[]>([])
+  const [recurringPopupLoading, setRecurringPopupLoading] = useState(false)
+  const [recurringPopupError, setRecurringPopupError] = useState<string | null>(null)
 
   // ── Load distinct pincode/area options from service_areas ──────
   useEffect(() => {
@@ -268,6 +289,39 @@ export default function AdminSlotsPage() {
     setPopupError(null)
   }
 
+  // NEW: Recurring Package mode's version of openSlot — fetches every
+  // (day, worker) pair for this time slot across all 7 days of the
+  // selected start date. Runs even for 'partial' slots (not just
+  // 'full'), since seeing exactly which specific days someone IS free
+  // is the whole point when the slot isn't a clean 7/7.
+  async function openRecurringSlot(slot: RecurringSlotRow) {
+    if (slot.status === 'none') return
+    setRecurringPopupSlot(slot)
+    setRecurringPopupRows([])
+    setRecurringPopupError(null)
+    setRecurringPopupLoading(true)
+    try {
+      const { data, error } = await supabase.rpc('admin_get_free_workers_for_recurring_slot', {
+        p_pincode: selectedPincode,
+        p_start_date: selectedDate,
+        p_time: slot.time_slot,
+        p_duration_mins: duration,
+      })
+      if (error) { setRecurringPopupError(error.message); setRecurringPopupLoading(false); return }
+      setRecurringPopupRows((data ?? []) as RecurringFreeWorkerRow[])
+    } catch (e: any) {
+      setRecurringPopupError(e?.message ?? 'Could not load free workers')
+    } finally {
+      setRecurringPopupLoading(false)
+    }
+  }
+
+  function closeRecurringPopup() {
+    setRecurringPopupSlot(null)
+    setRecurringPopupRows([])
+    setRecurringPopupError(null)
+  }
+
   const availableCount = grid.filter(s => s.available).length
   const recurringFullCount = recurringGrid.filter(s => s.status === 'full').length
   const recurringPartialCount = recurringGrid.filter(s => s.status === 'partial').length
@@ -386,7 +440,7 @@ export default function AdminSlotsPage() {
                 ? 'Checking availability…'
                 : mode === 'single'
                   ? `${availableCount} of ${grid.length} slots available · ${duration} min service · tap a free slot to see who's available`
-                  : `${recurringFullCount} full-week, ${recurringPartialCount} partial-week slots · ${duration} min service across all 7 days`}
+                  : `${recurringFullCount} full-week, ${recurringPartialCount} partial-week slots · ${duration} min service · tap a slot to see who's free each day`}
             </p>
           </div>
           <div className="flex items-center gap-4">
@@ -480,19 +534,22 @@ export default function AdminSlotsPage() {
               <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-6 gap-2.5">
                 {recurringGrid.map(slot => {
                   const st = RECURRING_STATUS_STYLE[slot.status]
+                  const clickable = slot.status !== 'none'
                   return (
-                    <div
+                    <button
                       key={slot.time_slot}
-                      title={`${slot.days_covered} of 7 days available`}
-                      className="h-16 rounded-xl flex flex-col items-center justify-center border"
-                      style={{ background: st.bg, borderColor: st.border }}>
+                      onClick={() => openRecurringSlot(slot)}
+                      disabled={!clickable}
+                      title={clickable ? `${slot.days_covered} of 7 days available — tap to see who's free` : `${slot.days_covered} of 7 days available`}
+                      className="h-16 rounded-xl flex flex-col items-center justify-center border transition-all disabled:cursor-not-allowed hover:enabled:scale-[1.03] hover:enabled:shadow-md"
+                      style={{ background: st.bg, borderColor: st.border, cursor: clickable ? 'pointer' : 'not-allowed' }}>
                       <span className="text-[13px] font-black" style={{ color: st.text }}>
                         {pretty12h(slot.time_slot)}
                       </span>
                       <span className="text-[10px] font-bold mt-0.5" style={{ color: st.sub }}>
                         {slot.status === 'none' ? 'Full' : `${slot.days_covered}/7 days`}
                       </span>
-                    </div>
+                    </button>
                   )
                 })}
               </div>
@@ -596,6 +653,100 @@ export default function AdminSlotsPage() {
           </div>
         </>
       )}
+
+      {/* NEW: Recurring Package mode's free-workers popup — grouped by
+          worker, since the same worker can show up across multiple of
+          the 7 days. Each worker gets a "free on X of 7 days" chip and
+          the exact dates, rather than a flat 25-row list. */}
+      {recurringPopupSlot && (() => {
+        const byWorker = new Map<string, { full_name: string; phone: string; days: RecurringFreeWorkerRow[] }>()
+        for (const row of recurringPopupRows) {
+          if (!byWorker.has(row.worker_id)) {
+            byWorker.set(row.worker_id, { full_name: row.full_name, phone: row.phone, days: [] })
+          }
+          byWorker.get(row.worker_id)!.days.push(row)
+        }
+        const workerGroups = Array.from(byWorker.values()).sort((a, b) => b.days.length - a.days.length)
+
+        return (
+          <>
+            <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={closeRecurringPopup} />
+            <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-lg font-black text-slate-800">
+                    {pretty12h(recurringPopupSlot.time_slot)} · {selectedAreaLabel}
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Who&apos;s free, day by day · {weekRangeLabel(selectedDate)}
+                  </p>
+                </div>
+                <button onClick={closeRecurringPopup}
+                  className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+              </div>
+
+              <div className="px-6 py-5 max-h-[70vh] overflow-y-auto">
+                {recurringPopupError && (
+                  <div className="rounded-xl px-4 py-3 bg-red-50 border border-red-200 mb-3">
+                    <p className="text-sm font-bold text-red-600">Could not load workers: {recurringPopupError}</p>
+                  </div>
+                )}
+
+                {recurringPopupLoading ? (
+                  <div className="space-y-2">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={i} className="h-20 rounded-xl bg-slate-100 animate-pulse" />
+                    ))}
+                  </div>
+                ) : workerGroups.length === 0 && !recurringPopupError ? (
+                  <div className="py-8 text-center">
+                    <p className="text-3xl mb-2">🤔</p>
+                    <p className="text-slate-500 text-sm font-semibold">No workers found for this slot</p>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      The grid said this slot had some availability — try refreshing if this looks wrong.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {workerGroups.map(w => {
+                      const isFullWeek = w.days.length === 7
+                      return (
+                        <div key={w.phone + w.full_name} className="rounded-xl border border-slate-200 overflow-hidden">
+                          <div className="flex items-center justify-between gap-3 px-4 py-3" style={{ background: isFullWeek ? '#ECFEFF' : '#FFFBEB' }}>
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-9 h-9 rounded-full flex items-center justify-center font-black text-white flex-shrink-0"
+                                style={{ background: isFullWeek ? 'linear-gradient(135deg,#06B6D4,#0891B2)' : 'linear-gradient(135deg,#F59E0B,#D97706)' }}>
+                                {w.full_name?.[0]?.toUpperCase() ?? '?'}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-sm font-bold text-slate-800 truncate">{w.full_name}</p>
+                                <a href={`tel:${w.phone}`} className="text-[11px] text-cyan-600 font-semibold hover:underline">
+                                  {w.phone}
+                                </a>
+                              </div>
+                            </div>
+                            <span className="text-[11px] font-black px-2.5 py-1 rounded-full flex-shrink-0"
+                              style={{ background: isFullWeek ? '#06B6D4' : '#F59E0B', color: '#fff' }}>
+                              {w.days.length}/7 days
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 px-4 py-3">
+                            {w.days.sort((a, b) => a.day_number - b.day_number).map(d => (
+                              <span key={d.day_number} className="text-[11px] font-bold px-2 py-1 rounded-lg bg-slate-50 border border-slate-200 text-slate-600">
+                                {new Date(d.day_date + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )
+      })()}
     </div>
   )
 }

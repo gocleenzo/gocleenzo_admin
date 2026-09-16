@@ -2809,6 +2809,25 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const [unassignIncludeInProgress, setUnassignIncludeInProgress] = useState(false)
   const [unassigningDate, setUnassigningDate] = useState(false)
 
+  // NEW: bulk reschedule — shift a whole day's bookings by a chosen
+  // number of minutes, or move the whole day to a different calendar
+  // date while each booking keeps its own original time-of-day. Always
+  // re-checks each assigned booking's worker against the NEW time
+  // before applying (excluding the booking's own row from that check,
+  // same excludeBookingId pattern already used for the conflict
+  // badge/dropdown elsewhere in this file) — bookings whose worker
+  // would genuinely conflict at the new time are skipped rather than
+  // silently double-booking someone.
+  const [showRescheduleModal, setShowRescheduleModal] = useState(false)
+  const [rescheduleMode, setRescheduleMode] = useState<'offset' | 'date'>('offset')
+  const [rescheduleOffsetMins, setRescheduleOffsetMins] = useState('30')
+  const [rescheduleNewDate, setRescheduleNewDate] = useState('')
+  const [rescheduleIncludeInProgress, setRescheduleIncludeInProgress] = useState(false)
+  const [reschedulePreview, setReschedulePreview] = useState<{
+    id: string; customer: string; oldAt: Date; newAt: Date; workerId: string | null; workerName: string; conflict: boolean
+  }[] | null>(null)
+  const [rescheduling, setRescheduling] = useState(false)
+
   const slimBookings = bookings
     .filter(b => ['pending','accepted','in_progress'].includes(b.status))
     .map(b => ({
@@ -3262,6 +3281,107 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     }
   }
 
+  // NEW: every still-actionable booking (not completed/cancelled) on
+  // the selected date, regardless of whether a worker is assigned —
+  // unlike Unassign All, rescheduling doesn't require a worker to
+  // already be set, since an unassigned booking can just as validly
+  // move to a new time.
+  function bookingsForRescheduleOnSelectedDate(includeInProgress: boolean) {
+    if (selectedDate === 'all') return []
+    const allowedStatuses = includeInProgress
+      ? ['pending', 'accepted', 'in_progress']
+      : ['pending', 'accepted']
+    return filtered.filter(b => {
+      const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+        { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+      return dateStr === selectedDate && allowedStatuses.includes(b.status)
+    })
+  }
+
+  // Computes a booking's NEW scheduled_at under either reschedule mode.
+  // 'offset': straightforward +/- minutes on the original timestamp.
+  // 'date': shifts by whole calendar days only, so each booking keeps
+  // its own original time-of-day — computed via a day-count diff
+  // between the booking's IST calendar date and the target date,
+  // rather than reconstructing the time from scratch, since India has
+  // no DST and a fixed UTC+5:30 offset makes whole-day arithmetic safe.
+  function computeNewScheduledAt(b: Booking, mode: 'offset' | 'date', offsetMins: number, newDateStr: string): Date {
+    const oldAt = new Date(b.scheduled_at)
+    if (mode === 'offset') {
+      return new Date(oldAt.getTime() + offsetMins * 60000)
+    }
+    const oldIstDateStr = oldAt.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) // 'YYYY-MM-DD'
+    const oldUtcMidnight = Date.UTC(...oldIstDateStr.split('-').map(Number) as [number, number, number])
+    const [ny, nm, nd] = newDateStr.split('-').map(Number)
+    const newUtcMidnight = Date.UTC(ny, nm - 1, nd)
+    const dayDiff = Math.round((newUtcMidnight - oldUtcMidnight) / 86400000)
+    return new Date(oldAt.getTime() + dayDiff * 86400000)
+  }
+
+  // Builds the preview list: every targeted booking's old/new time,
+  // and whether its assigned worker (if any) would genuinely conflict
+  // at the new time — using the SAME isWorkerAvailableAt check and
+  // excludeBookingId pattern already relied on throughout this file,
+  // so this preview can never disagree with the rest of the app about
+  // what counts as a conflict.
+  function buildReschedulePreview() {
+    const offsetMins = parseInt(rescheduleOffsetMins, 10) || 0
+    const targets = bookingsForRescheduleOnSelectedDate(rescheduleIncludeInProgress)
+    const preview = targets.map(b => {
+      const newAt = computeNewScheduledAt(b, rescheduleMode, offsetMins, rescheduleNewDate)
+      let conflict = false
+      let workerName = '—'
+      if (b.worker_id) {
+        const worker = workers.find(w => w.id === b.worker_id)
+        workerName = worker?.full_name ?? 'Unknown'
+        if (worker) {
+          const thisBookingAddress = { pincode: b.pincode, full_address: b.full_address }
+          const durationMins = b.service_duration || 60
+          const stillFree = isWorkerAvailableAt(worker, newAt.toISOString(), durationMins, slimBookings, thisBookingAddress, b.id)
+          conflict = !stillFree
+        }
+      }
+      return {
+        id: b.id, customer: b.customer_name || 'Customer',
+        oldAt: new Date(b.scheduled_at), newAt,
+        workerId: b.worker_id, workerName, conflict,
+      }
+    })
+    setReschedulePreview(preview)
+  }
+
+  async function applyReschedule() {
+    if (!reschedulePreview) return
+    const toMove = reschedulePreview.filter(p => !p.conflict)
+    if (toMove.length === 0) { setShowRescheduleModal(false); setReschedulePreview(null); return }
+    setRescheduling(true)
+    try {
+      // Individual updates rather than one batched call — each booking
+      // gets a DIFFERENT new scheduled_at, so a single .update().in()
+      // (same value for every row) can't express this; the row count
+      // per day is small enough that sequential awaits are fine for an
+      // admin action like this.
+      for (const p of toMove) {
+        const { error } = await supabase
+          .from('bookings')
+          .update({ scheduled_at: p.newAt.toISOString() })
+          .eq('id', p.id)
+        if (error) {
+          alert(`Stopped partway — could not reschedule one booking: ${error.message}`)
+          break
+        }
+      }
+      setShowRescheduleModal(false)
+      setReschedulePreview(null)
+      setRescheduleIncludeInProgress(false)
+      await load()
+    } catch (e: any) {
+      alert(`Could not reschedule: ${e?.message ?? 'unknown error'}`)
+    } finally {
+      setRescheduling(false)
+    }
+  }
+
   const allAreas = Array.from(new Set(filtered.map(b => resolveGroupName(b)).filter(a => a && a !== '—'))).sort()
 
   const dateAreaFiltered = filtered.filter(b => {
@@ -3501,6 +3621,18 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
               className="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12px] font-black whitespace-nowrap"
               style={{ background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA' }}>
               🚫 Unassign All
+            </button>
+          )}
+
+          {/* NEW: bulk reschedule — same "only on a specific date"
+              scoping as Unassign All above. */}
+          {selectedDate !== 'all' && (
+            <button
+              onClick={() => { setReschedulePreview(null); setShowRescheduleModal(true) }}
+              title="Reschedule all bookings for this date"
+              className="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12px] font-black whitespace-nowrap"
+              style={{ background: '#EFF6FF', color: '#2563EB', border: '1px solid #BFDBFE' }}>
+              🕐 Bulk Reschedule
             </button>
           )}
 
@@ -3998,6 +4130,137 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                   {unassigningDate ? 'Unassigning…' : `Unassign ${targets.length || ''}`}
                 </button>
               </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* NEW: bulk reschedule — two-step modal. Step 1 (no preview yet)
+          collects the offset/date and which statuses to include. Step
+          2 (after "Preview") shows exactly what will move and flags
+          any genuine worker conflicts at the new time, letting the
+          admin confirm only the clean ones or go back and adjust. */}
+      {showRescheduleModal && (() => {
+        const targetCount = bookingsForRescheduleOnSelectedDate(rescheduleIncludeInProgress).length
+        const canPreview = rescheduleMode === 'offset'
+          ? (parseInt(rescheduleOffsetMins, 10) || 0) !== 0
+          : !!rescheduleNewDate
+        const conflictCount = reschedulePreview?.filter(p => p.conflict).length ?? 0
+        const cleanCount = reschedulePreview ? reschedulePreview.length - conflictCount : 0
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(15,15,25,0.45)' }}
+            onClick={() => !rescheduling && (setShowRescheduleModal(false), setReschedulePreview(null))}>
+            <div className="w-full max-w-lg rounded-3xl bg-white p-6 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-3 mb-1">
+                <span className="text-2xl">🕐</span>
+                <h3 className="text-lg font-black text-zinc-900">Bulk reschedule</h3>
+              </div>
+              <p className="text-sm text-zinc-500 mb-4">
+                For <strong>{selectedDate}</strong> — {targetCount} booking{targetCount === 1 ? '' : 's'} eligible.
+              </p>
+
+              {!reschedulePreview ? (
+                <>
+                  <div className="flex gap-2 mb-4">
+                    <button onClick={() => setRescheduleMode('offset')}
+                      className="flex-1 py-2.5 rounded-xl text-sm font-black transition-all"
+                      style={{ background: rescheduleMode === 'offset' ? '#2563EB' : '#F6F5FB', color: rescheduleMode === 'offset' ? '#fff' : '#52525B' }}>
+                      Shift by minutes
+                    </button>
+                    <button onClick={() => setRescheduleMode('date')}
+                      className="flex-1 py-2.5 rounded-xl text-sm font-black transition-all"
+                      style={{ background: rescheduleMode === 'date' ? '#2563EB' : '#F6F5FB', color: rescheduleMode === 'date' ? '#fff' : '#52525B' }}>
+                      Move to new date
+                    </button>
+                  </div>
+
+                  {rescheduleMode === 'offset' ? (
+                    <div className="mb-4">
+                      <label className="block text-[12px] font-bold text-zinc-500 mb-1.5">Shift every booking by (minutes)</label>
+                      <input type="number" value={rescheduleOffsetMins}
+                        onChange={e => setRescheduleOffsetMins(e.target.value)}
+                        placeholder="e.g. 30 or -60"
+                        className="w-full px-3.5 py-2.5 rounded-xl text-sm font-bold outline-none" style={{ background: '#F6F5FB', border: '1px solid #E4E4E7' }}/>
+                      <p className="text-[11px] text-zinc-400 mt-1.5">Positive = later, negative = earlier. Each booking keeps its own duration.</p>
+                    </div>
+                  ) : (
+                    <div className="mb-4">
+                      <label className="block text-[12px] font-bold text-zinc-500 mb-1.5">Move this whole day to</label>
+                      <input type="date" value={rescheduleNewDate}
+                        onChange={e => setRescheduleNewDate(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl text-sm font-bold outline-none" style={{ background: '#F6F5FB', border: '1px solid #E4E4E7' }}/>
+                      <p className="text-[11px] text-zinc-400 mt-1.5">Each booking keeps its own original time-of-day on the new date.</p>
+                    </div>
+                  )}
+
+                  <label className="flex items-center gap-2.5 mb-5 px-3 py-2.5 rounded-xl cursor-pointer" style={{ background: rescheduleIncludeInProgress ? '#FEF2F2' : '#F6F5FB' }}>
+                    <input type="checkbox" checked={rescheduleIncludeInProgress}
+                      onChange={e => setRescheduleIncludeInProgress(e.target.checked)}
+                      className="w-4 h-4 accent-red-600"/>
+                    <span className="text-sm font-bold" style={{ color: rescheduleIncludeInProgress ? '#DC2626' : '#3F3F46' }}>
+                      Also include In Progress jobs
+                      {rescheduleIncludeInProgress && <span className="block text-[11px] font-semibold mt-0.5" style={{ color: '#B91C1C' }}>⚠️ Worker may already be on-site for these</span>}
+                    </span>
+                  </label>
+
+                  <div className="flex gap-3">
+                    <button onClick={() => { setShowRescheduleModal(false); setReschedulePreview(null) }}
+                      className="flex-1 py-3 rounded-xl font-bold text-sm" style={{ background: '#F6F5FB', color: '#52525B' }}>
+                      Cancel
+                    </button>
+                    <button onClick={buildReschedulePreview} disabled={!canPreview || targetCount === 0}
+                      className="flex-1 py-3 rounded-xl font-black text-sm text-white disabled:opacity-40" style={{ background: '#2563EB' }}>
+                      Preview changes
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex gap-3 mb-4">
+                    <div className="flex-1 rounded-xl px-4 py-3 text-center" style={{ background: '#ECFDF5' }}>
+                      <span className="text-2xl font-black" style={{ color: '#059669' }}>{cleanCount}</span>
+                      <span className="block text-[11px] font-bold text-emerald-700 mt-0.5">Will move cleanly</span>
+                    </div>
+                    <div className="flex-1 rounded-xl px-4 py-3 text-center" style={{ background: conflictCount > 0 ? '#FEF2F2' : '#F6F5FB' }}>
+                      <span className="text-2xl font-black" style={{ color: conflictCount > 0 ? '#DC2626' : '#A1A1AA' }}>{conflictCount}</span>
+                      <span className="block text-[11px] font-bold mt-0.5" style={{ color: conflictCount > 0 ? '#B91C1C' : '#A1A1AA' }}>Skipped (conflict)</span>
+                    </div>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto space-y-1.5 mb-5 pr-1">
+                    {reschedulePreview.map(p => (
+                      <div key={p.id} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-[12px]"
+                        style={{ background: p.conflict ? '#FEF2F2' : '#F8FAFC' }}>
+                        <div className="min-w-0">
+                          <p className="font-bold text-zinc-700 truncate">{p.customer}</p>
+                          <p className="text-zinc-400">
+                            {p.oldAt.toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
+                            {' → '}
+                            <span className="font-bold" style={{ color: p.conflict ? '#DC2626' : '#059669' }}>
+                              {p.newAt.toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
+                            </span>
+                          </p>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <p className="text-zinc-400">{p.workerName}</p>
+                          {p.conflict && <p className="font-black" style={{ color: '#DC2626' }}>⚠️ Busy</p>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex gap-3">
+                    <button onClick={() => setReschedulePreview(null)} disabled={rescheduling}
+                      className="flex-1 py-3 rounded-xl font-bold text-sm disabled:opacity-50" style={{ background: '#F6F5FB', color: '#52525B' }}>
+                      ← Back
+                    </button>
+                    <button onClick={applyReschedule} disabled={rescheduling || cleanCount === 0}
+                      className="flex-1 py-3 rounded-xl font-black text-sm text-white disabled:opacity-40" style={{ background: '#2563EB' }}>
+                      {rescheduling ? 'Rescheduling…' : `Confirm ${cleanCount || ''}`}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )
