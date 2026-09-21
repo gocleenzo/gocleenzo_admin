@@ -2770,6 +2770,9 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   // a pure client-side filter over an already-restricted dataset).
   const [pinnedDate, setPinnedDate] = useState<Date | null>(null)
   const [selectedArea, setSelectedArea] = useState<string>('all')
+  // NEW: filter the whole page down to just one professional's
+  // assigned bookings — same "all" sentinel pattern as selectedArea.
+  const [selectedWorker, setSelectedWorker] = useState<string>('all')
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
   const [showPhoneModal, setShowPhoneModal] = useState(false)
@@ -2923,7 +2926,13 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     const [{ data: bd }, { data: wd }, { data: availData }, { data: activeJobs }, { data: schedDateRows }, { data: areaRows }] =
       await Promise.all([
         bookingsQuery,
-        supabase.from('users').select('id,full_name,phone').eq('role','worker').order('full_name'),
+        // FIXED: previously fetched every user with role='worker'
+        // regardless of is_active, so a deactivated worker still
+        // showed up in every assignment dropdown, conflict check, and
+        // (now) the professional filter dropdown. Filtering at the
+        // source here fixes it everywhere at once, since this same
+        // `workers` state feeds all of those.
+        supabase.from('users').select('id,full_name,phone').eq('role','worker').eq('is_active', true).order('full_name'),
         supabase.from('workers').select('user_id,is_available'),
         supabase.from('bookings').select('worker_id').eq('status','in_progress'),
         supabase.from('worker_schedule_dates')
@@ -3389,7 +3398,12 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
     const matchDate = selectedDate === 'all' || dateStr === selectedDate
     const matchArea = selectedArea === 'all' || resolveGroupName(b) === selectedArea
-    return matchDate && matchArea
+    const matchWorker = selectedWorker === 'all'
+      ? true
+      : selectedWorker === '__unassigned__'
+        ? !b.worker_id
+        : b.worker_id === selectedWorker
+    return matchDate && matchArea && matchWorker
   })
 
   const groupedByArea: Record<string, typeof filtered> = {}
@@ -3638,7 +3652,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
 
           {allAreas.length > 1 && (
             <select value={selectedArea} onChange={e => setSelectedArea(e.target.value)}
-              className="flex-shrink-0 ml-auto px-3 py-1.5 rounded-xl text-[12px] font-bold outline-none"
+              className="flex-shrink-0 px-3 py-1.5 rounded-xl text-[12px] font-bold outline-none"
               style={{ background: selectedArea !== 'all' ? '#EAF4FE' : '#F6F5FB', color: selectedArea !== 'all' ? '#2F9BF0' : '#52525B' }}>
               <option value="all">📍 All Areas ({dateAreaFiltered.length})</option>
               {allAreas.map(area => {
@@ -3649,6 +3663,40 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                   return matchDate && resolveGroupName(b) === area
                 }).length
                 return <option key={area} value={area}>📍 {area} ({cnt})</option>
+              })}
+            </select>
+          )}
+
+          {/* NEW: filter the whole page down to one professional's
+              assigned bookings. Counts respect the current date/area
+              filters (so they always reflect "if I picked this worker
+              on top of what I've already filtered by"), but
+              deliberately ignore the CURRENT worker selection itself,
+              same reasoning as the Area dropdown above — otherwise
+              every option but the selected one would show 0. */}
+          {workers.length > 0 && (
+            <select value={selectedWorker} onChange={e => setSelectedWorker(e.target.value)}
+              className="flex-shrink-0 ml-auto px-3 py-1.5 rounded-xl text-[12px] font-bold outline-none"
+              style={{ background: selectedWorker !== 'all' ? '#F5EEFF' : '#F6F5FB', color: selectedWorker !== 'all' ? '#7C3AED' : '#52525B' }}>
+              <option value="all">👷 All Professionals</option>
+              <option value="__unassigned__">
+                🕓 Unassigned ({filtered.filter(b => {
+                  const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+                    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+                  const matchDate = selectedDate === 'all' || dateStr === selectedDate
+                  const matchArea = selectedArea === 'all' || resolveGroupName(b) === selectedArea
+                  return matchDate && matchArea && !b.worker_id
+                }).length})
+              </option>
+              {workers.slice().sort((a, b) => a.name.localeCompare(b.name)).map(w => {
+                const cnt = filtered.filter(b => {
+                  const dateStr = new Date(b.scheduled_at).toLocaleDateString('en-IN',
+                    { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })
+                  const matchDate = selectedDate === 'all' || dateStr === selectedDate
+                  const matchArea = selectedArea === 'all' || resolveGroupName(b) === selectedArea
+                  return matchDate && matchArea && b.worker_id === w.id
+                }).length
+                return <option key={w.id} value={w.id}>👷 {w.name} ({cnt})</option>
               })}
             </select>
           )}
@@ -3664,8 +3712,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
             {profile === 'completed' ? 'Nothing completed here yet' : 'All quiet here'}
           </p>
           <p className="text-sm mt-1" style={{ color: '#8B85A8' }}>
-            {selectedDate !== 'all' || selectedArea !== 'all'
-              ? <button onClick={() => { setSelectedDate('all'); setSelectedArea('all') }}
+            {selectedDate !== 'all' || selectedArea !== 'all' || selectedWorker !== 'all'
+              ? <button onClick={() => { setSelectedDate('all'); setSelectedArea('all'); setSelectedWorker('all') }}
                   className="font-bold hover:underline" style={{ color: '#2F9BF0' }}>Clear filters</button>
               : 'Take a breather — nothing needs you right now.'}
           </p>
