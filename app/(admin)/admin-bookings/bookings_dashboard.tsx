@@ -3342,7 +3342,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       let workerName = '—'
       if (b.worker_id) {
         const worker = workers.find(w => w.id === b.worker_id)
-        workerName = worker?.full_name ?? 'Unknown'
+        workerName = worker?.name ?? 'Unknown'
         if (worker) {
           const thisBookingAddress = { pincode: b.pincode, full_address: b.full_address }
           const durationMins = b.service_duration || 60
