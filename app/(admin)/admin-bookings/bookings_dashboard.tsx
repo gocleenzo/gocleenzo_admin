@@ -3351,7 +3351,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         }
       }
       return {
-        id: b.id, customer: b.customer_name || 'Customer',
+        id: b.id, customer: b.customer || 'Customer',
         oldAt: new Date(b.scheduled_at), newAt,
         workerId: b.worker_id, workerName, conflict,
       }
