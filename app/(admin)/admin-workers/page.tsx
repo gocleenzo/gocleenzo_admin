@@ -1165,7 +1165,37 @@ function PayoutsTab({ workerId }: { workerId: string }) {
   )
 }
 
-function EarningsTab({ workerId }: { workerId: string }) {
+// NEW: merges what used to be three separate tabs (Earnings, Bonus,
+// Pay Rates) into one, since they're all "money for this worker" and
+// were previously split across separate clicks for no strong reason.
+// Kept as three clearly-headed sections in one scroll rather than one
+// undifferentiated blob, so each part is still easy to find.
+function MoneyTab({ workerId, supabase }: { workerId: string; supabase: any }) {
+  return (
+    <div className="divide-y divide-slate-100">
+      <div>
+        <div className="px-5 pt-5 pb-1">
+          <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">Earnings Summary</p>
+        </div>
+        <EarningsSection workerId={workerId} supabase={supabase} />
+      </div>
+      <div>
+        <div className="px-5 pt-5 pb-1">
+          <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">Manual Bonuses</p>
+        </div>
+        <BonusTab workerId={workerId} supabase={supabase} />
+      </div>
+      <div>
+        <div className="px-5 pt-5 pb-1">
+          <p className="text-[11px] font-black uppercase tracking-wide text-slate-400">Pay Rates</p>
+        </div>
+        <PayRatesTab workerId={workerId} supabase={supabase} />
+      </div>
+    </div>
+  )
+}
+
+function EarningsSection({ workerId, supabase }: { workerId: string; supabase: any }) {
   const [m, setM] = useState<any>(null)
   const [loading, setLoading] = useState(true)
 
@@ -1214,14 +1244,29 @@ function EarningsTab({ workerId }: { workerId: string }) {
         else if (t.status === 'earned') pendTier += Number(t.amount ?? 0)
       }
 
+      // NEW: same paid/pending split, sourced from the manual bonuses
+      // table this tab now sits directly above — keeps this summary in
+      // sync with the Manual Bonuses section without needing a
+      // dedicated API route, matching how BonusTab itself reads this
+      // table directly via supabase.
+      const { data: bonusRows } = await supabase
+        .from('worker_manual_bonuses')
+        .select('amount, status')
+        .eq('worker_id', workerId)
+      let paidBonus = 0, pendBonus = 0
+      for (const b of (bonusRows ?? [])) {
+        if (b.status === 'paid') paidBonus += Number(b.amount ?? 0)
+        else if (b.status === 'earned') pendBonus += Number(b.amount ?? 0)
+      }
+
       if (paidBaseOrder === 0 && pendBaseOrder === 0 && baseOrderEarned > 0) {
         pendBaseOrder = baseOrderEarned
       }
 
-      const paid = { baseOrder: paidBaseOrder, travel: paidTravel, referral: paidRef, tier: paidTier }
-      const pend = { baseOrder: pendBaseOrder, travel: pendTravel, referral: pendRef, tier: pendTier }
-      const paidTotal = paid.baseOrder + paid.travel + paid.referral + paid.tier
-      const pendTotal = pend.baseOrder + pend.travel + pend.referral + pend.tier
+      const paid = { baseOrder: paidBaseOrder, travel: paidTravel, referral: paidRef, tier: paidTier, bonus: paidBonus }
+      const pend = { baseOrder: pendBaseOrder, travel: pendTravel, referral: pendRef, tier: pendTier, bonus: pendBonus }
+      const paidTotal = paid.baseOrder + paid.travel + paid.referral + paid.tier + paid.bonus
+      const pendTotal = pend.baseOrder + pend.travel + pend.referral + pend.tier + pend.bonus
 
       setM({ paid, pend, paidTotal, pendTotal, shiftHours: e.shiftHours })
     } catch { setM(null) } finally { setLoading(false) }
@@ -1271,6 +1316,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
         {srcRow('Travel expense', m.paid.travel, m.pend.travel, '#D97706')}
         {srcRow('Refer & Earn', m.paid.referral, m.pend.referral, '#7C3AED')}
         {srcRow('Tier bonus', m.paid.tier, m.pend.tier, '#059669')}
+        {srcRow('Manual bonus', m.paid.bonus, m.pend.bonus, '#DB2777')}
       </div>
 
       {m.shiftHours != null && (
@@ -1279,7 +1325,7 @@ function EarningsTab({ workerId }: { workerId: string }) {
           <p className="text-sm font-bold text-slate-700">{Number(m.shiftHours).toFixed(1)} h</p>
         </div>
       )}
-      <p className="text-[11px] text-slate-400 text-center">Reporting view across all four sources. Paid = actually disbursed; Pending = earned but not yet withdrawn.</p>
+      <p className="text-[11px] text-slate-400 text-center">Reporting view across all five sources. Paid = actually disbursed; Pending = earned but not yet withdrawn.</p>
     </div>
   )
 }
@@ -2582,12 +2628,10 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     { key: 'hours'    as const, label: 'Hours',    icon: '⏱' },
     { key: 'jobs'     as const, label: 'Jobs',     icon: '≡' },
     { key: 'areas'    as const, label: 'Areas',    icon: '📍' },
-    { key: 'payrates' as const, label: 'Pay Rates', icon: '⚙️' },
+    { key: 'money'    as const, label: 'Pay, Earnings & Bonus', icon: '₹' },
     { key: 'payouts'  as const, label: 'Payouts',  icon: '💸' },
-    { key: 'earnings' as const, label: 'Earnings', icon: '₹' },
     { key: 'referrals'as const, label: 'Referrals',icon: '🎁' },
     { key: 'tier'     as const, label: 'Tier',     icon: '🏆' },
-    { key: 'bonus'    as const, label: 'Bonus',    icon: '🎁' },
     { key: 'sos'      as const, label: 'SOS',      icon: '🆘' },
   ]
 
@@ -2800,12 +2844,10 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
         {tab === 'approval' && <ApprovalTab workerId={w.id} onChanged={onReload} />}
 
         {tab === 'areas' && <AreasTab workerId={w.id} supabase={createClient()} />}
-        {tab === 'payrates' && <PayRatesTab workerId={w.id} supabase={createClient()} />}
+        {tab === 'money' && <MoneyTab workerId={w.id} supabase={createClient()} />}
         {tab === 'payouts' && <PayoutsTab workerId={w.id} />}
-        {tab === 'earnings' && <EarningsTab workerId={w.id} />}
         {tab === 'referrals' && <ReferralsTab workerId={w.id} />}
         {tab === 'tier' && <TierTab workerId={w.id} />}
-        {tab === 'bonus' && <BonusTab workerId={w.id} supabase={createClient()} />}
         {tab === 'sos' && <SosTab workerId={w.id} supabase={createClient()} />}
 
       </div>
