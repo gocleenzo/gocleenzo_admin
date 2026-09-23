@@ -1427,6 +1427,144 @@ function TierTab({ workerId }: { workerId: string }) {
   )
 }
 
+// NEW: one-time manual bonuses an admin grants a worker directly (as
+// opposed to TierTab above, which shows SYSTEM-computed milestone
+// rewards). Follows the exact same earned -> paid/rejected lifecycle
+// and status colors as TierTab for visual consistency, but adds its
+// own "grant a bonus" form up top, since this one starts from an
+// admin's decision rather than an automatic trigger. Counted directly
+// into worker_earnings()'s total_amount (see the SQL migration run
+// earlier) — a 'rejected' bonus is the only status excluded from that
+// sum, letting an admin correct a mistaken entry without it ever
+// affecting payout.
+function BonusTab({ workerId, supabase }: { workerId: string; supabase: any }) {
+  const [rows, setRows] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [amount, setAmount] = useState('')
+  const [reason, setReason] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function load() {
+    setLoading(true)
+    try {
+      const { data } = await supabase.from('worker_manual_bonuses')
+        .select('id, amount, reason, status, created_at, reviewed_at')
+        .eq('worker_id', workerId)
+        .order('created_at', { ascending: false })
+      setRows(data ?? [])
+    } catch { setRows([]) } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [workerId])
+
+  async function addBonus() {
+    const amt = Number(amount)
+    if (!amt || amt <= 0) { setErr('Enter a valid amount'); return }
+    if (!reason.trim()) { setErr('Enter a reason for this bonus'); return }
+    setAdding(true); setErr(null)
+    try {
+      const { data: userData } = await supabase.auth.getUser()
+      const { error } = await supabase.from('worker_manual_bonuses').insert({
+        worker_id: workerId,
+        amount: amt,
+        reason: reason.trim(),
+        status: 'earned',
+        created_by: userData?.user?.id ?? null,
+      })
+      if (error) { setErr(error.message); setAdding(false); return }
+      setAmount(''); setReason('')
+      await load()
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not add bonus')
+    } finally { setAdding(false) }
+  }
+
+  async function act(id: string, action: 'paid' | 'rejected') {
+    setBusy(id)
+    try {
+      await supabase.from('worker_manual_bonuses')
+        .update({ status: action, reviewed_at: new Date().toISOString() })
+        .eq('id', id)
+      await load()
+    } finally { setBusy(null) }
+  }
+
+  const BST: Record<string, { bg: string; fg: string }> = {
+    earned: { bg: '#fef3c7', fg: '#b45309' }, paid: { bg: '#dcfce7', fg: '#15803d' }, rejected: { bg: '#fee2e2', fg: '#b91c1c' },
+  }
+
+  return (
+    <div className="p-5 space-y-4">
+      <div className="rounded-xl border-2 border-cyan-200 bg-cyan-50/50 p-4 space-y-3">
+        <p className="text-xs font-black text-cyan-800">🎁 Grant a one-time bonus</p>
+        {err && <p className="text-[11px] font-bold text-red-600">{err}</p>}
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <p className="text-[10px] text-slate-500 mb-1">Amount (₹)</p>
+            <input type="number" min={1} value={amount} onChange={e => setAmount(e.target.value)}
+              placeholder="500"
+              className="w-full px-2 py-1.5 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
+          </div>
+          <div className="flex-[2]">
+            <p className="text-[10px] text-slate-500 mb-1">Reason</p>
+            <input type="text" value={reason} onChange={e => setReason(e.target.value)}
+              placeholder="e.g. Diwali bonus, Performance bonus"
+              className="w-full px-2 py-1.5 rounded-lg text-xs font-bold text-slate-700 bg-white border border-slate-200 outline-none" />
+          </div>
+        </div>
+        <p className="text-[10px] text-slate-500">
+          This is immediately added to this worker&apos;s earnings total — no separate approval step needed.
+        </p>
+        <button onClick={addBonus} disabled={adding}
+          className="w-full py-2.5 rounded-xl font-black text-white text-sm disabled:opacity-40"
+          style={{ background: '#0891B2' }}>
+          {adding ? 'Adding…' : 'Add Bonus'}
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="p-8 text-center text-slate-400 text-sm">Loading bonuses…</div>
+      ) : rows.length === 0 ? (
+        <div className="p-8 text-center">
+          <p className="text-3xl mb-2">🎁</p>
+          <p className="text-slate-600 font-bold text-sm">No bonuses given yet</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {rows.map(r => {
+            const st = BST[r.status] ?? BST.earned
+            return (
+              <div key={r.id} className="rounded-xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-black text-slate-800">{r.reason}</p>
+                    <p className="text-[11px] text-slate-400">
+                      {new Date(r.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-black text-cyan-700">₹{r.amount}</p>
+                    <span className="text-[10px] font-black px-2 py-0.5 rounded-full" style={{ background: st.bg, color: st.fg }}>{r.status}</span>
+                  </div>
+                </div>
+                {r.status === 'earned' && (
+                  <div className="flex gap-2 mt-3">
+                    <button disabled={busy === r.id} onClick={() => act(r.id, 'paid')}
+                      className="flex-1 py-2 rounded-lg text-xs font-black text-white disabled:opacity-40" style={{ background: '#15803d' }}>Mark Paid</button>
+                    <button disabled={busy === r.id} onClick={() => act(r.id, 'rejected')}
+                      className="flex-1 py-2 rounded-lg text-xs font-black text-white disabled:opacity-40" style={{ background: '#dc2626' }}>Reject</button>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SosTab({ workerId, supabase }: { workerId: string; supabase: any }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -1877,10 +2015,17 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
     try {
       const todayStr = new Date().toISOString().slice(0, 10)
       const [{ data: liveRows }, { data: reqRows }] = await Promise.all([
+        // FIXED: previously scoped to `.gte('date', todayStr)`, so an
+        // admin had no way to see OR correct a worker's schedule for
+        // any date that had already passed — only today and future
+        // days loaded at all. Now loads every date on record; the
+        // calendar below still visually distinguishes past days and
+        // requires an explicit confirmation before saving a change to
+        // one, since that can retroactively affect that day's
+        // already-calculated attendance/payroll.
         supabase.from('worker_schedule_dates')
           .select('date, enabled, start_time, end_time, breaks')
           .eq('worker_id', workerId)
-          .gte('date', todayStr)
           .order('date', { ascending: true }),
         supabase.from('worker_schedule_date_requests')
           .select('id, dates, status, net_total_mins, note, reject_reason, requested_at, reviewed_at')
@@ -1997,7 +2142,11 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
       const next = new Set(prev)
       for (const week of weeks) {
         for (const d of week) {
-          if (!d || d < todayStart) continue
+          // FIXED: previously skipped any day before today
+          // (`d < todayStart`), so this bulk-select could never touch
+          // past dates even after the calendar itself was opened up to
+          // allow editing them individually.
+          if (!d) continue
           if (d.getDay() === weekday) next.add(dateKeyOf(d))
         }
       }
@@ -2007,6 +2156,20 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
 
   async function saveSelectedDates() {
     if (selectedDates.size === 0) return
+    // NEW: hard confirmation gate for any past date — this is the
+    // actual point of no return, so the warning banner above isn't
+    // enough by itself; an admin must explicitly acknowledge this can
+    // change that day's already-calculated attendance/payroll before
+    // it's allowed to save.
+    const pastCount = Array.from(selectedDates).filter(k => new Date(k + 'T00:00:00') < todayStart).length
+    if (pastCount > 0) {
+      const ok = window.confirm(
+        `${pastCount} of the selected date${pastCount > 1 ? 's are' : ' is'} in the past. ` +
+        `Changing ${pastCount > 1 ? 'these days\u2019' : 'this day\u2019s'} schedule can change ` +
+        `${pastCount > 1 ? 'their' : 'its'} already-calculated attendance/payroll. Continue?`
+      )
+      if (!ok) return
+    }
     setCalSaving(true); setErr(null)
     try {
       const breaks = editEnabled && editBreakOn
@@ -2106,16 +2269,28 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
                   const isSel = selectedDates.has(key)
                   const isToday = key === dateKeyOf(new Date())
                   return (
-                    <button key={di} disabled={isPast}
+                    // FIXED: previously `disabled={isPast}` with a
+                    // straight opacity fade — an admin had no way to
+                    // click into, or even really see the detail of, a
+                    // past date's schedule at all. Past dates are now
+                    // clickable like any other day, but keep a distinct
+                    // amber tint (instead of the fade) so it's always
+                    // visually obvious you're looking at history, not
+                    // an upcoming day — especially once selected, where
+                    // the confirmation step below reinforces the same
+                    // signal before anything is actually saved.
+                    <button key={di}
                       onClick={() => toggleDateSelect(key, entry)}
-                      className="aspect-square rounded-lg border flex flex-col items-center justify-center transition-all disabled:cursor-not-allowed"
+                      className="aspect-square rounded-lg border flex flex-col items-center justify-center transition-all"
                       style={{
-                        background: isSel ? '#0891B2' : entry?.enabled ? '#ECFEFF' : entry ? '#F8FAFC' : '#fff',
+                        background: isSel
+                          ? (isPast ? '#D97706' : '#0891B2')
+                          : entry?.enabled ? '#ECFEFF' : entry ? '#F8FAFC' : '#fff',
                         borderColor: isSel ? 'transparent' : isToday ? '#0891B2' : entry?.enabled ? '#A5F3FC' : '#E2E8F0',
                         borderWidth: isToday && !isSel ? 2 : 1,
-                        opacity: isPast ? 0.35 : 1,
+                        opacity: isPast && !isSel ? 0.6 : 1,
                       }}>
-                      <span className="text-[11px] font-bold" style={{ color: isSel ? '#fff' : '#334155' }}>{d.getDate()}</span>
+                      <span className="text-[11px] font-bold" style={{ color: isSel ? '#fff' : isPast ? '#B45309' : '#334155' }}>{d.getDate()}</span>
                       {entry && (
                         <span className="text-[7px] font-black mt-0.5"
                           style={{ color: isSel ? 'rgba(255,255,255,0.9)' : entry.enabled ? '#059669' : '#94a3b8' }}>
@@ -2139,6 +2314,22 @@ function ScheduleDateRequestTab({ workerId, supabase, onChanged }: {
               <button onClick={() => setSelectedDates(new Set())}
                 className="text-[11px] font-bold text-slate-400 hover:text-slate-600">Clear</button>
             </div>
+
+            {/* NEW: explicit warning whenever the selection includes
+                one or more past dates — editing a day that's already
+                happened can retroactively change that day's
+                attendance/payroll calculation, so this needs to be
+                impossible to miss before saving. */}
+            {Array.from(selectedDates).some(k => new Date(k + 'T00:00:00') < todayStart) && (
+              <div className="rounded-lg bg-amber-50 border border-amber-300 px-3 py-2">
+                <p className="text-[11px] font-bold text-amber-800">
+                  ⚠️ This includes {Array.from(selectedDates).filter(k => new Date(k + 'T00:00:00') < todayStart).length} past
+                  date{Array.from(selectedDates).filter(k => new Date(k + 'T00:00:00') < todayStart).length > 1 ? 's' : ''}.
+                  Changing an already-passed day&apos;s schedule can change that day&apos;s
+                  attendance/payroll calculation. You&apos;ll be asked to confirm before this saves.
+                </p>
+              </div>
+            )}
 
             <div className="flex gap-2">
               <button onClick={() => setEditEnabled(true)}
@@ -2396,6 +2587,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     { key: 'earnings' as const, label: 'Earnings', icon: '₹' },
     { key: 'referrals'as const, label: 'Referrals',icon: '🎁' },
     { key: 'tier'     as const, label: 'Tier',     icon: '🏆' },
+    { key: 'bonus'    as const, label: 'Bonus',    icon: '🎁' },
     { key: 'sos'      as const, label: 'SOS',      icon: '🆘' },
   ]
 
@@ -2613,6 +2805,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
         {tab === 'earnings' && <EarningsTab workerId={w.id} />}
         {tab === 'referrals' && <ReferralsTab workerId={w.id} />}
         {tab === 'tier' && <TierTab workerId={w.id} />}
+        {tab === 'bonus' && <BonusTab workerId={w.id} supabase={createClient()} />}
         {tab === 'sos' && <SosTab workerId={w.id} supabase={createClient()} />}
 
       </div>
