@@ -3211,6 +3211,22 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     await load(); if (selected?.id === bId) setSelected(null)
   }
 
+  // NEW: unassign a SINGLE booking's worker directly from its card —
+  // distinct from the whole-day "Unassign All" bulk action built
+  // earlier. Sets the booking back to unassigned/pending, same end
+  // state as the bulk version, just scoped to one row via a normal
+  // quick-action click instead of the date-scoped confirmation modal.
+  async function quickUnassign(bId: string) {
+    const bk = bookings.find(b => b.id === bId)
+    if (!bk) return
+    if (!window.confirm(
+      `Unassign ${bk.worker || 'the worker'} from "${bk.service_name}" for ${bk.customer}?\n\n` +
+      'This booking goes back to Pending, ready to be reassigned.'
+    )) return
+    await supabase.from('bookings').update({ worker_id: null, status: 'pending' }).eq('id', bId)
+    await load()
+  }
+
   const liveStatuses      = ['pending','accepted','otp_verified','in_progress']
   const completedStatuses = ['completed']
   const cancelledStatuses = ['cancelled']
@@ -3981,6 +3997,20 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                   title="Open to start work"
                                   className="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all" style={{ background: '#EAF4FE', color: '#2F9BF0' }}>
                                   ▶️ Start
+                                </button>
+                              )}
+                              {/* NEW: single-booking unassign, right on
+                                  the card — distinct from the whole-day
+                                  "Unassign All" bulk tool. Only shown
+                                  once a worker is actually assigned and
+                                  the job hasn't started yet (unassigning
+                                  an in-progress job doesn't make sense —
+                                  the worker is already there). */}
+                              {!!b.worker_id && ['pending', 'accepted'].includes(b.status) && (
+                                <button onClick={() => quickUnassign(b.id)}
+                                  title="Unassign worker"
+                                  className="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all" style={{ background: '#FEF2F2', color: '#DC2626' }}>
+                                  🚫 Unassign
                                 </button>
                               )}
                               {b.status === 'in_progress' && (
