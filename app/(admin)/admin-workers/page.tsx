@@ -2612,7 +2612,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
   const todayMins    = todayNetMins(w.todaySchedule)
   const st           = statusOf(w)
 
-  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'attendance'|'hours'|'jobs'|'areas'|'payrates'|'payouts'|'earnings'|'referrals'|'tier'|'sos'>('overview')
+  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'attendance'|'hours'|'jobs'|'areas'|'money'|'payouts'|'referrals'|'tier'|'sos'>('overview')
   const [jobsShown, setJobsShown] = useState(10)
 
   useEffect(() => {
