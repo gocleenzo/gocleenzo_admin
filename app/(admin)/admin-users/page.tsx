@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import AddressMapPicker, { PickedAddress } from '@/components/AddressMapPicker'
+import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 
 // ── Types ──────────────────────────────────────────────────────
 type OrderRow = {
