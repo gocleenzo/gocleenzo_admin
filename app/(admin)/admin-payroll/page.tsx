@@ -207,7 +207,7 @@ function EarningsTab() {
         // NEW: aggregate manual-bonus totals across every worker, for
         // the breakdown-by-source list — same earned('earned')+paid
         // status split every other source here already uses.
-        supabase.from('worker_manual_bonuses').select('amount, status').then(r => r).catch(() => null),
+        Promise.resolve(supabase.from('worker_manual_bonuses').select('amount, status')).catch(() => null),
       ])
       const refs = refRes?.referrals ?? refRes?.rows ?? []
       let rp = 0, rq = 0
@@ -269,8 +269,9 @@ function EarningsTab() {
               // NEW: this worker's manual bonuses, same direct-Supabase
               // pattern as loadExtras() above, just scoped to one
               // worker_id instead of aggregated across everyone.
-              supabase.from('worker_manual_bonuses').select('amount, status')
-                .eq('worker_id', w.worker_id).then(r => r).catch(() => null),
+              Promise.resolve(
+                supabase.from('worker_manual_bonuses').select('amount, status').eq('worker_id', w.worker_id)
+              ).catch(() => null),
             ])
             const refs = refRes?.referrals ?? refRes?.rows ?? []
             const refTotal = refs
