@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { createClient } from '@/lib/supabase/client'
 
 type Worker = {
   worker_id: string
@@ -144,18 +145,28 @@ export default function PayrollPage() {
 
 // ─────────────────────────── EARNINGS ───────────────────────────
 function EarningsTab() {
+  const supabase = createClient()
   const [preset, setPreset] = useState<'week' | 'month' | 'custom'>('week')
   const [range, setRange] = useState(weekRange())
   const [workers, setWorkers] = useState<Worker[]>([])
   const [grand, setGrand] = useState<Grand | null>(null)
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Worker | null>(null)
-  // Bonus (referral + tier, earned+paid, lifetime) keyed by worker_id —
-  // computed ONCE for every worker in the current list, right after
-  // `workers` loads. Reused both for the new "Bonus" table column AND
-  // the detail drawer, so a worker with no referral/tier reward shows
-  // nothing in either place, and there's only one round of fetches
-  // instead of a separate one every time a row is clicked.
+  // Bonus (referral + tier + manual, earned+paid, lifetime) keyed by
+  // worker_id — computed ONCE for every worker in the current list,
+  // right after `workers` loads. Reused both for the "Bonus" table
+  // column AND the detail drawer, so a worker with no bonus of any
+  // kind shows nothing in either place, and there's only one round of
+  // fetches instead of a separate one every time a row is clicked.
+  //
+  // UPDATED: now also folds in one-time manual bonuses (the "Grant a
+  // one-time bonus" feature on each worker's own Pay/Earnings/Bonus
+  // tab) alongside the existing referral + tier total, via a direct
+  // Supabase query — this page otherwise only calls /api/* routes, but
+  // there's no dedicated route for manual bonuses yet, and this exact
+  // worker_manual_bonuses query is already used the same way on the
+  // Workers page and the Reports page, so this keeps the same pattern
+  // rather than inventing a third way to read the same table.
   const [bonusByWorker, setBonusByWorker] = useState<Record<string, number>>({})
   const [bonusLoading, setBonusLoading] = useState(false)
 
@@ -163,6 +174,10 @@ function EarningsTab() {
   const [refPend, setRefPend] = useState(0)
   const [tierPaid, setTierPaid] = useState(0)
   const [tierPend, setTierPend] = useState(0)
+  // NEW: manual bonus paid/pending totals, for the "breakdown by
+  // source" list — same earned/paid split as referral and tier above.
+  const [manualBonusPaid, setManualBonusPaid] = useState(0)
+  const [manualBonusPend, setManualBonusPend] = useState(0)
   const [travelPaid, setTravelPaid] = useState(0)
   const [travelPend, setTravelPend] = useState(0)
   const [poPaidBO, setPoPaidBO] = useState(0)
@@ -184,11 +199,15 @@ function EarningsTab() {
 
   const loadExtras = useCallback(async () => {
     try {
-      const [refRes, tierRes, claimRes, poRes] = await Promise.all([
+      const [refRes, tierRes, claimRes, poRes, bonusRes] = await Promise.all([
         fetch('/api/referrals?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
         fetch('/api/tiers?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
         fetch('/api/payroll/claims?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
         fetch('/api/payroll/payouts?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        // NEW: aggregate manual-bonus totals across every worker, for
+        // the breakdown-by-source list — same earned('earned')+paid
+        // status split every other source here already uses.
+        supabase.from('worker_manual_bonuses').select('amount, status').then(r => r).catch(() => null),
       ])
       const refs = refRes?.referrals ?? refRes?.rows ?? []
       let rp = 0, rq = 0
@@ -213,20 +232,27 @@ function EarningsTab() {
         else if (p.status !== 'rejected') pq += bo
       }
       setPoPaidBO(pp); setPoPendBO(pq)
+
+      const bonusRows = (bonusRes as any)?.data ?? []
+      let mbp = 0, mbq = 0
+      for (const b of bonusRows) {
+        if (b.status === 'paid') mbp += Number(b.amount ?? 0)
+        else if (b.status === 'earned') mbq += Number(b.amount ?? 0)
+      }
+      setManualBonusPaid(mbp); setManualBonusPend(mbq)
     } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => { load() }, [load])
   useEffect(() => { loadExtras() }, [loadExtras])
 
-  // Fetch referral+tier bonus for EVERY worker in the current list, once,
-  // right after `workers` loads — not per row click. Each worker's
-  // referral/tier rows are fetched in parallel via the existing
-  // worker_id-filtered endpoints; a worker with zero earned+paid
-  // referral/tier amount simply doesn't appear in the resulting map
-  // (checked with `?? 0` everywhere it's read), so they show nothing
-  // in the new Bonus column or the drawer — only workers who've
-  // actually earned one get a value.
+  // Fetch referral+tier+manual bonus for EVERY worker in the current
+  // list, once, right after `workers` loads — not per row click. A
+  // worker with zero earned+paid bonus of any kind simply doesn't
+  // appear in the resulting map (checked with `?? 0` everywhere it's
+  // read), so they show nothing in the Bonus column or the drawer —
+  // only workers who've actually earned one get a value.
   useEffect(() => {
     if (workers.length === 0) { setBonusByWorker({}); return }
     let cancelled = false
@@ -235,11 +261,16 @@ function EarningsTab() {
       try {
         const entries = await Promise.all(workers.map(async (w) => {
           try {
-            const [refRes, tierRes] = await Promise.all([
+            const [refRes, tierRes, manualRes] = await Promise.all([
               fetch(`/api/referrals?status=all&worker_id=${w.worker_id}`, { cache: 'no-store' })
                 .then(r => r.json()).catch(() => null),
               fetch(`/api/tiers?status=all&worker_id=${w.worker_id}`, { cache: 'no-store' })
                 .then(r => r.json()).catch(() => null),
+              // NEW: this worker's manual bonuses, same direct-Supabase
+              // pattern as loadExtras() above, just scoped to one
+              // worker_id instead of aggregated across everyone.
+              supabase.from('worker_manual_bonuses').select('amount, status')
+                .eq('worker_id', w.worker_id).then(r => r).catch(() => null),
             ])
             const refs = refRes?.referrals ?? refRes?.rows ?? []
             const refTotal = refs
@@ -251,7 +282,12 @@ function EarningsTab() {
               .filter((t: any) => t.status === 'earned' || t.status === 'paid')
               .reduce((s: number, t: any) => s + Number(t.amount ?? 0), 0)
 
-            return [w.worker_id, refTotal + tierTotal] as const
+            const manualRows = (manualRes as any)?.data ?? []
+            const manualTotal = manualRows
+              .filter((b: any) => b.status === 'earned' || b.status === 'paid')
+              .reduce((s: number, b: any) => s + Number(b.amount ?? 0), 0)
+
+            return [w.worker_id, refTotal + tierTotal + manualTotal] as const
           } catch {
             return [w.worker_id, 0] as const
           }
@@ -267,6 +303,7 @@ function EarningsTab() {
       }
     })()
     return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workers])
 
   function choosePreset(p: 'week' | 'month' | 'custom') {
@@ -275,8 +312,8 @@ function EarningsTab() {
     else if (p === 'month') setRange(monthRange())
   }
 
-  const paidTotal = poPaidBO + travelPaid + refPaid + tierPaid
-  const pendTotal = poPendBO + travelPend + refPend + tierPend
+  const paidTotal = poPaidBO + travelPaid + refPaid + tierPaid + manualBonusPaid
+  const pendTotal = poPendBO + travelPend + refPend + tierPend + manualBonusPend
 
   return (
     <div>
@@ -299,6 +336,9 @@ function EarningsTab() {
           ['Travel allowance', travelPaid, travelPend, '#D97706'],
           ['Refer & Earn', refPaid, refPend, '#7C3AED'],
           ['Tier bonus', tierPaid, tierPend, '#059669'],
+          // NEW: manual one-time bonuses, same row shape as every
+          // other source above.
+          ['Manual bonus', manualBonusPaid, manualBonusPend, '#DB2777'],
         ].map(([label, paid, pend, color]) => (
           <div key={label as string} className="flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0">
             <div className="flex items-center gap-2">
@@ -444,10 +484,10 @@ function EarningsTab() {
                   Loading bonus…
                 </div>
               ) : (bonusByWorker[selected.worker_id] ?? 0) > 0 && (
-                <BreakRow label="Bonus" sub="Refer & Earn + Tier bonus (earned + paid)" amt={bonusByWorker[selected.worker_id]} color="#7c3aed" />
+                <BreakRow label="Bonus" sub="Refer & Earn + Tier bonus + Manual bonus (earned + paid)" amt={bonusByWorker[selected.worker_id]} color="#7c3aed" />
               )}
             </div>
-            <p className="text-[11px] text-slate-400 mt-4">Travel allowance is now automatic — no claim submission needed. The Bonus amount shown here covers this worker&apos;s full lifetime earned+paid referral and tier total, not just this date range.</p>
+            <p className="text-[11px] text-slate-400 mt-4">Travel allowance is now automatic — no claim submission needed. The Bonus amount shown here covers this worker&apos;s full lifetime earned+paid referral, tier, and manual bonus total, not just this date range.</p>
           </div>
         </div>
       )}

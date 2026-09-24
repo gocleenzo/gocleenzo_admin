@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import AddressMapPicker, { PickedAddress } from '@/components/AddressMapPicker'
 
 // ── Types ──────────────────────────────────────────────────────
 type OrderRow = {
@@ -23,10 +24,15 @@ type CustomerRow = {
   is_verified: boolean
   created_at: string
   // Default address, if any (is_default = true, is_deleted = false)
+  default_address_id: string | null
   default_area: string | null
   default_city: string | null
   default_pincode: string | null
   default_full_address: string | null
+  // NEW: needed so the "Edit Location" map can center on where the
+  // pin currently (possibly wrongly) sits, rather than opening blank.
+  default_lat: number | null
+  default_lng: number | null
   // Derived from bookings
   orders: OrderRow[]
   totalOrders: number
@@ -54,9 +60,100 @@ function formatAddress(c: Pick<CustomerRow, 'default_full_address' | 'default_ar
   return parts.length > 0 ? parts.join(', ') : null
 }
 
+// ── NEW: Edit Location modal — thin wrapper around the existing
+// AddressMapPicker component (already used elsewhere in this admin
+// panel), scoped to updating ONE existing address row's coordinates
+// directly. This is the admin-side counterpart to the customer app's
+// own "Edit Location" feature on Saved Addresses — for cases where a
+// worker reports a wrong address but the customer won't fix it
+// themselves.
+function EditLocationModal({
+  addressId, initialLat, initialLng, onClose, onSaved,
+}: {
+  addressId: string
+  initialLat: number | null
+  initialLng: number | null
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const supabase = createClient()
+  const [picked, setPicked] = useState<PickedAddress | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function save() {
+    if (!picked) return
+    setSaving(true)
+    setError(null)
+    const patch: Record<string, any> = {
+      latitude: picked.lat,
+      longitude: picked.lng,
+    }
+    // Only overwrite the text fields if reverse-geocoding actually
+    // returned something — a dropped pin with a failed reverse-geocode
+    // still updates the coordinates (the part that actually matters
+    // for sending a worker to the right place) without blanking out
+    // perfectly good existing address text.
+    if (picked.fullAddress) patch.full_address = picked.fullAddress
+    if (picked.area) patch.area = picked.area
+    if (picked.city) patch.city = picked.city
+    if (picked.pincode) patch.pincode = picked.pincode
+
+    const { error: err } = await supabase.from('addresses').update(patch).eq('id', addressId)
+    setSaving(false)
+    if (err) {
+      setError(err.message)
+      return
+    }
+    onSaved()
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-5 w-full max-w-lg shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-base font-black text-slate-800">📍 Fix Address Location</h3>
+          <button onClick={onClose}
+            className="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+        </div>
+        <p className="text-xs text-slate-400 mb-3">
+          Drag the pin to the customer's real location, or search for the correct address above the map.
+        </p>
+        <AddressMapPicker
+          initialLat={initialLat}
+          initialLng={initialLng}
+          heightClass="h-72"
+          onPick={setPicked}
+        />
+        {picked?.fullAddress && (
+          <div className="mt-3 rounded-xl bg-slate-50 border border-slate-200 px-3 py-2">
+            <p className="text-xs text-slate-600">{picked.fullAddress}</p>
+          </div>
+        )}
+        {error && (
+          <p className="text-xs font-bold text-red-600 mt-2">{error}</p>
+        )}
+        <button onClick={save} disabled={!picked || saving}
+          className="w-full mt-4 py-2.5 rounded-xl font-black text-white text-sm disabled:opacity-40 transition-opacity"
+          style={{ background: '#0891B2' }}>
+          {saving ? 'Saving…' : 'Save New Location'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Drawer: full profile + order history ────────────────────────
-function UserDrawer({ user, onClose }: { user: CustomerRow; onClose: () => void }) {
+function UserDrawer({
+  user, onClose, onReload,
+}: {
+  user: CustomerRow
+  onClose: () => void
+  onReload: () => void
+}) {
   const address = formatAddress(user)
+  const [editingLocation, setEditingLocation] = useState(false)
 
   return (
     <>
@@ -118,7 +215,18 @@ function UserDrawer({ user, onClose }: { user: CustomerRow; onClose: () => void 
 
           {/* Default address */}
           <div>
-            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Default Address</p>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Default Address</p>
+              {/* NEW: only shown when there's an actual address row to
+                  edit — a customer with no saved address has nothing
+                  to correct here yet. */}
+              {user.default_address_id && (
+                <button onClick={() => setEditingLocation(true)}
+                  className="flex items-center gap-1 text-[11px] font-bold text-cyan-700 hover:text-cyan-800 transition-colors">
+                  📍 Edit Location
+                </button>
+              )}
+            </div>
             {address ? (
               <div className="rounded-2xl px-4 py-3 bg-amber-50 border border-amber-200">
                 <p className="text-sm text-slate-700">📍 {address}</p>
@@ -177,6 +285,16 @@ function UserDrawer({ user, onClose }: { user: CustomerRow; onClose: () => void 
           </div>
         </div>
       </div>
+
+      {editingLocation && user.default_address_id && (
+        <EditLocationModal
+          addressId={user.default_address_id}
+          initialLat={user.default_lat}
+          initialLng={user.default_lng}
+          onClose={() => setEditingLocation(false)}
+          onSaved={onReload}
+        />
+      )}
     </>
   )
 }
@@ -202,8 +320,12 @@ export default function AdminUsers() {
         .eq('role', 'customer')
         .eq('is_deleted', false)
         .order('created_at', { ascending: false }),
+      // NEW: also select id/latitude/longitude — needed so "Edit
+      // Location" knows exactly which address row to update, and can
+      // center the map on where the pin currently (possibly wrongly)
+      // sits instead of opening blank.
       supabase.from('addresses')
-        .select('user_id,area,city,pincode,full_address,is_default,is_deleted')
+        .select('id,user_id,area,city,pincode,full_address,latitude,longitude,is_default,is_deleted')
         .eq('is_default', true)
         .eq('is_deleted', false),
       supabase.from('bookings')
@@ -256,10 +378,13 @@ export default function AdminUsers() {
         is_active: u.is_active !== false,
         is_verified: u.is_verified === true,
         created_at: u.created_at,
+        default_address_id: addr?.id ?? null,
         default_area: addr?.area ?? null,
         default_city: addr?.city ?? null,
         default_pincode: addr?.pincode ?? null,
         default_full_address: addr?.full_address ?? null,
+        default_lat: addr?.latitude ?? null,
+        default_lng: addr?.longitude ?? null,
         orders,
         totalOrders: orders.length,
         completedOrders: completed.length,
@@ -452,7 +577,7 @@ export default function AdminUsers() {
       )}
 
       {selected && (
-        <UserDrawer user={selected} onClose={() => setSelected(null)} />
+        <UserDrawer user={selected} onClose={() => setSelected(null)} onReload={load} />
       )}
     </div>
   )
