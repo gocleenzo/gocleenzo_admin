@@ -20,6 +20,9 @@ function supabaseAdmin() {
   )
 }
 
+// Returns one row PER DEVICE (token), each still carrying its owning
+// user_id so the caller can dedupe the in-app notifications insert
+// per user while still pushing to every device.
 async function resolveRecipientDevices(
   supabase: ReturnType<typeof supabaseAdmin>,
   targetType: string,
@@ -38,6 +41,8 @@ async function resolveRecipientDevices(
     if (error) throw new Error(`resolveRecipientDevices(area): ${error.message}`)
     userIds = Array.from(new Set((data ?? []).map((r: any) => r.user_id).filter(Boolean)))
   } else {
+    // 'all' — every customer. Scoped to role='customer' so this never
+    // accidentally pushes to worker/admin accounts sharing this table.
     const { data, error } = await supabase
       .from('users')
       .select('id')
@@ -50,16 +55,25 @@ async function resolveRecipientDevices(
 
   if (userIds.length === 0) return []
 
+  // IMPORTANT: we deliberately do NOT do `.in('user_id', userIds)` here.
+  // With hundreds of customer UUIDs, that builds a URL so long that
+  // Supabase/PostgREST rejects it with a 400 Bad Request — which is
+  // exactly what was causing every "All Customers" broadcast to
+  // silently resolve to 0 devices. Since user_fcm_tokens is a small
+  // table (one row per registered device, not per booking/order), it's
+  // cheap and safe to just fetch everything and filter in memory.
+  const userIdSet = new Set(userIds)
   const { data: tokenRows, error: tokenError } = await supabase
     .from('user_fcm_tokens')
     .select('id, user_id, token')
-    .in('user_id', userIds)
 
   if (tokenError) throw new Error(`resolveRecipientDevices(tokens): ${tokenError.message}`)
 
-  console.log(`resolveRecipientDevices: found ${tokenRows?.length ?? 0} device tokens for ${userIds.length} userIds`)
+  const filtered = (tokenRows ?? []).filter((r: any) => userIdSet.has(r.user_id))
 
-  return (tokenRows ?? []).map((r: any) => ({
+  console.log(`resolveRecipientDevices: found ${filtered.length} device tokens for ${userIds.length} userIds`)
+
+  return filtered.map((r: any) => ({
     user_id: r.user_id,
     token_row_id: r.id,
     token: r.token,
@@ -83,7 +97,7 @@ export async function POST(req: NextRequest) {
     .eq('status', 'pending')
     .lte('send_at', new Date().toISOString())
     .order('send_at', { ascending: true })
-    .limit(20)
+    .limit(20) // process a bounded batch per invocation
 
   if (dueError) {
     console.error('Dispatch: could not load due notifications', dueError)
@@ -101,7 +115,7 @@ export async function POST(req: NextRequest) {
 
       let successCount = 0
       const deadRowIds: string[] = []
-      const notifiedUserIds = new Set<string>()
+      const notifiedUserIds = new Set<string>() // dedupe the in-app row per user
       const sendErrors: string[] = []
 
       for (const d of devices) {
@@ -146,6 +160,9 @@ export async function POST(req: NextRequest) {
         .update({
           status: devices.length > 0 && successCount === 0 ? 'failed' : 'sent',
           sent_at: new Date().toISOString(),
+          // Recipients count now reflects distinct USERS notified
+          // (not raw device sends) — matches what an admin actually
+          // means by "how many customers got this".
           recipients_count: notifiedUserIds.size,
           error: devices.length > 0 && successCount === 0
             ? `All ${devices.length} device sends failed — check FCM credentials`
