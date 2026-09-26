@@ -10,31 +10,6 @@ import { sendFcmNotification } from '../fcm'
 // and marks the row sent/failed. This route does the real work; the
 // admin-facing schedule route above only creates/lists/cancels rows —
 // nothing gets sent until THIS runs.
-//
-// UPDATED for multi-device support — resolveRecipients now returns
-// one entry per DEVICE (a customer with two logged-in devices appears
-// twice), so every device actually gets pushed. The scheduled_notif's
-// own 'notifications' DB row is still only inserted ONCE per user
-// (tracked separately below), so a two-device customer doesn't see a
-// duplicated entry in their in-app notification list.
-//
-// TRIGGERING THIS PERIODICALLY (do this once, outside of code):
-//   Vercel Cron Jobs — add to vercel.json:
-//     { "crons": [{ "path": "/api/notifications/dispatch", "schedule": "* * * * *" }] }
-//   NOTE: minute-level cron schedules require a Vercel Pro plan or
-//   above — the Hobby (free) tier only allows once-per-day cron
-//   triggers, which isn't useful for near-real-time scheduled sends.
-//   If you're on Hobby, either upgrade, or trigger this route from an
-//   external free scheduler (e.g. cron-job.org or a Supabase pg_cron +
-//   pg_net call) hitting this URL every 1-5 minutes instead.
-//
-// SECURITY: protected by a shared secret (CRON_SECRET env var) passed
-// as a Bearer token — Vercel Cron automatically sends this on its own
-// invocations when CRON_SECRET is set in your project's environment
-// variables; an external scheduler needs to be configured to send the
-// same header manually. Without a valid secret, this route refuses to
-// run, since it's a bulk-send endpoint that must not be publicly
-// triggerable by anyone who finds the URL.
 // ============================================================================
 
 function supabaseAdmin() {
@@ -45,9 +20,6 @@ function supabaseAdmin() {
   )
 }
 
-// Returns one row PER DEVICE (token), each still carrying its owning
-// user_id so the caller can dedupe the in-app notifications insert
-// per user while still pushing to every device.
 async function resolveRecipientDevices(
   supabase: ReturnType<typeof supabaseAdmin>,
   targetType: string,
@@ -58,29 +30,34 @@ async function resolveRecipientDevices(
   if (targetType === 'user') {
     userIds = [targetValue!]
   } else if (targetType === 'area') {
-    // Every customer with a saved (non-deleted) address in this pincode.
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('addresses')
       .select('user_id')
       .eq('pincode', targetValue!)
       .eq('is_deleted', false)
+    if (error) throw new Error(`resolveRecipientDevices(area): ${error.message}`)
     userIds = Array.from(new Set((data ?? []).map((r: any) => r.user_id).filter(Boolean)))
   } else {
-    // 'all' — every customer. Scoped to role='customer' so this never
-    // accidentally pushes to worker/admin accounts sharing this table.
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('users')
       .select('id')
       .eq('role', 'customer')
+    if (error) throw new Error(`resolveRecipientDevices(all/users): ${error.message}`)
     userIds = (data ?? []).map((r: any) => r.id)
   }
 
+  console.log(`resolveRecipientDevices: targetType=${targetType} matched ${userIds.length} userIds`)
+
   if (userIds.length === 0) return []
 
-  const { data: tokenRows } = await supabase
+  const { data: tokenRows, error: tokenError } = await supabase
     .from('user_fcm_tokens')
     .select('id, user_id, token')
     .in('user_id', userIds)
+
+  if (tokenError) throw new Error(`resolveRecipientDevices(tokens): ${tokenError.message}`)
+
+  console.log(`resolveRecipientDevices: found ${tokenRows?.length ?? 0} device tokens for ${userIds.length} userIds`)
 
   return (tokenRows ?? []).map((r: any) => ({
     user_id: r.user_id,
@@ -106,7 +83,7 @@ export async function POST(req: NextRequest) {
     .eq('status', 'pending')
     .lte('send_at', new Date().toISOString())
     .order('send_at', { ascending: true })
-    .limit(20) // process a bounded batch per invocation
+    .limit(20)
 
   if (dueError) {
     console.error('Dispatch: could not load due notifications', dueError)
@@ -120,9 +97,12 @@ export async function POST(req: NextRequest) {
       const devices = await resolveRecipientDevices(
         supabase, notif.target_type, notif.target_value)
 
+      console.log(`Dispatch: notif ${notif.id} (${notif.target_type}) resolved ${devices.length} devices`)
+
       let successCount = 0
       const deadRowIds: string[] = []
-      const notifiedUserIds = new Set<string>() // dedupe the in-app row per user
+      const notifiedUserIds = new Set<string>()
+      const sendErrors: string[] = []
 
       for (const d of devices) {
         const result = await sendFcmNotification(
@@ -147,6 +127,8 @@ export async function POST(req: NextRequest) {
               console.error('Dispatch: failed saving in-app notification row', dbErr)
             }
           }
+        } else {
+          sendErrors.push(`token ${d.token_row_id}: failed (tokenInvalid=${result.tokenInvalid})`)
         }
       }
 
@@ -154,20 +136,28 @@ export async function POST(req: NextRequest) {
         await supabase.from('user_fcm_tokens').delete().in('id', deadRowIds)
       }
 
+      console.log(`Dispatch: notif ${notif.id} sent to ${successCount}/${devices.length} devices, ${notifiedUserIds.size} unique users, ${deadRowIds.length} dead tokens pruned`)
+      if (sendErrors.length > 0) {
+        console.error(`Dispatch: notif ${notif.id} had ${sendErrors.length} failed sends`, sendErrors.slice(0, 5))
+      }
+
       await supabase
         .from('scheduled_notifications')
         .update({
-          status: 'sent',
+          status: devices.length > 0 && successCount === 0 ? 'failed' : 'sent',
           sent_at: new Date().toISOString(),
-          // Recipients count now reflects distinct USERS notified
-          // (not raw device sends) — matches what an admin actually
-          // means by "how many customers got this".
           recipients_count: notifiedUserIds.size,
+          error: devices.length > 0 && successCount === 0
+            ? `All ${devices.length} device sends failed — check FCM credentials`
+            : devices.length === 0
+              ? 'No matching device tokens found for target audience'
+              : null,
         })
         .eq('id', notif.id)
 
       results.push({
         id: notif.id,
+        devices_resolved: devices.length,
         users_notified: notifiedUserIds.size,
         devices_sent: successCount,
         devices_pruned: deadRowIds.length,
