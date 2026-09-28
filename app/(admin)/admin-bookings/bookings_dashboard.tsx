@@ -4,10 +4,6 @@ import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
 import RecurringPackageBadge from './recurring_package_badge'
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
-// Single source of truth for "revenue earned" — see file for why. Used
-// below to replace this page's old "Completed" stat, which previously
-// summed the currently-loaded (scheduled-date-filtered) list instead of
-// using completion-date attribution like the Overview page.
 import { fetchCompletedRevenue, getISTMonthStart } from '../_lib/revenue'
 
 type BookedService = { serviceId: string | null; name: string; qty: number; unit_price: number }
@@ -58,9 +54,6 @@ type CustomerMatch = {
 
 const SYSTEM_PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000001'
 
-// NEW visual system: indigo/violet primary (was cyan), each status has its
-// own accent used consistently (card edge, dot, chip, icon tile) instead of
-// only in the small text badge. `edge` powers the new card's left color bar.
 const STATUS: Record<string, { label: string; color: string; bg: string; icon: string; step: number; edge: string }> = {
   pending:      { label: 'Pending',      color: '#B45309', bg: '#FEF3C7', icon: '⏳', step: 0, edge: '#F59E0B' },
   accepted:     { label: 'Assigned',     color: '#7C6FE8', bg: '#EDE8FB', icon: '👤', step: 1, edge: '#6366F1' },
@@ -98,10 +91,6 @@ function dur(sec: number) {
   const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60
   if (h) return `${h}h ${m}m ${s}s`; if (m) return `${m}m ${s}s`; return `${s}s`
 }
-// NEW: formats a booking's planned/booked duration (in minutes) as a
-// short "1h 30m" / "45m" label for the card's duration chip — separate
-// from durShort()/dur() above, which format actual ELAPSED seconds off
-// a live timer, not a fixed planned-minutes total.
 function formatPlannedDuration(mins: number): string {
   const h = Math.floor(mins / 60)
   const m = Math.round(mins % 60)
@@ -122,11 +111,6 @@ function timeToMins(t: string) {
   const [h, m] = t.split(':').map(Number); return h * 60 + m
 }
 
-// NEW: powers the "Unassigned · in 2h" countdown chip in the table row,
-// and the red/urgent styling switch — replaces the old static amber pill
-// with something that actually communicates how soon action is needed.
-// NEW: friendly, time-aware greeting for the header — makes the dashboard
-// feel like a workspace someone is welcomed into, not a data console.
 function greetingForNow(): string {
   const h = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false })
   const hour = Number(h)
@@ -149,7 +133,7 @@ function timeUntilLabel(iso: string): string {
 }
 function isUrgentUnassigned(iso: string): boolean {
   const diffMs = new Date(iso).getTime() - Date.now()
-  return diffMs > 0 && diffMs < 2 * 60 * 60 * 1000 // under 2 hours out
+  return diffMs > 0 && diffMs < 2 * 60 * 60 * 1000
 }
 
 function localDateStr(d: Date): string {
@@ -157,25 +141,8 @@ function localDateStr(d: Date): string {
   return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
 }
 
-// FIXED: previously used a hardcoded 3-letter month abbreviation array
-// ('Sep', etc.), while every other date comparison in this file (see
-// countForDate, dateAreaFiltered, todayLabel/tomorrowLabel/dayAfterLabel)
-// generates its label via toLocaleDateString('en-IN', {month:'short'}).
-// That locale's "short" month format renders September as "Sept" (4
-// letters) — different from every other month, which do match a plain
-// 3-letter abbreviation. The mismatch meant picking ANY date in
-// September via the custom 🗓️ picker silently matched zero bookings,
-// even when real bookings existed that day — every other month worked
-// fine by coincidence. Generating the label the exact same way as the
-// comparison side guarantees they can never drift apart again, for
-// September or any other month.
 function labelFromDateInput(yyyyMmDd: string): string {
   const [y, m, d] = yyyyMmDd.split('-').map(Number)
-  // UTC-anchored construction avoids any risk of the label shifting by
-  // a day if the browser's local timezone differs from IST — the
-  // 'en-IN' + {month:'short'} locale formatting quirk that causes the
-  // "Sept" vs "Sep" mismatch is independent of which timeZone is
-  // passed, so anchoring to UTC here is safe and exact.
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-IN',
     { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 }
@@ -213,20 +180,7 @@ function nextDays(n: number): Date[] {
 function isWorkerAvailableAt(
   worker: Worker, scheduledAt: string, durationMins: number,
   existingBookings: { worker_id: string; scheduled_at: string; duration_mins?: number; pincode?: string | null; full_address?: string | null; extra_time_mins?: number; id?: string }[],
-  // NEW: the address of the booking being checked FOR — needed to
-  // detect the same-address exception. Optional and defaults to
-  // undefined; when omitted, behaves as "no same-address match
-  // possible", which is the safe (slightly conservative) direction —
-  // see the buffer comment below for why that's fine.
   newBookingAddress?: { pincode?: string | null; full_address?: string | null },
-  // NEW: id of the booking being checked FOR, if it already exists —
-  // excluded from the comparison loop below so a booking never
-  // conflicts with ITSELF. Before this, adding the travel buffer meant
-  // every already-assigned booking's own row satisfied its own
-  // buffered overlap check (since a buffer > 0 always overlaps an
-  // identical start/end time), making every assigned worker show a
-  // false "conflict" and every unassigned booking show "No workers
-  // free" — this fixes that regression.
   excludeBookingId?: string
 ): boolean {
   if (!worker.is_available) return false
@@ -239,16 +193,10 @@ function isWorkerAvailableAt(
   if (dayEntry) {
     if (!dayEntry.enabled) return false
     const slotMins = localSlot.getHours() * 60 + localSlot.getMinutes()
-    // FIXED: previously only checked the slot's START time against the
-    // shift window, so a job starting just before shift-end could
-    // appear bookable even though it would run past closing time. Now
-    // also checks the job's full duration fits before the shift ends.
     const slotEndMins = slotMins + durationMins
     if (slotMins < timeToMins(dayEntry.start) || slotEndMins > timeToMins(dayEntry.end)) return false
     for (const b of (dayEntry.breaks ?? [])) {
       if (slotMins >= timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
-      // FIXED: also block if the job would RUN INTO a break partway
-      // through, not just start inside one.
       if (slotEndMins > timeToMins(b.from) && slotMins < timeToMins(b.to)) return false
     }
   } else if (worker.hasAnyScheduleDates) {
@@ -257,31 +205,10 @@ function isWorkerAvailableAt(
 
   for (const bk of existingBookings) {
     if (bk.worker_id !== worker.id) continue
-    // FIXED: skip comparing a booking against itself — see the
-    // excludeBookingId param comment above for why this is now needed.
     if (excludeBookingId && bk.id === excludeBookingId) continue
     const bkDt  = new Date(bk.scheduled_at)
-    // FIXED: previously used the NEW booking's own duration to estimate
-    // how long this OTHER, unrelated booking occupies the worker — so
-    // a short new booking could under-estimate a long existing job's
-    // real busy window, letting a slot show as free when the worker
-    // was actually still busy. Now uses that other booking's own real
-    // duration (falls back to the new booking's duration only if the
-    // other booking's duration wasn't provided at all).
     const bkDurMins = bk.duration_mins ?? durationMins
     const bkEnd = new Date(bkDt.getTime() + bkDurMins * 60000)
-    // FIXED: this check previously only tested for a literal time
-    // overlap, with no gap required between two different jobs. The
-    // server-side check (check_slot_availability / admin_assign_worker)
-    // requires a buffer between two different jobs for the same
-    // worker: 30 minutes by default, reduced to 0 if both jobs are at
-    // the SAME address (no travel needed), or 10 minutes if the other
-    // job had Extra Time added. Without replicating this exactly, a
-    // blanket 30-minute buffer would falsely HIDE a worker the server
-    // would still accept for a same-address back-to-back job — which
-    // is exactly what caused "no worker is seen to assign" right after
-    // fixing the earlier false-positive bug. This now mirrors the
-    // server's rule precisely instead of guessing conservatively.
     const sameAddress = !!newBookingAddress?.pincode && !!bk.pincode
       && !!newBookingAddress?.full_address && !!bk.full_address
       && newBookingAddress.pincode.trim().toLowerCase() === bk.pincode.trim().toLowerCase()
@@ -311,9 +238,6 @@ function getOtpWindowStatus(scheduledAt: string, durationMins: number): {
   return { status: 'open', message: 'Customer can enter OTP now' }
 }
 
-// NEW: a tiny celebratory pop shown for ~1.6s right after a booking is
-// marked complete — small reward moment so completing work feels good,
-// not just a status flipping in a table.
 function CelebrationBurst({ show }: { show: boolean }) {
   if (!show) return null
   return (
@@ -829,7 +753,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
         p_area: area.trim() || null,
         p_city: city.trim() || null,
         p_pincode: pincode.trim(),
-                p_special_instructions: notes.trim() || null,
+        p_special_instructions: notes.trim() || null,
         p_latitude: latitude,
         p_longitude: longitude,
         p_payment_method: paymentMethod,
@@ -967,7 +891,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
               <input type="number" min={0} placeholder="Amount to charge — entered manually"
                 value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
                 className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                            <p className="text-[11px] text-slate-400 mt-1.5">
+              <p className="text-[11px] text-slate-400 mt-1.5">
                 Entered by hand — independent of the selected services' catalog
                 prices (covers phone-negotiated pricing).
               </p>
@@ -1120,20 +1044,478 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
   )
 }
 
-// ═══════════════════════════════════════════════════════════════
-// RecurringPhoneBookingModal — admin equivalent of the customer
-// app's recurring_booking_screen.dart, for creating a 7-day weekly
-// package over the phone. Reuses the SAME customer/address UI
-// blocks as PhoneBookingModal, and the SAME isWorkerAvailableAt()
-// helper + already-loaded workers/allBookings data this file
-// already uses for single-day slot checking — all availability
-// checks here are done CLIENT-SIDE as a UX preview, exactly like
-// every other slot picker in this admin app. The real, authoritative
-// gate is admin_create_recurring_package() on the server, which
-// re-verifies everything independently before actually creating
-// anything (same "preview vs source of truth" split used throughout
-// this codebase).
-// ═══════════════════════════════════════════════════════════════
+function EditManualBookingModal({ booking, services, workers, allBookings, onClose, onDone }: {
+  booking: Booking
+  services: ServiceOption[]
+  workers: Worker[]
+  allBookings: { worker_id: string; scheduled_at: string }[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const supabase = createClient()
+  const [phone, setPhone] = useState(booking.customer_phone ?? '')
+  const [name, setName] = useState(booking.customer ?? '')
+  const [serviceLines, setServiceLines] = useState<{ serviceId: string; quantity: number }[]>(
+    booking.services.length > 0
+      ? booking.services.map(s => ({ serviceId: s.serviceId ?? '', quantity: s.qty }))
+      : [{ serviceId: '', quantity: 1 }]
+  )
+  const [finalAmount, setFinalAmount] = useState(String(booking.final_amount ?? ''))
+  const [scheduledIso, setScheduledIso] = useState(booking.scheduled_at)
+  const [flatNo, setFlatNo] = useState(booking.flat_no ?? '')
+  const [building, setBuilding] = useState(booking.building ?? '')
+  const [fullAddress, setFullAddress] = useState(booking.full_address ?? '')
+  const [area, setArea] = useState(booking.area ?? '')
+  const [city, setCity] = useState(booking.city ?? '')
+  const [pincode, setPincode] = useState(booking.pincode ?? '')
+  const [latitude, setLatitude] = useState<number | null>(booking.latitude ?? null)
+  const [longitude, setLongitude] = useState<number | null>(booking.longitude ?? null)
+  const [paymentMethod, setPaymentMethod] = useState<'cod' | 'online'>(
+    booking.payment_status === 'paid' ? 'online' : 'cod'
+  )
+  const [notes, setNotes] = useState(
+    (booking.special_instructions ?? '')
+      .replace(/\s*\[Phone booking (created|edited) by admin\]/g, '')
+      .trim()
+  )
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
+  const [zoneChecking, setZoneChecking] = useState(false)
+
+  function handleMapPick(picked: PickedAddress) {
+    setLatitude(picked.lat)
+    setLongitude(picked.lng)
+    if (picked.fullAddress) setFullAddress(picked.fullAddress)
+    if (picked.area) setArea(picked.area)
+    if (picked.city) setCity(picked.city)
+    if (picked.pincode) setPincode(picked.pincode)
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    const t = setTimeout(async () => {
+      const p = pincode.trim()
+      if (!p) { if (!cancelled) { setZoneWorkerIds(null); setZoneChecking(false) }; return }
+      setZoneChecking(true)
+      const ids = await resolvePincodeWorkerIds(supabase, p)
+      if (!cancelled) { setZoneWorkerIds(ids); setZoneChecking(false) }
+    }, 400)
+    return () => { cancelled = true; clearTimeout(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pincode])
+
+  const filteredWorkers = zoneWorkerIds == null ? workers : workers.filter(w => zoneWorkerIds.has(w.id))
+
+  function addServiceLine() {
+    setServiceLines(prev => [...prev, { serviceId: '', quantity: 1 }])
+    setScheduledIso('')
+  }
+  function removeServiceLine(idx: number) {
+    setServiceLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx))
+    setScheduledIso('')
+  }
+  function updateServiceLine(idx: number, patch: Partial<{ serviceId: string; quantity: number }>) {
+    setServiceLines(prev => prev.map((line, i) => i === idx ? { ...line, ...patch } : line))
+    setScheduledIso('')
+  }
+
+  const durationMins = serviceLines.reduce((sum, line) => {
+    const svc = services.find(s => s.id === line.serviceId)
+    if (!svc) return sum
+    return sum + (svc.duration_minutes ?? 60) * Math.max(1, line.quantity)
+  }, 0)
+
+  const validLines = serviceLines.filter(l => l.serviceId)
+  const finalAmountNum = Number(finalAmount)
+
+  const canSubmit = phone.trim().length >= 10 && validLines.length > 0 && scheduledIso &&
+    fullAddress.trim() && pincode.trim() &&
+    finalAmount.trim() !== '' && finalAmountNum > 0
+
+  async function submit() {
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_edit_manual_booking', {
+        p_booking_id: booking.id,
+        p_customer_phone: normalizePhone(phone),
+        p_customer_name: name.trim() || null,
+        p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
+        p_scheduled_at: scheduledIso,
+        p_final_amount: finalAmountNum,
+        p_flat_no: flatNo.trim() || null,
+        p_building: building.trim() || null,
+        p_full_address: fullAddress.trim(),
+        p_area: area.trim() || null,
+        p_city: city.trim() || null,
+        p_pincode: pincode.trim(),
+        p_special_instructions: notes.trim() || null,
+        p_latitude: latitude,
+        p_longitude: longitude,
+        p_payment_method: paymentMethod,
+      })
+      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
+      if (!data?.success) {
+        const reasonMap: Record<string, string> = {
+          not_found: 'Booking not found.',
+          not_manual_booking: 'Only phone bookings can be edited this way.',
+          cannot_edit_status: 'This booking can no longer be edited (work has started, or it is finished/cancelled).',
+          no_workers: 'No worker is available at this time slot for this pincode.',
+          slot_full: 'This slot is already full — no free worker at that time.',
+          no_services: 'Please add at least one service.',
+          invalid_amount: 'Please enter a valid final amount.',
+          service_not_found: 'One of the selected services could not be found.',
+        }
+        setError(reasonMap[data?.reason] ?? (data?.message || 'Could not save changes.'))
+        setSubmitting(false)
+        return
+      }
+      setDone(true)
+      setSubmitting(false)
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not save changes.')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <div>
+            <h2 className="text-lg font-black text-slate-800">✏️ Edit Phone Booking</h2>
+            <p className="text-xs text-slate-400 mt-0.5">#{booking.id.slice(0,8).toUpperCase()}</p>
+          </div>
+          <button onClick={onClose}
+            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+        </div>
+
+        {done ? (
+          <div className="px-6 py-6 space-y-4">
+            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
+              <p className="text-3xl mb-2">✅</p>
+              <p className="font-black text-slate-800">Changes saved</p>
+            </div>
+            <button onClick={onDone}
+              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Customer</p>
+              <div className="grid grid-cols-2 gap-3">
+                <input type="tel" placeholder="Phone number *" value={phone} onChange={e => setPhone(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Name" value={name} onChange={e => setName(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Services</p>
+                <button type="button" onClick={addServiceLine}
+                  className="text-[11px] font-bold text-cyan-700 hover:text-cyan-800">
+                  + Add another service
+                </button>
+              </div>
+              <div className="space-y-2">
+                {serviceLines.map((line, idx) => (
+                  <div key={idx} className="grid grid-cols-3 gap-3">
+                    <select value={line.serviceId}
+                      onChange={e => updateServiceLine(idx, { serviceId: e.target.value })}
+                      className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                      <option value="">Select service...</option>
+                      {services.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
+                      ))}
+                    </select>
+                    <div className="flex items-center gap-2">
+                      <input type="number" min={1} value={line.quantity}
+                        onChange={e => updateServiceLine(idx, { quantity: Math.max(1, Number(e.target.value)) })}
+                        className="flex-1 px-3 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                      {serviceLines.length > 1 && (
+                        <button type="button" onClick={() => removeServiceLine(idx)}
+                          className="w-9 h-9 flex-shrink-0 rounded-lg flex items-center justify-center bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
+                Final Amount (₹)
+              </p>
+              <input type="number" min={0} value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Payment</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button type="button" onClick={() => setPaymentMethod('cod')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{
+                    background:  paymentMethod === 'cod' ? '#ECFEFF' : '#F8FAFC',
+                    color:       paymentMethod === 'cod' ? '#0891B2' : '#64748B',
+                    borderColor: paymentMethod === 'cod' ? '#0891B2' : '#E2E8F0',
+                  }}>
+                  💵 Cash on Delivery
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Worker collects cash later</p>
+                </button>
+                <button type="button" onClick={() => setPaymentMethod('online')}
+                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
+                  style={{
+                    background:  paymentMethod === 'online' ? '#ECFDF5' : '#F8FAFC',
+                    color:       paymentMethod === 'online' ? '#059669' : '#64748B',
+                    borderColor: paymentMethod === 'online' ? '#059669' : '#E2E8F0',
+                  }}>
+                  📱 Online (QR)
+                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Customer already paid — marks as paid</p>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Address</p>
+              <div className="mb-3">
+                <AddressMapPicker
+                  onPick={handleMapPick}
+                  initialLat={latitude}
+                  initialLng={longitude}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Building / Society" value={building} onChange={e => setBuilding(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+              <input type="text" placeholder="Full address *" value={fullAddress} onChange={e => setFullAddress(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 mb-3"/>
+              <div className="grid grid-cols-3 gap-3">
+                <input type="text" placeholder="Area" value={area} onChange={e => setArea(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="City" value={city} onChange={e => setCity(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+                <input type="text" placeholder="Pincode *" value={pincode}
+                  onChange={e => { setPincode(e.target.value); setScheduledIso('') }}
+                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
+              {zoneChecking && (
+                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode...</p>
+              )}
+              {!zoneChecking && zoneWorkerIds != null && (
+                <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
+                  <p className="text-[11px] text-cyan-700 font-semibold">
+                    📐 {zoneWorkerIds.size} worker{zoneWorkerIds.size === 1 ? '' : 's'} cover pincode {pincode.trim()}.
+                  </p>
+                </div>
+              )}
+              <SlotPicker
+                workers={filteredWorkers}
+                durationMins={durationMins}
+                existingBookings={allBookings.filter(bk => bk.scheduled_at !== booking.scheduled_at || bk.worker_id !== booking.worker_id)}
+                value={scheduledIso}
+                onChange={setScheduledIso}
+                emptyHint={
+                  !pincode.trim()
+                    ? 'Enter a pincode above to check real-time availability.'
+                    : 'No worker covers this pincode yet — assign one under Workers → Areas.'
+                }
+              />
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Notes (optional)</p>
+              <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 resize-none"/>
+            </div>
+
+            {error && (
+              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+                <p className="text-xs font-bold text-red-600">{error}</p>
+              </div>
+            )}
+
+            <button onClick={submit} disabled={!canSubmit || submitting}
+              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
+              {submitting ? '...' : '✏️ Save Changes'}
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
+  workers: Worker[]
+  allBookings: { worker_id: string; scheduled_at: string }[]
+  onClose: () => void
+  onDone: () => void
+}) {
+  const supabase = createClient()
+  const [workerId, setWorkerId] = useState('')
+  const [scheduledIso, setScheduledIso] = useState('')
+  const [durationMins, setDurationMins] = useState(60)
+  const [note, setNote] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState(false)
+
+  const selectedWorker = workers.find(w => w.id === workerId)
+  const filteredWorkers = selectedWorker ? [selectedWorker] : []
+
+  const canSubmit = workerId && scheduledIso && durationMins > 0
+
+  async function submit() {
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const { data, error: rpcError } = await supabase.rpc('admin_block_slot', {
+        p_worker_id: workerId,
+        p_scheduled_at: scheduledIso,
+        p_duration_minutes: durationMins,
+        p_note: note.trim() || null,
+      })
+      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
+      if (!data?.success) {
+        setError(data?.message || 'Could not block this slot.')
+        setSubmitting(false)
+        return
+      }
+      setDone(true)
+      setSubmitting(false)
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not block this slot.')
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+          <div>
+            <h2 className="text-lg font-black text-slate-800">🚫 Block Slot</h2>
+            <p className="text-xs text-slate-400 mt-0.5">Hold a worker's time without a real booking</p>
+          </div>
+          <button onClick={onClose}
+            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+        </div>
+
+        {done ? (
+          <div className="px-6 py-6 space-y-4">
+            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
+              <p className="text-3xl mb-2">✅</p>
+              <p className="font-black text-slate-800">Slot blocked</p>
+              <p className="text-xs text-slate-500 mt-1">
+                This worker will now show as unavailable for that window.
+              </p>
+            </div>
+            <button onClick={onDone}
+              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)' }}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Worker</p>
+              <select value={workerId} onChange={e => { setWorkerId(e.target.value); setScheduledIso('') }}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
+                <option value="">Select worker...</option>
+                {workers.map(w => (
+                  <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Duration (minutes)</p>
+              <input type="number" min={15} step={15} value={durationMins}
+                onChange={e => { setDurationMins(Math.max(15, Number(e.target.value))); setScheduledIso('') }}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
+              <SlotPicker
+                workers={filteredWorkers}
+                durationMins={durationMins}
+                existingBookings={allBookings}
+                value={scheduledIso}
+                onChange={setScheduledIso}
+                emptyHint="Select a worker above first."
+              />
+            </div>
+
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Reason (optional)</p>
+              <input type="text" placeholder="e.g. Negotiating price on call" value={note} onChange={e => setNote(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
+            </div>
+
+            <p className="text-[11px] text-slate-400">
+              This bypasses normal booking checks and reserves capacity directly — it
+              won't notify the worker or a customer, it just keeps this window off the table
+              for real bookings.
+            </p>
+
+            {error && (
+              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+                <p className="text-xs font-bold text-red-600">{error}</p>
+              </div>
+            )}
+
+            <button onClick={submit} disabled={!canSubmit || submitting}
+              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)' }}>
+              {submitting ? '...' : '🚫 Block This Slot'}
+            </button>
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+async function resolvePincodeWorkerIds(
+  supabase: any, pincode: string | null
+): Promise<Set<string> | null> {
+  if (!pincode || pincode.trim() === '') return null
+  try {
+    const { data: rows } = await supabase
+      .from('worker_pincodes')
+      .select('worker_id')
+      .eq('pincode', pincode.trim())
+    const ids = new Set<string>((rows ?? []).map((r: any) => r.worker_id as string))
+    return ids.size === 0 ? null : ids
+  } catch {
+    return null
+  }
+}
 
 function timeSlotTo24h(slot: string): string {
   const [time, period] = slot.split(' ')
@@ -1271,8 +1653,6 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
 
   const validServiceLines = serviceLines.filter(l => l.serviceId)
 
-  // Combined duration + catalog price across every selected service —
-  // same computation pattern as PhoneBookingModal's multi-service total.
   const durationMins = validServiceLines.reduce((sum, line) => {
     const svc = services.find(s => s.id === line.serviceId)
     if (!svc) return sum
@@ -1721,469 +2101,13 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
   )
 }
 
-function EditManualBookingModal({ booking, services, workers, allBookings, onClose, onDone }: {
-  booking: Booking
-  services: ServiceOption[]
-  workers: Worker[]
-  allBookings: { worker_id: string; scheduled_at: string }[]
-  onClose: () => void
-  onDone: () => void
-}) {
-  const supabase = createClient()
-  const [phone, setPhone] = useState(booking.customer_phone ?? '')
-  const [name, setName] = useState(booking.customer ?? '')
-  const [serviceLines, setServiceLines] = useState<{ serviceId: string; quantity: number }[]>(
-    booking.services.length > 0
-      ? booking.services.map(s => ({ serviceId: s.serviceId ?? '', quantity: s.qty }))
-      : [{ serviceId: '', quantity: 1 }]
-  )
-  const [finalAmount, setFinalAmount] = useState(String(booking.final_amount ?? ''))
-  const [scheduledIso, setScheduledIso] = useState(booking.scheduled_at)
-  const [flatNo, setFlatNo] = useState(booking.flat_no ?? '')
-  const [building, setBuilding] = useState(booking.building ?? '')
-  const [fullAddress, setFullAddress] = useState(booking.full_address ?? '')
-  const [area, setArea] = useState(booking.area ?? '')
-  const [city, setCity] = useState(booking.city ?? '')
-  const [pincode, setPincode] = useState(booking.pincode ?? '')
-    const [latitude, setLatitude] = useState<number | null>(booking.latitude ?? null)
-  const [longitude, setLongitude] = useState<number | null>(booking.longitude ?? null)
-  const [paymentMethod, setPaymentMethod] = useState<'cod' | 'online'>(
-    booking.payment_status === 'paid' ? 'online' : 'cod'
-  )
-  const [notes, setNotes] = useState(
-    (booking.special_instructions ?? '')
-      .replace(/\s*\[Phone booking (created|edited) by admin\]/g, '')
-      .trim()
-  )
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [done, setDone] = useState(false)
-
-  const [zoneWorkerIds, setZoneWorkerIds] = useState<Set<string> | null>(null)
-  const [zoneChecking, setZoneChecking] = useState(false)
-
-  function handleMapPick(picked: PickedAddress) {
-    setLatitude(picked.lat)
-    setLongitude(picked.lng)
-    if (picked.fullAddress) setFullAddress(picked.fullAddress)
-    if (picked.area) setArea(picked.area)
-    if (picked.city) setCity(picked.city)
-    if (picked.pincode) setPincode(picked.pincode)
-  }
-
-  useEffect(() => {
-    let cancelled = false
-    const t = setTimeout(async () => {
-      const p = pincode.trim()
-      if (!p) { if (!cancelled) { setZoneWorkerIds(null); setZoneChecking(false) }; return }
-      setZoneChecking(true)
-      const ids = await resolvePincodeWorkerIds(supabase, p)
-      if (!cancelled) { setZoneWorkerIds(ids); setZoneChecking(false) }
-    }, 400)
-    return () => { cancelled = true; clearTimeout(t) }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pincode])
-
-  const filteredWorkers = zoneWorkerIds == null ? workers : workers.filter(w => zoneWorkerIds.has(w.id))
-
-  function addServiceLine() {
-    setServiceLines(prev => [...prev, { serviceId: '', quantity: 1 }])
-    setScheduledIso('')
-  }
-  function removeServiceLine(idx: number) {
-    setServiceLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx))
-    setScheduledIso('')
-  }
-  function updateServiceLine(idx: number, patch: Partial<{ serviceId: string; quantity: number }>) {
-    setServiceLines(prev => prev.map((line, i) => i === idx ? { ...line, ...patch } : line))
-    setScheduledIso('')
-  }
-
-  const durationMins = serviceLines.reduce((sum, line) => {
-    const svc = services.find(s => s.id === line.serviceId)
-    if (!svc) return sum
-    return sum + (svc.duration_minutes ?? 60) * Math.max(1, line.quantity)
-  }, 0)
-
-  const validLines = serviceLines.filter(l => l.serviceId)
-  const finalAmountNum = Number(finalAmount)
-
-  const canSubmit = phone.trim().length >= 10 && validLines.length > 0 && scheduledIso &&
-    fullAddress.trim() && pincode.trim() &&
-    finalAmount.trim() !== '' && finalAmountNum > 0
-
-  async function submit() {
-    if (!canSubmit) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      const { data, error: rpcError } = await supabase.rpc('admin_edit_manual_booking', {
-        p_booking_id: booking.id,
-        p_customer_phone: normalizePhone(phone),
-        p_customer_name: name.trim() || null,
-        p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
-        p_scheduled_at: scheduledIso,
-        p_final_amount: finalAmountNum,
-        p_flat_no: flatNo.trim() || null,
-        p_building: building.trim() || null,
-        p_full_address: fullAddress.trim(),
-        p_area: area.trim() || null,
-        p_city: city.trim() || null,
-        p_pincode: pincode.trim(),
-        p_special_instructions: notes.trim() || null,
-        p_latitude: latitude,
-        p_longitude: longitude,
-        p_payment_method: paymentMethod,
-      })
-      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
-      if (!data?.success) {
-        const reasonMap: Record<string, string> = {
-          not_found: 'Booking not found.',
-          not_manual_booking: 'Only phone bookings can be edited this way.',
-          cannot_edit_status: 'This booking can no longer be edited (work has started, or it is finished/cancelled).',
-          no_workers: 'No worker is available at this time slot for this pincode.',
-          slot_full: 'This slot is already full — no free worker at that time.',
-          no_services: 'Please add at least one service.',
-          invalid_amount: 'Please enter a valid final amount.',
-          service_not_found: 'One of the selected services could not be found.',
-        }
-        setError(reasonMap[data?.reason] ?? (data?.message || 'Could not save changes.'))
-        setSubmitting(false)
-        return
-      }
-      setDone(true)
-      setSubmitting(false)
-    } catch (e: any) {
-      setError(e?.message ?? 'Could not save changes.')
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <>
-      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
-      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
-          <div>
-            <h2 className="text-lg font-black text-slate-800">✏️ Edit Phone Booking</h2>
-            <p className="text-xs text-slate-400 mt-0.5">#{booking.id.slice(0,8).toUpperCase()}</p>
-          </div>
-          <button onClick={onClose}
-            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
-        </div>
-
-        {done ? (
-          <div className="px-6 py-6 space-y-4">
-            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
-              <p className="text-3xl mb-2">✅</p>
-              <p className="font-black text-slate-800">Changes saved</p>
-            </div>
-            <button onClick={onDone}
-              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
-              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
-              Done
-            </button>
-          </div>
-        ) : (
-          <div className="px-6 py-5 space-y-4">
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Customer</p>
-              <div className="grid grid-cols-2 gap-3">
-                <input type="tel" placeholder="Phone number *" value={phone} onChange={e => setPhone(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="Name" value={name} onChange={e => setName(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Services</p>
-                <button type="button" onClick={addServiceLine}
-                  className="text-[11px] font-bold text-cyan-700 hover:text-cyan-800">
-                  + Add another service
-                </button>
-              </div>
-              <div className="space-y-2">
-                {serviceLines.map((line, idx) => (
-                  <div key={idx} className="grid grid-cols-3 gap-3">
-                    <select value={line.serviceId}
-                      onChange={e => updateServiceLine(idx, { serviceId: e.target.value })}
-                      className="col-span-2 px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
-                      <option value="">Select service...</option>
-                      {services.map(s => (
-                        <option key={s.id} value={s.id}>{s.name}{s.base_price != null ? ` — ₹${s.base_price}` : ''}</option>
-                      ))}
-                    </select>
-                    <div className="flex items-center gap-2">
-                      <input type="number" min={1} value={line.quantity}
-                        onChange={e => updateServiceLine(idx, { quantity: Math.max(1, Number(e.target.value)) })}
-                        className="flex-1 px-3 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                      {serviceLines.length > 1 && (
-                        <button type="button" onClick={() => removeServiceLine(idx)}
-                          className="w-9 h-9 flex-shrink-0 rounded-lg flex items-center justify-center bg-red-50 text-red-500 border border-red-200 hover:bg-red-100 transition-all">
-                          ✕
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
-                Final Amount (₹)
-              </p>
-                            <input type="number" min={0} value={finalAmount} onChange={e => setFinalAmount(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Payment</p>
-              <div className="grid grid-cols-2 gap-3">
-                <button type="button" onClick={() => setPaymentMethod('cod')}
-                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
-                  style={{
-                    background:  paymentMethod === 'cod' ? '#ECFEFF' : '#F8FAFC',
-                    color:       paymentMethod === 'cod' ? '#0891B2' : '#64748B',
-                    borderColor: paymentMethod === 'cod' ? '#0891B2' : '#E2E8F0',
-                  }}>
-                  💵 Cash on Delivery
-                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Worker collects cash later</p>
-                </button>
-                <button type="button" onClick={() => setPaymentMethod('online')}
-                  className="px-4 py-3 rounded-xl text-sm font-bold border transition-all text-left"
-                  style={{
-                    background:  paymentMethod === 'online' ? '#ECFDF5' : '#F8FAFC',
-                    color:       paymentMethod === 'online' ? '#059669' : '#64748B',
-                    borderColor: paymentMethod === 'online' ? '#059669' : '#E2E8F0',
-                  }}>
-                  📱 Online (QR)
-                  <p className="text-[10px] font-normal mt-0.5 opacity-70">Customer already paid — marks as paid</p>
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Address</p>
-              <div className="mb-3">
-                <AddressMapPicker
-                  onPick={handleMapPick}
-                  initialLat={latitude}
-                  initialLng={longitude}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <input type="text" placeholder="Flat / House no." value={flatNo} onChange={e => setFlatNo(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="Building / Society" value={building} onChange={e => setBuilding(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-              </div>
-              <input type="text" placeholder="Full address *" value={fullAddress} onChange={e => setFullAddress(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 mb-3"/>
-              <div className="grid grid-cols-3 gap-3">
-                <input type="text" placeholder="Area" value={area} onChange={e => setArea(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="City" value={city} onChange={e => setCity(e.target.value)}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <input type="text" placeholder="Pincode *" value={pincode}
-                  onChange={e => { setPincode(e.target.value); setScheduledIso('') }}
-                  className="px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-              </div>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
-              {zoneChecking && (
-                <p className="text-[11px] text-slate-400 mb-2">Checking worker coverage for this pincode...</p>
-              )}
-              {!zoneChecking && zoneWorkerIds != null && (
-                <div className="mb-2 px-3 py-2 rounded-xl bg-cyan-50 border border-cyan-200">
-                  <p className="text-[11px] text-cyan-700 font-semibold">
-                    📐 {zoneWorkerIds.size} worker{zoneWorkerIds.size === 1 ? '' : 's'} cover pincode {pincode.trim()}.
-                  </p>
-                </div>
-              )}
-              <SlotPicker
-                workers={filteredWorkers}
-                durationMins={durationMins}
-                existingBookings={allBookings.filter(bk => bk.scheduled_at !== booking.scheduled_at || bk.worker_id !== booking.worker_id)}
-                value={scheduledIso}
-                onChange={setScheduledIso}
-                emptyHint={
-                  !pincode.trim()
-                    ? 'Enter a pincode above to check real-time availability.'
-                    : 'No worker covers this pincode yet — assign one under Workers → Areas.'
-                }
-              />
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Notes (optional)</p>
-              <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200 resize-none"/>
-            </div>
-
-            {error && (
-              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
-                <p className="text-xs font-bold text-red-600">{error}</p>
-              </div>
-            )}
-
-            <button onClick={submit} disabled={!canSubmit || submitting}
-              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
-              style={{ background: 'linear-gradient(135deg,#7C3AED,#4F46E5)' }}>
-              {submitting ? '...' : '✏️ Save Changes'}
-            </button>
-          </div>
-        )}
-      </div>
-    </>
-  )
-}
-
-function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
-  workers: Worker[]
-  allBookings: { worker_id: string; scheduled_at: string }[]
-  onClose: () => void
-  onDone: () => void
-}) {
-  const supabase = createClient()
-  const [workerId, setWorkerId] = useState('')
-  const [scheduledIso, setScheduledIso] = useState('')
-  const [durationMins, setDurationMins] = useState(60)
-  const [note, setNote] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [done, setDone] = useState(false)
-
-  const selectedWorker = workers.find(w => w.id === workerId)
-  const filteredWorkers = selectedWorker ? [selectedWorker] : []
-
-  const canSubmit = workerId && scheduledIso && durationMins > 0
-
-  async function submit() {
-    if (!canSubmit) return
-    setSubmitting(true)
-    setError(null)
-    try {
-      const { data, error: rpcError } = await supabase.rpc('admin_block_slot', {
-        p_worker_id: workerId,
-        p_scheduled_at: scheduledIso,
-        p_duration_minutes: durationMins,
-        p_note: note.trim() || null,
-      })
-      if (rpcError) { setError(rpcError.message); setSubmitting(false); return }
-      if (!data?.success) {
-        setError(data?.message || 'Could not block this slot.')
-        setSubmitting(false)
-        return
-      }
-      setDone(true)
-      setSubmitting(false)
-    } catch (e: any) {
-      setError(e?.message ?? 'Could not block this slot.')
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <>
-      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
-      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
-          <div>
-            <h2 className="text-lg font-black text-slate-800">🚫 Block Slot</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Hold a worker's time without a real booking</p>
-          </div>
-          <button onClick={onClose}
-            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
-        </div>
-
-        {done ? (
-          <div className="px-6 py-6 space-y-4">
-            <div className="rounded-2xl p-5 text-center bg-green-50 border border-green-200">
-              <p className="text-3xl mb-2">✅</p>
-              <p className="font-black text-slate-800">Slot blocked</p>
-              <p className="text-xs text-slate-500 mt-1">
-                This worker will now show as unavailable for that window.
-              </p>
-            </div>
-            <button onClick={onDone}
-              className="w-full h-11 rounded-xl font-black text-sm text-white active:scale-[0.98] transition-all"
-              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)' }}>
-              Done
-            </button>
-          </div>
-        ) : (
-          <div className="px-6 py-5 space-y-4">
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Worker</p>
-              <select value={workerId} onChange={e => { setWorkerId(e.target.value); setScheduledIso('') }}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200">
-                <option value="">Select worker...</option>
-                {workers.map(w => (
-                  <option key={w.id} value={w.id}>{w.name} — {w.phone}</option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Duration (minutes)</p>
-              <input type="number" min={15} step={15} value={durationMins}
-                onChange={e => { setDurationMins(Math.max(15, Number(e.target.value))); setScheduledIso('') }}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Date & Time</p>
-              <SlotPicker
-                workers={filteredWorkers}
-                durationMins={durationMins}
-                existingBookings={allBookings}
-                value={scheduledIso}
-                onChange={setScheduledIso}
-                emptyHint="Select a worker above first."
-              />
-            </div>
-
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">Reason (optional)</p>
-              <input type="text" placeholder="e.g. Negotiating price on call" value={note} onChange={e => setNote(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-            </div>
-
-            <p className="text-[11px] text-slate-400">
-              This bypasses normal booking checks and reserves capacity directly — it
-              won't notify the worker or a customer, it just keeps this window off the table
-              for real bookings.
-            </p>
-
-            {error && (
-              <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
-                <p className="text-xs font-bold text-red-600">{error}</p>
-              </div>
-            )}
-
-            <button onClick={submit} disabled={!canSubmit || submitting}
-              className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
-              style={{ background: 'linear-gradient(135deg,#DC2626,#B91C1C)' }}>
-              {submitting ? '...' : '🚫 Block This Slot'}
-            </button>
-          </div>
-        )}
-      </div>
-    </>
-  )
-}
-
 function Drawer({
-  b, workers, allBookings, zoneWorkerIds, onClose, onDone, onEditManual
+  b, workers, allBookings, zoneWorkerIds, isOwner, onClose, onDone, onEditManual
 }: {
   b: Booking; workers: Worker[]
   allBookings: { worker_id: string; scheduled_at: string; duration_mins?: number; pincode?: string | null; full_address?: string | null; extra_time_mins?: number }[]
   zoneWorkerIds: Set<string> | null
+  isOwner: boolean
   onClose: () => void; onDone: () => void
   onEditManual: () => void
 }) {
@@ -2194,24 +2118,8 @@ function Drawer({
   const [rescheduleError, setRescheduleError] = useState<string | null>(null)
   const supabase = createClient()
   const cfg = STATUS[b.status] ?? STATUS.pending
-  // FIXED: previously used b.service_duration — the generic CATALOG
-  // DEFAULT duration for this service type, not this specific
-  // booking's actual duration. If the catalog default differs from
-  // what was actually booked (e.g. a phone booking customized to a
-  // shorter/longer time, or the service's default changed after this
-  // booking was made), this extended or shrank the checked slot beyond
-  // the real one — which could make a genuinely free worker appear
-  // busy (checking too long a window) or a genuinely busy worker
-  // appear free (checking too short a window). Now uses the same
-  // accurate per-booking duration formula already used for the ⏱
-  // duration chip and for slimBookings' own duration_mins elsewhere in
-  // this file: actual service duration -> reserved slot duration ->
-  // catalog default -> 60 min, plus any Extra Time actually added.
   const durationMins = (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
     + (b.extra_time_mins ?? 0)
-  // Passed into every isWorkerAvailableAt() call below so the
-  // same-address exception (0-minute buffer instead of 30) applies
-  // correctly for THIS booking's own address.
   const thisBookingAddress = { pincode: b.pincode, full_address: b.full_address }
   const availableForSlot = workers.filter(w =>
     w.id === b.worker_id ||
@@ -2234,16 +2142,13 @@ function Drawer({
       return
     }
     setBusy(true)
-    // FIXED: previously a raw, unchecked update — this is exactly how
-    // real double-bookings got saved, since nothing server-side ever
-    // re-verified the worker was actually free. Now goes through
-    // admin_assign_worker, which re-runs the full holiday/schedule/
-    // conflict check (using each booking's real duration) before
-    // allowing the assignment.
-    const { data, error } = await supabase.rpc('admin_assign_worker', {
-      p_booking_id: b.id,
-      p_worker_id: selW,
+    const res = await fetch('/api/admin-auth/assign-worker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: b.id, worker_id: selW }),
     })
+    const data = await res.json()
+    const error = res.ok ? null : { message: data.error }
     if (error) {
       alert(error.message)
       setBusy(false)
@@ -2631,27 +2536,36 @@ function Drawer({
 
           <div>
             <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
-              Pricing {b.services.length > 1 ? `· ${b.services.length} services` : ''}
+              {isOwner ? `Pricing ${b.services.length > 1 ? `· ${b.services.length} services` : ''}` : 'Order Amount'}
             </p>
-            <div className="rounded-2xl overflow-hidden border border-slate-200">
-              {[
-                ...(b.services.length > 1
-                  ? b.services.map(s => ({
-                      label: s.qty > 1 ? `${s.name} ×${s.qty}` : s.name,
-                      value: `₹${(s.unit_price * s.qty).toLocaleString('en-IN')}`,
-                      cls: 'text-slate-700',
-                    }))
-                  : [{ label: 'Service', value: b.service_name, cls: 'text-slate-700' }]),
-                { label: 'Base Price', value: `₹${b.base_price.toLocaleString('en-IN')}`, cls: 'text-slate-700' },
-                { label: 'Discount',   value: b.discount_amount > 0 ? `-₹${b.discount_amount.toLocaleString('en-IN')}` : '—', cls: b.discount_amount > 0 ? 'text-green-600' : 'text-slate-400' },
-                { label: 'Cash Due (Worker)', value: `₹${b.final_amount.toLocaleString('en-IN')}`, cls: 'text-cyan-700 font-black', bg: 'bg-cyan-50' },
-              ].map((r, i, arr) => (
-                <div key={`${r.label}-${i}`} className={`flex items-center justify-between px-4 py-3 ${(r as any).bg ?? ''} ${i < arr.length - 1 ? 'border-b border-slate-100' : ''}`}>
-                  <span className="text-xs text-slate-400">{r.label}</span>
-                  <span className={`text-sm font-semibold ${r.cls}`}>{r.value}</span>
+            {isOwner ? (
+              <div className="rounded-2xl overflow-hidden border border-slate-200">
+                {[
+                  ...(b.services.length > 1
+                    ? b.services.map(s => ({
+                        label: s.qty > 1 ? `${s.name} ×${s.qty}` : s.name,
+                        value: `₹${(s.unit_price * s.qty).toLocaleString('en-IN')}`,
+                        cls: 'text-slate-700',
+                      }))
+                    : [{ label: 'Service', value: b.service_name, cls: 'text-slate-700' }]),
+                  { label: 'Base Price', value: `₹${b.base_price.toLocaleString('en-IN')}`, cls: 'text-slate-700' },
+                  { label: 'Discount',   value: b.discount_amount > 0 ? `-₹${b.discount_amount.toLocaleString('en-IN')}` : '—', cls: b.discount_amount > 0 ? 'text-green-600' : 'text-slate-400' },
+                  { label: 'Cash Due (Worker)', value: `₹${b.final_amount.toLocaleString('en-IN')}`, cls: 'text-cyan-700 font-black', bg: 'bg-cyan-50' },
+                ].map((r, i, arr) => (
+                  <div key={`${r.label}-${i}`} className={`flex items-center justify-between px-4 py-3 ${(r as any).bg ?? ''} ${i < arr.length - 1 ? 'border-b border-slate-100' : ''}`}>
+                    <span className="text-xs text-slate-400">{r.label}</span>
+                    <span className={`text-sm font-semibold ${r.cls}`}>{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-2xl overflow-hidden border border-slate-200">
+                <div className="flex items-center justify-between px-4 py-3 bg-cyan-50">
+                  <span className="text-xs text-slate-400">Cash Due (Worker)</span>
+                  <span className="text-sm font-black text-cyan-700">₹{b.final_amount.toLocaleString('en-IN')}</span>
                 </div>
-              ))}
-            </div>
+              </div>
+            )}
             {b.extra_time_mins > 0 && (
               <div className="mt-3 rounded-2xl px-4 py-3 flex items-center gap-3 bg-violet-50 border border-violet-200">
                 <span className="text-lg">⏱️</span>
@@ -2733,23 +2647,34 @@ function Drawer({
   )
 }
 
-async function resolvePincodeWorkerIds(
-  supabase: any, pincode: string | null
-): Promise<Set<string> | null> {
-  if (!pincode || pincode.trim() === '') return null
-  try {
-    const { data: rows } = await supabase
-      .from('worker_pincodes')
-      .select('worker_id')
-      .eq('pincode', pincode.trim())
-    const ids = new Set<string>((rows ?? []).map((r: any) => r.worker_id as string))
-    return ids.size === 0 ? null : ids
-  } catch {
-    return null
-  }
-}
+type AdminSession = { id: string; email: string; role: 'owner' | 'assistant'; full_name?: string }
 
 export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' }) {
+  const [session, setSession] = useState<AdminSession | null>(null)
+  // booking_id -> id of whoever most recently assigned/reassigned it.
+  // Used to decide whether the CURRENT logged-in assistant is allowed
+  // to unassign this specific booking (owner is never restricted).
+  const [assignedByIdMap, setAssignedByIdMap] = useState<Record<string, string>>({})
+  // booking_id -> display name of whoever most recently assigned/reassigned
+  // it (owner or assistant). Owner-only UI: lets the owner see at a glance
+  // which assistant made a given assignment.
+  const [assignedByNameMap, setAssignedByNameMap] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    fetch('/api/admin-auth/me')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => setSession(data?.session ?? null))
+  }, [])
+
+  const isOwner = session?.role === 'owner'
+  // Any logged-in admin_user (owner or assistant) can unassign any
+  // booking — no longer restricted to whoever made the original
+  // assignment. assignedByIdMap/assignedByNameMap are kept and still
+  // loaded purely to power the owner-only "assigned by" tag on cards.
+  function canUnassign(_bookingId: string): boolean {
+    return !!session
+  }
+
   const [bookings,  setBookings]  = useState<Booking[]>([])
   const [workers,   setWorkers]   = useState<Worker[]>([])
   const [services,  setServices]  = useState<ServiceOption[]>([])
@@ -2760,18 +2685,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const [selected,  setSelected]  = useState<Booking | null>(null)
   const [mapFor,    setMapFor]    = useState<Booking | null>(null)
   const [selectedDate, setSelectedDate] = useState<string>('all')
-  // Tracks a real Date behind whichever quick-date button or the custom
-  // date picker is active, so load() can widen its fetch range to
-  // actually include that date even when scope === 'month' would
-  // otherwise silently exclude any date outside the current calendar
-  // month (previously: picking a past/future date via the 🗓️ picker
-  // showed "no bookings found" even when real bookings existed there,
-  // because the underlying query never fetched them at all — this was
-  // a pure client-side filter over an already-restricted dataset).
   const [pinnedDate, setPinnedDate] = useState<Date | null>(null)
   const [selectedArea, setSelectedArea] = useState<string>('all')
-  // NEW: filter the whole page down to just one professional's
-  // assigned bookings — same "all" sentinel pattern as selectedArea.
   const [selectedWorker, setSelectedWorker] = useState<string>('all')
   const [assignMap, setAssignMap] = useState<Record<string,string>>({})
   const [assigning, setAssigning] = useState<string | null>(null)
@@ -2781,46 +2696,16 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const [showEditModal, setShowEditModal] = useState(false)
   const [zoneEligible, setZoneEligible] = useState<Record<string, Set<string> | null>>({})
   const [pincodeParentArea, setPincodeParentArea] = useState<Record<string, string>>({})
-  // NEW: ids of bookings that changed via the realtime subscription in
-  // the last ~3s. Used to briefly flash the row so the admin can SEE
-  // that the page is actually live, instead of only inferring it from
-  // the LiveTimer ticking somewhere else on the screen.
   const [recentlyChangedIds, setRecentlyChangedIds] = useState<Set<string>>(new Set())
-  // NEW: ids currently showing the little 🎉 celebration burst after being
-  // marked complete — purely a delight moment, no effect on real state.
   const [celebratingIds, setCelebratingIds] = useState<Set<string>>(new Set())
-  // FIXED: the "Completed · earned" stat card previously summed
-  // final_amount from whatever bookings happened to be in the currently
-  // loaded, scheduled-date-filtered list (`bookings`) — a different
-  // calculation basis than the Overview page's completion-date-based
-  // revenue, so the two pages could show different "Completed revenue"
-  // numbers for what an admin assumed was the same period. Now uses the
-  // exact same shared function as Overview.
   const [sharedCompletedRev, setSharedCompletedRev] = useState(0)
   const dateInputRef = useRef<HTMLInputElement>(null)
   const supabase = createClient()
 
-  // NEW: bulk "unassign all workers for this date" feature. Shows a
-  // confirmation modal (rather than acting immediately) since this is
-  // a destructive, multi-booking action — the admin picks which
-  // statuses to include each time, since sometimes they only want to
-  // clear still-pending "Accepted" assignments, and other times also
-  // want to pull workers off jobs already "In Progress" (e.g. a
-  // worker called in sick and everything they were assigned needs to
-  // go back into the pool, including anything they'd already started).
   const [showUnassignDateModal, setShowUnassignDateModal] = useState(false)
   const [unassignIncludeInProgress, setUnassignIncludeInProgress] = useState(false)
   const [unassigningDate, setUnassigningDate] = useState(false)
 
-  // NEW: bulk reschedule — shift a whole day's bookings by a chosen
-  // number of minutes, or move the whole day to a different calendar
-  // date while each booking keeps its own original time-of-day. Always
-  // re-checks each assigned booking's worker against the NEW time
-  // before applying (excluding the booking's own row from that check,
-  // same excludeBookingId pattern already used for the conflict
-  // badge/dropdown elsewhere in this file) — bookings whose worker
-  // would genuinely conflict at the new time are skipped rather than
-  // silently double-booking someone.
   const [showRescheduleModal, setShowRescheduleModal] = useState(false)
   const [rescheduleMode, setRescheduleMode] = useState<'offset' | 'date'>('offset')
   const [rescheduleOffsetMins, setRescheduleOffsetMins] = useState('30')
@@ -2836,22 +2721,9 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     .map(b => ({
       worker_id: b.worker_id ?? '',
       scheduled_at: b.scheduled_at,
-      // NEW: needed so isWorkerAvailableAt can exclude a booking from
-      // comparing against ITSELF — see the buffer fix below for why
-      // this became necessary.
       id: b.id,
-      // FIXED: previously omitted entirely, forcing isWorkerAvailableAt
-      // to guess this booking's duration using whatever NEW booking's
-      // duration was being checked against it. Same fallback priority
-      // as every server-side conflict check in this codebase: actual
-      // service duration -> reserved slot duration -> catalog default
-      // -> 60 min, plus any Extra Time actually added.
       duration_mins: (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
         + (b.extra_time_mins ?? 0),
-      // NEW: needed to replicate the server's same-address exception
-      // (0-minute buffer instead of 30) so the client-side "free
-      // workers" preview doesn't hide someone the server would still
-      // accept for a back-to-back job at the same building.
       pincode: b.pincode || null,
       full_address: b.full_address || null,
       extra_time_mins: b.extra_time_mins ?? 0,
@@ -2907,10 +2779,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       const now = new Date()
       let rangeStart = new Date(now.getFullYear(), now.getMonth(), 1)
       let rangeEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-      // Widen the fetch window to also cover a specific pinned date
-      // (Today/Tomorrow/Day After/custom picker) if it falls outside
-      // the current calendar month — otherwise that date's bookings
-      // were never fetched at all, past or future.
       if (pinnedDate) {
         const dayStart = new Date(pinnedDate.getFullYear(), pinnedDate.getMonth(), pinnedDate.getDate())
         const dayEnd = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1)
@@ -2926,12 +2794,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     const [{ data: bd }, { data: wd }, { data: availData }, { data: activeJobs }, { data: schedDateRows }, { data: areaRows }] =
       await Promise.all([
         bookingsQuery,
-        // FIXED: previously fetched every user with role='worker'
-        // regardless of is_active, so a deactivated worker still
-        // showed up in every assignment dropdown, conflict check, and
-        // (now) the professional filter dropdown. Filtering at the
-        // source here fixes it everywhere at once, since this same
-        // `workers` state feeds all of those.
         supabase.from('users').select('id,full_name,phone').eq('role','worker').eq('is_active', true).order('full_name'),
         supabase.from('workers').select('user_id,is_available'),
         supabase.from('bookings').select('worker_id').eq('status','in_progress'),
@@ -3020,12 +2882,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       }
     }))
 
-    // PERF: previously did one async pincode lookup PER pending/accepted
-    // booking (N+1 queries — on a busy day this could be dozens of
-    // round-trips on every single load). Now gathers every unique
-    // pincode across all bookings needing assignment and resolves them
-    // all in ONE query, then builds each booking's eligible-worker set
-    // from that single result in memory.
     const needsAssignBookings = (bd ?? []).filter((b: any) =>
       ['pending', 'accepted'].includes(b.status)
     )
@@ -3064,6 +2920,55 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     })))
 
     setLoading(false)
+
+    // Refresh who-assigned-whom for every booking that currently has a
+    // worker — powers the assistant unassign-permission check above.
+    // Kept as a plain query with NO join, so a missing/ambiguous FK on
+    // admin_users can never break the permission check itself.
+    const assignedIds = (bd ?? []).filter((b: any) => b.worker_id).map((b: any) => b.id)
+    if (assignedIds.length > 0) {
+      const { data: logRows, error: logErr } = await supabase
+        .from('booking_assignment_log')
+        .select('booking_id, performed_by, performed_at')
+        .in('booking_id', assignedIds)
+        .in('action', ['assigned', 'reassigned'])
+        .order('performed_at', { ascending: false })
+      if (logErr) console.error('assignment log fetch failed:', logErr.message)
+      const map: Record<string, string> = {}
+      const performerIds = new Set<string>()
+      for (const row of (logRows ?? []) as any[]) {
+        if (!map[row.booking_id]) {
+          map[row.booking_id] = row.performed_by
+          performerIds.add(row.performed_by)
+        }
+      }
+      setAssignedByIdMap(map)
+
+      // Names for the owner-only "assigned by" tag — best-effort, and
+      // never allowed to affect assignedByIdMap above (permissions work
+      // even if this second lookup fails for any reason).
+      if (performerIds.size > 0) {
+        const { data: userRows, error: userErr } = await supabase
+          .from('admin_users')
+          .select('id, full_name, email')
+          .in('id', Array.from(performerIds))
+        if (userErr) console.error('admin_users fetch failed:', userErr.message)
+        const idToName: Record<string, string> = {}
+        for (const u of (userRows ?? []) as any[]) {
+          idToName[u.id] = u.full_name || u.email || 'Unknown'
+        }
+        const nameMap: Record<string, string> = {}
+        for (const [bookingId, performerId] of Object.entries(map)) {
+          nameMap[bookingId] = idToName[performerId] ?? 'Unknown'
+        }
+        setAssignedByNameMap(nameMap)
+      } else {
+        setAssignedByNameMap({})
+      }
+    } else {
+      setAssignedByIdMap({})
+      setAssignedByNameMap({})
+    }
   }, [scope, pinnedDate])
 
   const loadSharedRevenue = useCallback(async () => {
@@ -3087,27 +2992,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   }, [])
 
   useEffect(() => {
-    // PERF: previously called load() directly on every single postgres
-    // change — creating a 7-day recurring package (7 inserts in quick
-    // succession) fired 7 concurrent full reloads, each doing its own
-    // fan-out of queries. Debouncing collapses any burst of changes
-    // within 800ms into a single reload, which is the fix for the most
-    // likely cause of the site freezing under real usage.
-    //
-    // NEW: also captures the changed row's id (from payload.new/old)
-    // into recentlyChangedIds BEFORE debouncing the reload, so the
-    // affected row can flash immediately — independent of whether the
-    // debounced reload has actually landed yet.
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
-    // FIXED: "cannot add postgres_changes callbacks ... after subscribe()".
-    // React 18 Strict Mode runs effects mount → cleanup → mount again in
-    // dev. If the first channel's removeChannel() cleanup hasn't fully
-    // finished before the second mount creates a channel with the SAME
-    // name, Supabase's client returns the same already-subscribed channel
-    // object for that name instead of a fresh one — and calling .on() on
-    // an already-subscribed channel throws this exact error. A unique
-    // name per mount sidesteps the whole race entirely (harmless in
-    // production too, where this collision can't happen anyway).
     const ch = supabase.channel(`bkng-${Date.now()}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
         const changedId = (payload.new as any)?.id ?? (payload.old as any)?.id
@@ -3139,12 +3024,13 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   async function quickAssign(bId: string) {
     const wId = assignMap[bId]; if (!wId) return
     setAssigning(bId)
-    // FIXED: same unchecked-raw-update bug as the drawer's assign() —
-    // now goes through the same server-side re-verification.
-    const { data, error } = await supabase.rpc('admin_assign_worker', {
-      p_booking_id: bId,
-      p_worker_id: wId,
+    const res = await fetch('/api/admin-auth/assign-worker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: bId, worker_id: wId }),
     })
+    const data = await res.json()
+    const error = res.ok ? null : { message: data.error }
     if (error || !data?.success) {
       const reasonMap: Record<string, string> = {
         not_found: 'Booking not found.',
@@ -3211,11 +3097,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     await load(); if (selected?.id === bId) setSelected(null)
   }
 
-  // NEW: unassign a SINGLE booking's worker directly from its card —
-  // distinct from the whole-day "Unassign All" bulk action built
-  // earlier. Sets the booking back to unassigned/pending, same end
-  // state as the bulk version, just scoped to one row via a normal
-  // quick-action click instead of the date-scoped confirmation modal.
   async function quickUnassign(bId: string) {
     const bk = bookings.find(b => b.id === bId)
     if (!bk) return
@@ -3223,7 +3104,13 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       `Unassign ${bk.worker || 'the worker'} from "${bk.service_name}" for ${bk.customer}?\n\n` +
       'This booking goes back to Pending, ready to be reassigned.'
     )) return
-    await supabase.from('bookings').update({ worker_id: null, status: 'pending' }).eq('id', bId)
+    const res = await fetch('/api/admin-auth/unassign-worker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking_id: bId }),
+    })
+    const data = await res.json()
+    if (!res.ok) { alert(data.error ?? 'Could not unassign.'); return }
     await load()
   }
 
@@ -3263,11 +3150,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     ).length
   }
 
-  // NEW: bookings on the currently selected date that actually HAVE a
-  // worker assigned and are in a status this action is allowed to
-  // touch. Deliberately ignores the area filter (selectedArea) — "for
-  // this date" means the whole day, not just whichever area group the
-  // admin happens to be looking at right now.
   function assignedBookingsForSelectedDate(includeInProgress: boolean) {
     if (selectedDate === 'all') return []
     const allowedStatuses = includeInProgress
@@ -3283,18 +3165,24 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   }
 
   async function bulkUnassignForSelectedDate() {
-    const targets = assignedBookingsForSelectedDate(unassignIncludeInProgress)
+    const allTargets = assignedBookingsForSelectedDate(unassignIncludeInProgress)
+    // Assistants only bulk-unassign what THEY personally assigned —
+    // same rule as the single-booking button above.
+    const targets = allTargets.filter(b => canUnassign(b.id))
     if (targets.length === 0) { setShowUnassignDateModal(false); return }
     setUnassigningDate(true)
     try {
-      const { error } = await supabase
-        .from('bookings')
-        .update({ worker_id: null, status: 'pending' })
-        .in('id', targets.map(b => b.id))
-      if (error) {
-        alert(`Could not unassign: ${error.message}`)
-        setUnassigningDate(false)
-        return
+      for (const b of targets) {
+        const res = await fetch('/api/admin-auth/unassign-worker', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ booking_id: b.id }),
+        })
+        if (!res.ok) {
+          const data = await res.json()
+          alert(`Stopped partway — could not unassign one booking: ${data.error}`)
+          break
+        }
       }
       setShowUnassignDateModal(false)
       setUnassignIncludeInProgress(false)
@@ -3306,11 +3194,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     }
   }
 
-  // NEW: every still-actionable booking (not completed/cancelled) on
-  // the selected date, regardless of whether a worker is assigned —
-  // unlike Unassign All, rescheduling doesn't require a worker to
-  // already be set, since an unassigned booking can just as validly
-  // move to a new time.
   function bookingsForRescheduleOnSelectedDate(includeInProgress: boolean) {
     if (selectedDate === 'all') return []
     const allowedStatuses = includeInProgress
@@ -3323,19 +3206,12 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     })
   }
 
-  // Computes a booking's NEW scheduled_at under either reschedule mode.
-  // 'offset': straightforward +/- minutes on the original timestamp.
-  // 'date': shifts by whole calendar days only, so each booking keeps
-  // its own original time-of-day — computed via a day-count diff
-  // between the booking's IST calendar date and the target date,
-  // rather than reconstructing the time from scratch, since India has
-  // no DST and a fixed UTC+5:30 offset makes whole-day arithmetic safe.
   function computeNewScheduledAt(b: Booking, mode: 'offset' | 'date', offsetMins: number, newDateStr: string): Date {
     const oldAt = new Date(b.scheduled_at)
     if (mode === 'offset') {
       return new Date(oldAt.getTime() + offsetMins * 60000)
     }
-    const oldIstDateStr = oldAt.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) // 'YYYY-MM-DD'
+    const oldIstDateStr = oldAt.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
     const oldUtcMidnight = Date.UTC(...oldIstDateStr.split('-').map(Number) as [number, number, number])
     const [ny, nm, nd] = newDateStr.split('-').map(Number)
     const newUtcMidnight = Date.UTC(ny, nm - 1, nd)
@@ -3343,12 +3219,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     return new Date(oldAt.getTime() + dayDiff * 86400000)
   }
 
-  // Builds the preview list: every targeted booking's old/new time,
-  // and whether its assigned worker (if any) would genuinely conflict
-  // at the new time — using the SAME isWorkerAvailableAt check and
-  // excludeBookingId pattern already relied on throughout this file,
-  // so this preview can never disagree with the rest of the app about
-  // what counts as a conflict.
   function buildReschedulePreview() {
     const offsetMins = parseInt(rescheduleOffsetMins, 10) || 0
     const targets = bookingsForRescheduleOnSelectedDate(rescheduleIncludeInProgress)
@@ -3381,11 +3251,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     if (toMove.length === 0) { setShowRescheduleModal(false); setReschedulePreview(null); return }
     setRescheduling(true)
     try {
-      // Individual updates rather than one batched call — each booking
-      // gets a DIFFERENT new scheduled_at, so a single .update().in()
-      // (same value for every row) can't express this; the row count
-      // per day is small enough that sequential awaits are fine for an
-      // admin action like this.
       for (const p of toMove) {
         const { error } = await supabase
           .from('bookings')
@@ -3437,10 +3302,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const liveCount      = bookings.filter(b => liveStatuses.includes(b.status)).length
   const completedCount = bookings.filter(b => b.status === 'completed').length
   const cancelledCount = bookings.filter(b => b.status === 'cancelled').length
-  // FIXED: previously only summed 'in_progress' bookings, so the ₹ shown on
-  // the Live/Active card didn't match liveCount (which includes pending,
-  // accepted, and otp_verified too) — a card showing "116 live" but only
-  // the in-progress slice's revenue. Now sums the same status set as the count.
   const liveRevenue    = bookings.filter(b => liveStatuses.includes(b.status)).reduce((s,b) => s + b.final_amount, 0)
   const cancelledRev   = bookings.filter(b => b.status === 'cancelled').reduce((s,b) => s + b.final_amount, 0)
   const inProgressNow  = bookings.filter(b => b.status === 'in_progress').length
@@ -3458,7 +3319,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   return (
     <div className="min-h-screen" style={{ background: '#F4F6FB' }}>
 
-      {/* ══════════ Top bar — clean white, blue accent (template style) ══════════ */}
       <div className="bg-white px-4 md:px-8 py-3.5 flex items-center justify-between gap-3 sticky top-0 z-30" style={{ borderBottom: '1px solid #E7EBF3' }}>
         <div className="flex items-center gap-2.5">
           <div className="flex gap-1 p-0.5 rounded-lg" style={{ background: '#F1F5FB' }}>
@@ -3503,7 +3363,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           <span className="ml-2">{bookings.length} bookings on your plate{inProgressNow > 0 && ` · ${inProgressNow} in progress`}</span>
         </p>
 
-      {/* ══════════ Stat cards — white template style ══════════ */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
         {[
           { key: 'live',      icon: '⚡', label: 'Live / Active', count: liveCount, rev: liveRevenue, revLabel: 'total', accent: '#2F9BF0', bg: '#EAF4FE', extra: inProgressNow > 0 ? `${inProgressNow} working` : null },
@@ -3525,7 +3384,9 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                   )}
                 </div>
                 <p className="text-[12px] font-bold mt-0.5" style={{ color: '#6B7280' }}>{tab.label}</p>
-                <p className="text-[11px] font-mono mt-0.5" style={{ color: '#9CA3AF' }}>₹{tab.rev.toLocaleString('en-IN')} {tab.revLabel}</p>
+                {isOwner && (
+                  <p className="text-[11px] font-mono mt-0.5" style={{ color: '#9CA3AF' }}>₹{tab.rev.toLocaleString('en-IN')} {tab.revLabel}</p>
+                )}
               </div>
             </button>
           )
@@ -3573,7 +3434,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         </div>
       )}
 
-      {/* ══════════ Date + area toolbar ══════════ */}
       <div className="rounded-2xl bg-white px-4 py-3 mb-4" style={{ border: '1px solid #EDEBF7' }}>
         <div className="flex items-center gap-2 overflow-x-auto pb-1">
           {[
@@ -3640,11 +3500,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
             </button>
           )}
 
-          {/* NEW: bulk "unassign all workers for this date" — only makes
-              sense once a specific day is picked, not on "All Dates"
-              (which could span months and would be far too broad/risky
-              for a single confirmation). */}
-          {selectedDate !== 'all' && (
+          {selectedDate !== 'all' && (isOwner || assignedBookingsForSelectedDate(unassignIncludeInProgress).some(b => canUnassign(b.id))) && (
             <button
               onClick={() => setShowUnassignDateModal(true)}
               title="Unassign all workers for this date"
@@ -3654,8 +3510,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
             </button>
           )}
 
-          {/* NEW: bulk reschedule — same "only on a specific date"
-              scoping as Unassign All above. */}
           {selectedDate !== 'all' && (
             <button
               onClick={() => { setReschedulePreview(null); setShowRescheduleModal(true) }}
@@ -3683,13 +3537,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
             </select>
           )}
 
-          {/* NEW: filter the whole page down to one professional's
-              assigned bookings. Counts respect the current date/area
-              filters (so they always reflect "if I picked this worker
-              on top of what I've already filtered by"), but
-              deliberately ignore the CURRENT worker selection itself,
-              same reasoning as the Area dropdown above — otherwise
-              every option but the selected one would show 0. */}
           {workers.length > 0 && (
             <select value={selectedWorker} onChange={e => setSelectedWorker(e.target.value)}
               className="flex-shrink-0 ml-auto px-3 py-1.5 rounded-xl text-[12px] font-bold outline-none"
@@ -3743,7 +3590,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
             const mapsUrl = `https://maps.google.com/?q=${encodeURIComponent(area)}`
             return (
               <div key={area}>
-                {/* ── Area section header — soft badge instead of gradient banner ── */}
                 <div className="flex items-center justify-between px-1 mb-2.5">
                   <div className="flex items-center gap-2.5">
                     <div className="w-8 h-8 rounded-xl flex items-center justify-center text-sm flex-shrink-0"
@@ -3764,7 +3610,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                           </span>
                         )}
                         <span className="text-[11px] text-zinc-400">
-                          {areaBookings.length} booking{areaBookings.length > 1 ? 's' : ''} · ₹{areaTotal.toLocaleString('en-IN')}
+                          {areaBookings.length} booking{areaBookings.length > 1 ? 's' : ''}
+                          {isOwner && ` · ₹${areaTotal.toLocaleString('en-IN')}`}
                         </span>
                       </div>
                     </div>
@@ -3796,7 +3643,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                   </div>
                 </div>
 
-                {/* ── Booking cards — compact single column for easy scrolling ── */}
                 <div className="flex flex-col gap-2">
                   {areaBookings.map(b => {
                     const cfg         = STATUS[b.status] ?? STATUS.pending
@@ -3806,26 +3652,9 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                     const isCancelled = b.status === 'cancelled'
                     const totalSec    = isDone ? elapsed(b.work_started_at, b.work_ended_at) : 0
                     const zoneIds     = zoneEligible[b.id] ?? null
-                    // FIXED: previously used b.service_duration || 60 for
-                    // the availability check — the generic CATALOG
-                    // DEFAULT duration for this service type, not this
-                    // specific booking's actual duration. A booking whose
-                    // real duration differs from the catalog default
-                    // (customized phone bookings, or the catalog default
-                    // changing after this booking was made) would check
-                    // the wrong-length slot, either hiding a genuinely
-                    // free worker or showing a genuinely busy one as
-                    // free. Moved up from further below and reused for
-                    // both the ⏱ duration chip and the availability
-                    // check, so they can never disagree with each other.
                     const plannedDurationMins =
                       (b.service_duration_minutes ?? b.booking_duration_minutes ?? b.service_duration ?? 60)
                       + (b.extra_time_mins ?? 0)
-                    // Passed into isWorkerAvailableAt() below so the
-                    // same-address exception (0-minute buffer instead of
-                    // 30) applies correctly for THIS booking's address —
-                    // without this, a worker with a back-to-back job at
-                    // the same building would be wrongly hidden as "busy".
                     const thisBookingAddress = { pincode: b.pincode, full_address: b.full_address }
                     const slotAvailable = workers.filter(w =>
                       isWorkerAvailableAt(w, b.scheduled_at, plannedDurationMins, slimBookings, thisBookingAddress) &&
@@ -3834,27 +3663,15 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                     const canQuickStartWork = b.is_manual_booking && b.status === 'accepted' && !!b.worker_id
                     const justChanged = recentlyChangedIds.has(b.id)
 
-                    // Conflict badge: does the assigned worker actually have
-                    // another overlapping booking? Reuses the same
-                    // isWorkerAvailableAt check used everywhere else in this
-                    // file — since slimBookings includes this booking too,
-                    // the function only returns false when a genuinely
-                    // DIFFERENT booking for the same worker overlaps this slot.
                     const assignedWorker = b.worker_id ? workers.find(w => w.id === b.worker_id) : null
                     const hasWorkerConflict = assignedWorker
                       ? !isWorkerAvailableAt(assignedWorker, b.scheduled_at, plannedDurationMins, slimBookings, thisBookingAddress, b.id)
                       : false
 
-                    // Full-card light background tint by status — extended
-                    // from "completed only" to also cover Cancelled (red)
-                    // and In Progress (yellow), so all three read at a
-                    // glance while scrolling, not just completed jobs.
-                    // Pending/Assigned/OTP-verified stay plain white —
-                    // only these three were requested to get a tint.
                     const cardTint: Record<string, { bg: string; border: string }> = {
-                      completed:   { bg: '#ECFDF5', border: '#A7F3D0' }, // green
-                      cancelled:   { bg: '#FEF2F2', border: '#FECACA' }, // red
-                      in_progress: { bg: '#FEF3C7', border: '#FCD34D' }, // yellow (more visible than pale amber-50)
+                      completed:   { bg: '#ECFDF5', border: '#A7F3D0' },
+                      cancelled:   { bg: '#FEF2F2', border: '#FECACA' },
+                      in_progress: { bg: '#FEF3C7', border: '#FCD34D' },
                     }
                     const tint = cardTint[b.status]
 
@@ -3870,11 +3687,9 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                           transition: 'box-shadow 1.5s ease, border-color 1.5s ease, transform 0.2s ease',
                         }}>
                         <CelebrationBurst show={celebratingIds.has(b.id)}/>
-                        {/* left color edge = status */}
                         <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: cfg.edge }}/>
 
                         <div className="pl-3.5 pr-2.5 py-2">
-                          {/* top row: service + status pill */}
                           <div className="flex items-start justify-between gap-2 mb-0.5">
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
@@ -3915,7 +3730,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             </span>
                           </div>
 
-                          {/* middle row: schedule, duration, location */}
                           <div className="flex items-center flex-wrap gap-x-3 gap-y-1 mb-1 text-[11.5px]">
                             <span className="font-bold" style={{ color: '#3F3F46' }}>
                               🕐 {new Date(b.scheduled_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}
@@ -3935,7 +3749,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             </span>
                           </div>
 
-                          {/* worker row */}
                           <div className="flex items-center justify-between gap-2 mb-1">
                             {b.worker !== 'Unassigned' ? (
                               <div className="flex items-center gap-1.5">
@@ -3944,6 +3757,11 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                   {b.worker[0]?.toUpperCase()}
                                 </div>
                                 <span className="text-[11.5px] font-semibold" style={{ color: '#3F3F46' }}>{b.worker.split(' ')[0]}</span>
+                                {isOwner && assignedByNameMap[b.id] && (
+                                  <span className="text-[9.5px] font-semibold text-zinc-400 truncate max-w-[90px]" title={`Assigned by ${assignedByNameMap[b.id]}`}>
+                                    · by {assignedByNameMap[b.id].split(' ')[0]}
+                                  </span>
+                                )}
                                 {hasWorkerConflict && (
                                   <span title="This worker has another overlapping job"
                                     className="text-[9px] font-black px-1.5 py-0.5 rounded-full flex-shrink-0" style={{ background: '#FFE4E6', color: '#BE123C' }}>
@@ -3967,7 +3785,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             </span>
                           </div>
 
-                          {/* bottom row: timer (centered, large) + actions below */}
                           <div className="pt-1.5" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
                             <div className="flex items-center justify-center py-1">
                               {isLive && b.work_started_at
@@ -3999,14 +3816,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                   ▶️ Start
                                 </button>
                               )}
-                              {/* NEW: single-booking unassign, right on
-                                  the card — distinct from the whole-day
-                                  "Unassign All" bulk tool. Only shown
-                                  once a worker is actually assigned and
-                                  the job hasn't started yet (unassigning
-                                  an in-progress job doesn't make sense —
-                                  the worker is already there). */}
-                              {!!b.worker_id && ['pending', 'accepted'].includes(b.status) && (
+                              {!!b.worker_id && ['pending', 'accepted'].includes(b.status) && canUnassign(b.id) && (
                                 <button onClick={() => quickUnassign(b.id)}
                                   title="Unassign worker"
                                   className="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all" style={{ background: '#FEF2F2', color: '#DC2626' }}>
@@ -4113,6 +3923,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           workers={workers}
           allBookings={slimBookings}
           zoneWorkerIds={zoneEligible[selected.id] ?? null}
+          isOwner={isOwner}
           onClose={() => setSelected(null)}
           onDone={() => { load(); setSelected(null) }}
           onEditManual={() => setShowEditModal(true)}
@@ -4159,12 +3970,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         />
       )}
 
-      {/* NEW: bulk "unassign all workers for this date" confirmation.
-          Recomputes the target list live as the admin toggles the
-          "include In Progress" checkbox, so the count shown always
-          matches exactly what will actually be touched. */}
       {showUnassignDateModal && (() => {
-        const targets = assignedBookingsForSelectedDate(unassignIncludeInProgress)
+        const targets = assignedBookingsForSelectedDate(unassignIncludeInProgress).filter(b => canUnassign(b.id))
         const inProgressCount = assignedBookingsForSelectedDate(true).length
           - assignedBookingsForSelectedDate(false).length
         return (
@@ -4213,11 +4020,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         )
       })()}
 
-      {/* NEW: bulk reschedule — two-step modal. Step 1 (no preview yet)
-          collects the offset/date and which statuses to include. Step
-          2 (after "Preview") shows exactly what will move and flags
-          any genuine worker conflicts at the new time, letting the
-          admin confirm only the clean ones or go back and adjust. */}
       {showRescheduleModal && (() => {
         const targetCount = bookingsForRescheduleOnSelectedDate(rescheduleIncludeInProgress).length
         const canPreview = rescheduleMode === 'offset'

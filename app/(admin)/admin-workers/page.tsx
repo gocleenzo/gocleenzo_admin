@@ -2,6 +2,8 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 
+type AdminSession = { id: string; email: string; role: 'owner'|'assistant'; full_name?: string }
+
 // Today's schedule entry for a worker — replaces the old recurring
 // day-of-week WeekSchedule model. Sourced from worker_schedule_dates,
 // scoped to just today's date (used for live status/shift display; the
@@ -751,7 +753,7 @@ const BOOKING_STATUS_CHIP: Record<string, { bg: string; fg: string }> = {
   in_progress: { bg: '#CFFAFE', fg: '#0E7490' },
 }
 
-function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any }) {
+function AttendanceTab({ workerId, supabase, isOwner }: { workerId: string; supabase: any; isOwner: boolean }) {
   const [monthDate, setMonthDate] = useState(() => {
     const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1)
   })
@@ -795,7 +797,7 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
 
   async function saveHoliday() {
     if (!selectedDay) return
-    const penalty = holidayPenalty.trim() === '' ? 0 : Number(holidayPenalty)
+    const penalty = !isOwner ? 0 : (holidayPenalty.trim() === '' ? 0 : Number(holidayPenalty))
     if (Number.isNaN(penalty) || penalty < 0) {
       setErr('Penalty must be a non-negative number'); return
     }
@@ -874,12 +876,12 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
         </div>
       )}
 
-      <div className="grid grid-cols-4 gap-2">
+      <div className={isOwner ? 'grid grid-cols-4 gap-2' : 'grid grid-cols-3 gap-2'}>
         {[
           { label: 'Present', value: presentCount, color: '#059669', bg: '#ECFDF5' },
           { label: 'Absent',  value: absentCount,  color: '#DC2626', bg: '#FEF2F2' },
           { label: 'Holiday', value: holidayCount, color: '#D97706', bg: '#FFFBEB' },
-          { label: 'Penalty', value: `₹${totalPenalty}`, color: '#7C3AED', bg: '#F5F3FF' },
+          ...(isOwner ? [{ label: 'Penalty', value: `₹${totalPenalty}`, color: '#7C3AED', bg: '#F5F3FF' }] : []),
         ].map(c => (
           <div key={c.label} className="rounded-xl p-3 border text-center" style={{ background: c.bg, borderColor: c.color+'25' }}>
             <p className="text-lg font-black leading-none mb-0.5" style={{ color: c.color }}>{c.value}</p>
@@ -932,11 +934,11 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
                       className="aspect-square rounded-lg border flex flex-col items-center justify-center transition-all disabled:cursor-default"
                       style={{ background: st.bg, borderColor: st.fg + '30' }}>
                       <span className="text-[11px] font-bold" style={{ color: st.fg }}>{dayNum}</span>
-                      {d.penalty_amount > 0 ? (
+                      {isOwner && (d.penalty_amount > 0 ? (
                         <span className="text-[7px] font-black" style={{ color: st.fg }}>-₹{d.penalty_amount}</span>
                       ) : d.earned_amount > 0 ? (
                         <span className="text-[7px] font-black" style={{ color: st.fg }}>₹{d.earned_amount}</span>
-                      ) : null}
+                      ) : null)}
                     </button>
                   )
                 })}
@@ -955,7 +957,7 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200">
-                  {['Week', 'Hours', 'Jobs', 'Earned', 'Penalty'].map(h => (
+                  {(isOwner ? ['Week', 'Hours', 'Jobs', 'Earned', 'Penalty'] : ['Week', 'Hours', 'Jobs']).map(h => (
                     <th key={h} className="text-left px-3 py-2 font-bold text-slate-400 uppercase tracking-wide text-[10px]">{h}</th>
                   ))}
                 </tr>
@@ -966,10 +968,14 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
                     <td className="px-3 py-2 font-semibold text-slate-600">{w.weekLabel}</td>
                     <td className="px-3 py-2 font-bold text-cyan-700">{(w.totalMinutes / 60).toFixed(1)}h</td>
                     <td className="px-3 py-2 font-bold text-slate-700">{w.totalJobs}</td>
-                    <td className="px-3 py-2 font-black text-green-700">₹{w.totalEarned.toLocaleString('en-IN')}</td>
-                    <td className="px-3 py-2 font-black" style={{ color: w.totalPenalty > 0 ? '#DC2626' : '#94A3B8' }}>
-                      {w.totalPenalty > 0 ? `-₹${w.totalPenalty}` : '—'}
-                    </td>
+                    {isOwner && (
+                      <>
+                        <td className="px-3 py-2 font-black text-green-700">₹{w.totalEarned.toLocaleString('en-IN')}</td>
+                        <td className="px-3 py-2 font-black" style={{ color: w.totalPenalty > 0 ? '#DC2626' : '#94A3B8' }}>
+                          {w.totalPenalty > 0 ? `-₹${w.totalPenalty}` : '—'}
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -990,7 +996,7 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
           <div className="flex items-center gap-4 text-[11px] text-slate-500 flex-wrap">
             <span>Worked: {Math.round(selectedDay.worked_minutes)} min</span>
             <span>Jobs done: {selectedDay.bookings_completed}</span>
-            <span>Earned: ₹{selectedDay.earned_amount.toLocaleString('en-IN')}</span>
+            {isOwner && <span>Earned: ₹{selectedDay.earned_amount.toLocaleString('en-IN')}</span>}
             <span>Status: {ATTENDANCE_STATUS_STYLE[selectedDay.status].label}</span>
           </div>
 
@@ -1012,7 +1018,7 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
                         <p className="text-[11px] text-slate-400 truncate">{b.time} · {durationLabel(b.duration_minutes)} · {b.customer_name}</p>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        <span className="text-[12px] font-black text-slate-700">₹{Number(b.final_amount).toLocaleString('en-IN')}</span>
+                        {isOwner && <span className="text-[12px] font-black text-slate-700">₹{Number(b.final_amount).toLocaleString('en-IN')}</span>}
                         <span className="text-[9px] font-black px-2 py-0.5 rounded-full capitalize"
                           style={{ background: chip.bg, color: chip.fg }}>
                           {b.status.replace('_', ' ')}
@@ -1036,13 +1042,15 @@ function AttendanceTab({ workerId, supabase }: { workerId: string; supabase: any
                 className="w-full px-3 py-2 rounded-lg text-sm text-slate-800 bg-white border border-slate-200 outline-none" />
             </div>
 
-            <div>
-              <p className="text-[10px] text-slate-500 mb-1">Penalty amount (₹)</p>
-              <input type="number" min={0} value={holidayPenalty} onChange={e => setHolidayPenalty(e.target.value)}
-                placeholder="0"
-                className="w-full px-3 py-2 rounded-lg text-sm font-bold text-slate-800 bg-white border border-slate-200 outline-none" />
-              <p className="text-[10px] text-slate-400 mt-1">Deducted directly from this worker&apos;s payout total for the period.</p>
-            </div>
+            {isOwner && (
+              <div>
+                <p className="text-[10px] text-slate-500 mb-1">Penalty amount (₹)</p>
+                <input type="number" min={0} value={holidayPenalty} onChange={e => setHolidayPenalty(e.target.value)}
+                  placeholder="0"
+                  className="w-full px-3 py-2 rounded-lg text-sm font-bold text-slate-800 bg-white border border-slate-200 outline-none" />
+                <p className="text-[10px] text-slate-400 mt-1">Deducted directly from this worker&apos;s payout total for the period.</p>
+              </div>
+            )}
 
             <div className="flex gap-2 pt-1">
               {selectedDay.is_holiday && (
@@ -2598,12 +2606,13 @@ function DateDetailCard({ entry, highlight }: { entry: DateEntry; highlight?: bo
   )
 }
 
-function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling, onReload }: {
+function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling, onReload, isOwner }: {
   w: Worker; index: number; onClose: () => void
   onEdit: () => void; onDelete: () => void
   onToggle: (field: 'is_available'|'is_active') => void
   toggling: string | null
   onReload: () => void
+  isOwner: boolean
 }) {
   const avatarColors = ['#0891B2','#0E7490','#06B6D4','#0891B2','#155E75','#0E7490']
   const avatarBg     = avatarColors[index % avatarColors.length]
@@ -2620,7 +2629,18 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     setJobsShown(10)
   }, [w.id])
 
-  const TABS = [
+  // Assistants only get Overview/Schedule/Attendance/Areas — everything
+  // else (approval/KYC, hours, jobs, money, payouts, referrals, tier,
+  // sos) and Delete Worker stay owner-only.
+  const ASSISTANT_TAB_KEYS = ['overview', 'schedreq', 'attendance', 'areas'] as const
+
+  useEffect(() => {
+    if (!isOwner && !(ASSISTANT_TAB_KEYS as readonly string[]).includes(tab)) {
+      setTab('overview')
+    }
+  }, [isOwner])
+
+  const ALL_TABS = [
     { key: 'overview' as const, label: 'Overview', icon: '▦' },
     { key: 'approval' as const, label: 'Approval & KYC', icon: '✅' },
     { key: 'schedreq' as const, label: 'Schedule', icon: '🗓' },
@@ -2634,6 +2654,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
     { key: 'tier'     as const, label: 'Tier',     icon: '🏆' },
     { key: 'sos'      as const, label: 'SOS',      icon: '🆘' },
   ]
+  const TABS = isOwner ? ALL_TABS : ALL_TABS.filter(t => (ASSISTANT_TAB_KEYS as readonly string[]).includes(t.key))
 
   return (
     <div className="bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm">
@@ -2693,7 +2714,9 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
           <button onClick={onEdit} className="flex-1 h-9 rounded-lg flex items-center justify-center gap-1.5 text-xs font-bold bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:text-slate-800 transition-all">
             ✏️ Edit
           </button>
-          <button onClick={onDelete} className="w-9 h-9 rounded-lg flex items-center justify-center text-xs bg-white text-red-400 border border-slate-200 hover:border-red-200 hover:bg-red-50 transition-all">🗑</button>
+          {isOwner && (
+            <button onClick={onDelete} className="w-9 h-9 rounded-lg flex items-center justify-center text-xs bg-white text-red-400 border border-slate-200 hover:border-red-200 hover:bg-red-50 transition-all">🗑</button>
+          )}
         </div>
       </div>
 
@@ -2721,7 +2744,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
           <div className="p-5 space-y-4">
             <div className="grid grid-cols-2 gap-2.5">
               {[
-                { label: 'Revenue',   value: `₹${w.totalRevenue.toLocaleString('en-IN')}`, accent: '#0891B2' },
+                ...(isOwner ? [{ label: 'Revenue',   value: `₹${w.totalRevenue.toLocaleString('en-IN')}`, accent: '#0891B2' }] : []),
                 { label: 'Total Jobs',value: w.totalOrders, accent: '#7C3AED' },
                 { label: 'Completed', value: w.completed,   accent: '#059669' },
                 { label: 'Today\'s Hrs',value: todayMins > 0 ? minsToLabel(todayMins) : '—', accent: '#D97706' },
@@ -2760,7 +2783,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
               ))}
             </div>
 
-            {w.serviceBreakdown.length > 0 && (
+            {isOwner && w.serviceBreakdown.length > 0 && (
               <div className="rounded-xl border border-slate-200 overflow-hidden">
                 <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
                   <p className="text-xs font-black text-slate-700">✅ Completed work by service</p>
@@ -2793,7 +2816,7 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
 
         {tab === 'schedreq' && <ScheduleDateRequestTab workerId={w.id} supabase={createClient()} onChanged={onReload} />}
 
-        {tab === 'attendance' && <AttendanceTab workerId={w.id} supabase={createClient()} />}
+        {tab === 'attendance' && <AttendanceTab workerId={w.id} supabase={createClient()} isOwner={isOwner} />}
 
         {tab === 'hours' && (
           <div className="p-5">
@@ -3033,18 +3056,19 @@ function statusOf(w: Worker): { color: string; label: string } {
 // NEW: shared table body renderer for both the Active and Inactive
 // worker sections, so the two tables can never visually drift apart
 // from each other over time — one component, two data sets.
-function WorkersTable({ list, selected, selIndex, onSelectRow }: {
+function WorkersTable({ list, selected, selIndex, onSelectRow, isOwner }: {
   list: Worker[]
   selected: Worker | null
   selIndex: number
   onSelectRow: (w: Worker, i: number) => void
+  isOwner: boolean
 }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm border-collapse">
         <thead>
           <tr className="border-b border-slate-100 bg-slate-50/50">
-            {['Worker','Status','Location','Verified','Jobs','Done','Revenue','OTP'].map(c => (
+            {(isOwner ? ['Worker','Status','Location','Verified','Jobs','Done','Revenue','OTP'] : ['Worker','Status','Location','Verified','Jobs','Done','OTP']).map(c => (
               <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
             ))}
           </tr>
@@ -3104,7 +3128,7 @@ function WorkersTable({ list, selected, selIndex, onSelectRow }: {
                 </td>
                 <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-slate-700">{w.totalOrders}</td>
                 <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-emerald-600">{w.completed}</td>
-                <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">₹{w.totalRevenue.toLocaleString('en-IN')}</td>
+                {isOwner && <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">₹{w.totalRevenue.toLocaleString('en-IN')}</td>}
                 <td className="px-4 py-3.5 whitespace-nowrap">
                   {w.worker_otp
                     ? <span className="font-mono font-bold text-[12px] text-violet-700">{w.worker_otp}</span>
@@ -3120,6 +3144,15 @@ function WorkersTable({ list, selected, selIndex, onSelectRow }: {
 }
 
 export default function AdminWorkers() {
+  const [session, setSession] = useState<AdminSession | null>(null)
+  useEffect(() => {
+    fetch('/api/admin-auth/me')
+      .then(res => res.ok ? res.json() : null)
+      .then(data => setSession(data?.session ?? data ?? null))
+      .catch(() => setSession(null))
+  }, [])
+  const isOwner = session?.role === 'owner'
+
   const [workers,  setWorkers]  = useState<Worker[]>([])
   const [loading,  setLoading]  = useState(true)
   const [search,   setSearch]   = useState('')
@@ -3305,7 +3338,7 @@ export default function AdminWorkers() {
           { label: 'Total Workers',  value: workers.length, accent: '#0891B2', icon: '👷' },
           { label: 'On Job Now',     value: busyCount,      accent: '#0891B2', icon: '⚡' },
           { label: 'Free in Shift',  value: freeCount,      accent: '#059669', icon: '🟢' },
-          { label: 'Total Revenue',  value: `₹${totalRev > 99999 ? (totalRev/1000).toFixed(0)+'k' : totalRev.toLocaleString('en-IN')}`, accent: '#0E7490', icon: '💰' },
+          ...(isOwner ? [{ label: 'Total Revenue',  value: `₹${totalRev > 99999 ? (totalRev/1000).toFixed(0)+'k' : totalRev.toLocaleString('en-IN')}`, accent: '#0E7490', icon: '💰' }] : []),
         ].map(c => (
           <div key={c.label} className="bg-white rounded-2xl border border-slate-200/80 p-5 hover:border-slate-300 hover:shadow-sm transition-all">
             <div className="flex items-center justify-between mb-2">
@@ -3345,7 +3378,7 @@ export default function AdminWorkers() {
                   </div>
                 ) : (
                   <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-                    <WorkersTable list={activeFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow}/>
+                    <WorkersTable list={activeFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow} isOwner={isOwner}/>
                   </div>
                 )}
 
@@ -3366,7 +3399,7 @@ export default function AdminWorkers() {
                     </button>
                     {showInactive && (
                       <div className="border-t border-red-100">
-                        <WorkersTable list={inactiveFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow}/>
+                        <WorkersTable list={inactiveFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow} isOwner={isOwner}/>
                       </div>
                     )}
                   </div>
@@ -3386,6 +3419,7 @@ export default function AdminWorkers() {
               onToggle={(field) => quickToggle(selected, field)}
               toggling={toggling}
               onReload={load}
+              isOwner={isOwner}
             />
           </div>
         )}
