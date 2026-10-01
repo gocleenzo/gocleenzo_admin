@@ -16,8 +16,8 @@ const TIER_COLOR: Record<string, string> = {
   platinum: '#7C3AED', diamond: '#0891B2',
 }
 const STATUS: Record<string, { bg: string; fg: string; label: string }> = {
-  earned:   { bg: '#dcfce7', fg: '#15803d', label: 'Earned' },
-  paid:     { bg: '#dbeafe', fg: '#1d4ed8', label: 'Paid' },
+  earned:   { bg: '#dcfce7', fg: '#15803d', label: 'Earned (payable)' },
+  paid:     { bg: '#dbeafe', fg: '#1d4ed8', label: 'Disbursed' },
   rejected: { bg: '#fee2e2', fg: '#b91c1c', label: 'Rejected' },
 }
 
@@ -47,7 +47,7 @@ export default function AdminTiersPage() {
   useEffect(() => { load() }, [load])
 
   async function act(id: string, action: 'pay' | 'reject') {
-    if (action === 'reject' && !window.confirm('Reject this tier bonus?')) return
+    if (action === 'reject' && !window.confirm('Reject this tier bonus? This removes it from the worker’s payable earnings.')) return
     setBusy(id)
     try {
       await fetch('/api/tiers', {
@@ -74,7 +74,21 @@ export default function AdminTiersPage() {
     <div className="p-4 md:p-6 max-w-6xl mx-auto">
       <div className="mb-5">
         <h1 className="text-2xl font-black text-slate-900">Worker Tiers</h1>
-        <p className="text-sm text-slate-500">Set thresholds &amp; bonuses, and confirm tier rewards</p>
+        <p className="text-sm text-slate-500">Set thresholds &amp; bonuses, and track tier rewards</p>
+      </div>
+
+      {/* NEW: explains that "earned" already means payable — the old
+          "Confirm" step never actually gated the money even before
+          this page existed in this form; it's purely a disbursed
+          record now, matching how worker_earnings() reads tier_rewards. */}
+      <div className="rounded-xl bg-cyan-50 border border-cyan-200 px-4 py-3 mb-5">
+        <p className="text-[12px] text-cyan-700 font-semibold">
+          🏆 A tier bonus counts toward a worker&apos;s payable total the moment it&apos;s
+          earned — resets every month, so the same tier can be re-earned and re-paid
+          each month a worker reaches it again. &quot;Mark as disbursed&quot; below is just
+          a record that you&apos;ve physically paid it out; it doesn&apos;t change what the
+          worker is owed. Use Reject only to correct a bonus granted by mistake.
+        </p>
       </div>
 
       {/* config editor */}
@@ -87,7 +101,7 @@ export default function AdminTiersPage() {
                 <span className="w-3 h-3 rounded-full" style={{ background: TIER_COLOR[c.tier] ?? '#999' }} />
                 <span className="font-black text-slate-800 capitalize">{c.tier}</span>
               </div>
-              <label className="block text-[11px] font-bold text-slate-400 uppercase">Orders</label>
+              <label className="block text-[11px] font-bold text-slate-400 uppercase">Orders / month</label>
               <input type="number" value={edits[c.tier]?.min ?? ''}
                 onChange={(e) => setEdits(p => ({ ...p, [c.tier]: { ...p[c.tier], min: e.target.value } }))}
                 className="w-full mb-2 px-2 py-1.5 rounded-lg border border-slate-200 text-sm" />
@@ -108,11 +122,12 @@ export default function AdminTiersPage() {
       {/* totals */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
         <div className="rounded-xl bg-white border border-slate-200 p-4">
-          <p className="text-[11px] font-bold text-slate-400 uppercase">Bonuses to confirm</p>
+          <p className="text-[11px] font-bold text-slate-400 uppercase">Earned, not yet disbursed</p>
           <p className="text-xl font-black text-green-600 mt-1">{inr(totals.earned)}</p>
+          <p className="text-[10px] text-slate-400 mt-0.5">Already included in payable earnings</p>
         </div>
         <div className="rounded-xl bg-white border border-slate-200 p-4">
-          <p className="text-[11px] font-bold text-slate-400 uppercase">Total confirmed</p>
+          <p className="text-[11px] font-bold text-slate-400 uppercase">Total disbursed</p>
           <p className="text-xl font-black text-blue-600 mt-1">{inr(totals.paid)}</p>
         </div>
         <div className="rounded-xl bg-white border border-slate-200 p-4">
@@ -178,7 +193,7 @@ export default function AdminTiersPage() {
                           <div className="flex gap-1.5 justify-end">
                             <button disabled={busy === r.id} onClick={() => act(r.id, 'pay')}
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50" style={{ background: '#16a34a' }}>
-                              Confirm
+                              Mark disbursed
                             </button>
                             <button disabled={busy === r.id} onClick={() => act(r.id, 'reject')}
                               className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-50" style={{ background: '#dc2626' }}>
