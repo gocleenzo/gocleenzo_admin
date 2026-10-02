@@ -34,6 +34,7 @@ const ASSISTANT_NAV = [
   { href: '/admin-workers',       emoji: '👷', label: 'Workers',    color: '#0891B2' },
   { href: '/admin-complaints',    emoji: '⚠️', label: 'Complaints', color: '#DC2626' },
   { href: '/admin-slots',         emoji: '🗓️', label: 'Slots',      color: '#0891B2' },
+  { href: '/admin-live-map',      emoji: '📍', label: 'Live Map',   color: '#0D9488' },
 ]
 
 // ═══════════════════════════════════════════════════════════════
