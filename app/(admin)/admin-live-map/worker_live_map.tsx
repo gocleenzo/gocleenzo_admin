@@ -29,6 +29,11 @@ const containerStyle = { width: '100%', height: '100%' }
 //   LocationGate, so this is a hard, meaningful signal, not just "app
 //   closed"), amber = busy, green = in shift + available,
 // grey = location ON but simply off shift right now.
+//
+// NOTE: this map now only ever receives workers whose ACCOUNT is
+// active (filtered server-side in /api/workers/live by users.is_active).
+// A worker still shows here even if their location is off/stale — that
+// just changes their dot to red, it doesn't remove them from the map.
 function workerStatus(w: Worker, stale: boolean): { color: string; label: string } {
   if (stale)                       return { color: '#ef4444', label: '📍 Location Off' }
   if (w.busy)                      return { color: '#f59e0b', label: 'Busy' }
@@ -172,7 +177,7 @@ export default function WorkerLiveMap() {
               Live Worker Map
             </p>
             <p className="text-[11px] text-slate-400 mt-1 font-semibold">
-              Updates every 10s
+              Updates every 10s · active professionals
             </p>
           </div>
         </div>
