@@ -42,6 +42,15 @@ const STALE_MS = 2 * 60 * 1000 // stale if no update in 2 min
 const POLL_MS = 10000
 const ORDERS_POLL_MS = 30000
 
+// NEW: today's date in IST as 'YYYY-MM-DD', used as the default value
+// for the orders date picker — matches how /api/bookings/today-map
+// itself computes "today" when no ?date= is given.
+function todayIST(): string {
+  const now = new Date()
+  const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+  return `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, '0')}-${String(ist.getDate()).padStart(2, '0')}`
+}
+
 const containerStyle = { width: '100%', height: '100%' }
 
 // A teardrop "pin" icon built as an inline SVG data-URL image — a
@@ -104,6 +113,9 @@ export default function WorkerLiveMap() {
   // as it did before this feature; toggled on with the header switch.
   const [orders, setOrders] = useState<Map<string, Order>>(new Map())
   const [showOrders, setShowOrders] = useState(false)
+  // NEW: which day's orders to show — defaults to today (IST), changed
+  // via the date picker that appears once the layer is switched on.
+  const [ordersDate, setOrdersDate] = useState<string>(todayIST())
   const [, setTick] = useState(0)
   const mapRef = useRef<google.maps.Map | null>(null)
   const infoRef = useRef<google.maps.InfoWindow | null>(null)
@@ -139,7 +151,7 @@ export default function WorkerLiveMap() {
     let active = true
     async function load() {
       try {
-        const res = await fetch('/api/bookings/today-map', { cache: 'no-store' })
+        const res = await fetch(`/api/bookings/today-map?date=${ordersDate}`, { cache: 'no-store' })
         const json = await res.json()
         if (!active || !json.orders) return
         const map = new Map<string, Order>()
@@ -155,7 +167,7 @@ export default function WorkerLiveMap() {
       active = false
       clearInterval(t)
     }
-  }, [showOrders])
+  }, [showOrders, ordersDate])
 
   // Re-render every 15s so staleness + shift colouring refreshes
   useEffect(() => {
@@ -322,6 +334,9 @@ export default function WorkerLiveMap() {
             </p>
             <p className="text-[11px] text-slate-400 mt-1 font-semibold">
               Updates every 10s · active professionals
+              {showOrders && (
+                <> · orders for {new Date(ordersDate + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</>
+              )}
             </p>
           </div>
         </div>
@@ -336,8 +351,19 @@ export default function WorkerLiveMap() {
               border: `1px solid ${showOrders ? '#7C3AED40' : '#E2E8F0'}`,
             }}
           >
-            📦 Today's Orders {showOrders ? `(${orders.size})` : ''}
+            📦 {ordersDate === todayIST() ? "Today's Orders" : 'Orders'} {showOrders ? `(${orders.size})` : ''}
           </button>
+          {/* NEW: date picker for the orders layer — only shown once the
+              layer is on, so it doesn't clutter the header otherwise.
+              Changing it refetches orders for that calendar day. */}
+          {showOrders && (
+            <input
+              type="date"
+              value={ordersDate}
+              onChange={(e) => setOrdersDate(e.target.value)}
+              className="px-2.5 py-1.5 rounded-full text-xs font-bold text-slate-600 border border-slate-200 bg-white"
+            />
+          )}
           <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-cyan-50 border border-cyan-100">
             <span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse" />
             <span className="text-xs font-black text-cyan-700">

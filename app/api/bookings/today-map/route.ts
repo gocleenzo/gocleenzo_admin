@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/admin'
 
 // Always fresh, never cached — same convention as /api/workers/live.
@@ -6,21 +6,34 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 // NEW: feeds the "Today's Orders" layer on the Live Map. Returns every
-// booking scheduled for TODAY (in IST, matching how the rest of the
-// admin panel reasons about "today"), with its address coordinates and
-// everything an admin would want to see when clicking a pin — customer,
-// service, time, assigned worker. Bookings without a geocoded address
-// (no lat/lng) are skipped since there's nowhere to plot them.
-export async function GET() {
+// booking scheduled for a given calendar day (IST, matching how the
+// rest of the admin panel reasons about "today"), with its address
+// coordinates and everything an admin would want to see when clicking
+// a pin — customer, service, time, assigned worker. Bookings without a
+// geocoded address (no lat/lng) are skipped since there's nowhere to
+// plot them.
+//
+// NEW: accepts an optional ?date=YYYY-MM-DD query param so the map can
+// show any day, not just today — defaults to today (IST) when omitted.
+export async function GET(req: NextRequest) {
   const supabase = createServiceClient()
 
-  // Compute today's [00:00, 24:00) window in IST, expressed as UTC
-  // instants, since scheduled_at is stored as timestamptz. Using
+  const dateParam = req.nextUrl.searchParams.get('date') // 'YYYY-MM-DD' or null
+
+  let y: number, m: number, d: number
+  if (dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
+    const [yy, mm, dd] = dateParam.split('-').map(Number)
+    y = yy; m = mm - 1; d = dd
+  } else {
+    const now = new Date()
+    const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+    y = istNow.getFullYear(); m = istNow.getMonth(); d = istNow.getDate()
+  }
+
+  // Compute the chosen day's [00:00, 24:00) window in IST, expressed as
+  // UTC instants, since scheduled_at is stored as timestamptz. Using
   // Date.UTC with an out-of-range minute (-330 = -5h30m) lets JS
   // normalize the date rollback correctly across month/year boundaries.
-  const now = new Date()
-  const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
-  const y = istNow.getFullYear(), m = istNow.getMonth(), d = istNow.getDate()
   const startUTC = new Date(Date.UTC(y, m, d, -5, -30))
   const endUTC = new Date(startUTC.getTime() + 24 * 60 * 60 * 1000)
 
