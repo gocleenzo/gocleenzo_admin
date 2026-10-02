@@ -8,7 +8,7 @@ const PUBLIC_API_PREFIXES = [
 
 // Every route an assistant is allowed to reach. Add here (and in
 // admin_layout.tsx's ASSISTANT_NAV) if they're ever given another page.
-const ASSISTANT_ALLOWED_PATHS = ['/assistant-dashboard', '/admin-workers']
+const ASSISTANT_ALLOWED_PATHS = ['/assistant-dashboard', '/admin-workers', '/admin-complaints', '/admin-slots']
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl

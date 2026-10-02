@@ -32,6 +32,8 @@ const NAV = [
 const ASSISTANT_NAV = [
   { href: '/assistant-dashboard', emoji: '📋', label: 'Bookings',   color: '#7C3AED' },
   { href: '/admin-workers',       emoji: '👷', label: 'Workers',    color: '#0891B2' },
+  { href: '/admin-complaints',    emoji: '⚠️', label: 'Complaints', color: '#DC2626' },
+  { href: '/admin-slots',         emoji: '🗓️', label: 'Slots',      color: '#0891B2' },
 ]
 
 // ═══════════════════════════════════════════════════════════════
