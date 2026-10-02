@@ -58,14 +58,15 @@ function toDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 const EARNINGS_RANGE_PRESETS = [
-  { key: 'month', label: 'This Month' },
-  { key: '30d',   label: 'Last 30 Days' },
-  { key: '7d',    label: 'Last 7 Days' },
-  { key: 'all',   label: 'All Time' },
+  { key: 'month',  label: 'This Month' },
+  { key: '30d',    label: 'Last 30 Days' },
+  { key: '7d',     label: 'Last 7 Days' },
+  { key: 'all',    label: 'All Time' },
+  { key: 'custom', label: 'Custom' },
 ] as const
 type EarningsRangePreset = typeof EARNINGS_RANGE_PRESETS[number]['key']
 
-function rangeForPreset(preset: EarningsRangePreset): { from: string; to: string } {
+function rangeForPreset(preset: EarningsRangePreset, custom?: { from: string; to: string }): { from: string; to: string } {
   const today = new Date()
   const to = toDateStr(today)
   if (preset === 'month') {
@@ -76,6 +77,12 @@ function rangeForPreset(preset: EarningsRangePreset): { from: string; to: string
   }
   if (preset === '7d') {
     return { from: toDateStr(new Date(today.getTime() - 6 * 86400000)), to }
+  }
+  if (preset === 'custom' && custom?.from && custom?.to) {
+    // guard against an inverted range (to before from) by swapping
+    return custom.from <= custom.to
+      ? { from: custom.from, to: custom.to }
+      : { from: custom.to, to: custom.from }
   }
   // 'all' — worker_earnings() needs a concrete p_from, so this uses a
   // date far enough back to cover any realistic account history rather
@@ -94,6 +101,11 @@ export default function AdminReports() {
   // worker_earnings() RPC call per worker rather than a single bulk
   // query like everything else on this page.
   const [earningsPreset, setEarningsPreset] = useState<EarningsRangePreset>('month')
+  // NEW: custom date-range inputs, only shown/used when the "Custom"
+  // preset is selected. Defaulted to today so the date pickers always
+  // start with a valid value.
+  const [customFrom, setCustomFrom] = useState<string>(toDateStr(new Date()))
+  const [customTo, setCustomTo] = useState<string>(toDateStr(new Date()))
   const [earningsByWorker, setEarningsByWorker] = useState<Map<string, WorkerEarningsBreakdown>>(new Map())
   const [earningsLoading, setEarningsLoading] = useState(false)
   // NEW: kept around after the main aggregation pass so "Actual Hours"
@@ -248,15 +260,17 @@ export default function AdminReports() {
   // separate from the main load() above and gated on tab === 'worker'
   // so this cost is only ever paid when the admin actually opens this
   // tab, not on every page load. Re-runs whenever the range preset
-  // changes or the worker list itself changes (e.g. after the initial
-  // bulk load resolves).
+  // (or custom dates) change or the worker list itself changes (e.g.
+  // after the initial bulk load resolves).
   useEffect(() => {
     if (tab !== 'worker' || workerReports.length === 0) return
+    // for the custom preset, wait until both dates are filled in
+    if (earningsPreset === 'custom' && (!customFrom || !customTo)) return
     let cancelled = false
 
     async function loadEarnings() {
       setEarningsLoading(true)
-      const { from, to } = rangeForPreset(earningsPreset)
+      const { from, to } = rangeForPreset(earningsPreset, { from: customFrom, to: customTo })
       const results = await Promise.all(
         workerReports.map(async (w) => {
           const { data, error } = await supabase.rpc('worker_earnings', {
@@ -278,7 +292,7 @@ export default function AdminReports() {
     loadEarnings()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, earningsPreset, workerReports])
+  }, [tab, earningsPreset, workerReports, customFrom, customTo])
 
   // NEW: "Actual Hours" — real clocked time (work_ended_at minus
   // work_started_at, completed jobs only), computed directly from the
@@ -304,7 +318,7 @@ export default function AdminReports() {
   // within the selected range, exactly matching how worker_earnings()
   // itself attributes each job's hours to the day it was worked.
   const actualHoursByWorker = useMemo(() => {
-    const { from, to } = rangeForPreset(earningsPreset)
+    const { from, to } = rangeForPreset(earningsPreset, { from: customFrom, to: customTo })
     const fromMs = new Date(from + 'T00:00:00').getTime()
     const toMs = new Date(to + 'T23:59:59').getTime()
     const minutesByWorker = new Map<string, number>()
@@ -326,7 +340,7 @@ export default function AdminReports() {
     const hours = new Map<string, number>()
     minutesByWorker.forEach((mins, id) => hours.set(id, mins / 60))
     return hours
-  }, [rawBookings, earningsPreset])
+  }, [rawBookings, earningsPreset, customFrom, customTo])
 
   // NEW: individual completed jobs for ONE worker within the selected
   // range — the per-job detail behind the "Actual Hours" total above.
@@ -334,7 +348,7 @@ export default function AdminReports() {
   // timestamps present, work_started_at inside the range) so the sum
   // of durations shown here always matches that total exactly.
   function jobsForWorkerInRange(workerId: string) {
-    const { from, to } = rangeForPreset(earningsPreset)
+    const { from, to } = rangeForPreset(earningsPreset, { from: customFrom, to: customTo })
     const fromMs = new Date(from + 'T00:00:00').getTime()
     const toMs = new Date(to + 'T23:59:59').getTime()
     return rawBookings
@@ -623,7 +637,7 @@ export default function AdminReports() {
                     only affects Hours Worked / Total Earned per
                     worker, not the revenue/status numbers above them
                     (those stay all-time, matching the rest of this
-                    page's tabs). */}
+                    page's tabs). "Custom" reveals two date inputs. */}
                 <div className="bg-white rounded-2xl p-4 border border-slate-100 flex items-center gap-2 flex-wrap">
                   <span className="text-[12.5px] font-bold text-slate-500 mr-1">Pay breakdown period:</span>
                   {EARNINGS_RANGE_PRESETS.map(p => (
@@ -636,6 +650,26 @@ export default function AdminReports() {
                       {p.label}
                     </button>
                   ))}
+                  {earningsPreset === 'custom' && (
+                    <div className="flex items-center gap-2 ml-1">
+                      <input
+                        type="date"
+                        value={customFrom}
+                        max={customTo || undefined}
+                        onChange={(e) => setCustomFrom(e.target.value)}
+                        className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-[12.5px] font-bold text-slate-600"
+                      />
+                      <span className="text-slate-400 text-[12.5px]">to</span>
+                      <input
+                        type="date"
+                        value={customTo}
+                        min={customFrom || undefined}
+                        max={toDateStr(new Date())}
+                        onChange={(e) => setCustomTo(e.target.value)}
+                        className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-[12.5px] font-bold text-slate-600"
+                      />
+                    </div>
+                  )}
                   {earningsLoading && <span className="text-[12px] text-slate-400 ml-1">Loading pay data…</span>}
                 </div>
 
@@ -703,7 +737,9 @@ export default function AdminReports() {
                             than breaking the whole row. */}
                         <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4 mb-4">
                           <p className="text-[11px] font-black uppercase tracking-wide text-slate-400 mb-3">
-                            Pay breakdown · {EARNINGS_RANGE_PRESETS.find(p => p.key === earningsPreset)?.label}
+                            Pay breakdown · {earningsPreset === 'custom'
+                              ? `${customFrom || '…'} to ${customTo || '…'}`
+                              : EARNINGS_RANGE_PRESETS.find(p => p.key === earningsPreset)?.label}
                           </p>
                           {earningsLoading && !pay ? (
                             <div className="h-16 rounded-lg bg-slate-100 animate-pulse" />
