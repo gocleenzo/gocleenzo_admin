@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
 import RecurringPackageBadge from './recurring_package_badge'
+import NextJobsSuggestions, { openNextJobSuggestions } from './next_jobs_suggestions'
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 import { fetchCompletedRevenue, getISTMonthStart } from '../_lib/revenue'
 
@@ -2173,6 +2174,8 @@ function Drawer({
       `Your ${b.service_name} is scheduled for ${scheduledStr}. A verified pro has been assigned.`,
       { booking_id: b.id, type: 'booking_assigned' }
     )
+    // Suggest nearby jobs for the professional just assigned
+    openNextJobSuggestions(selW, workers.find(w => w.id === selW)?.name ?? 'Professional', b.scheduled_at)
     setBusy(false); onDone()
   }
 
@@ -3058,6 +3061,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     }
     await load(); setAssigning(null)
     setAssignMap(p => { const n = { ...p }; delete n[bId]; return n })
+    // Suggest nearby jobs for the professional just assigned
+    if (bk) openNextJobSuggestions(wId, workers.find(w => w.id === wId)?.name ?? 'Professional', bk.scheduled_at)
   }
 
   async function quickAct(bId: string, status: string) {
@@ -3823,6 +3828,13 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                   🚫 Unassign
                                 </button>
                               )}
+                              {!!b.worker_id && ['pending','accepted','otp_verified','in_progress'].includes(b.status) && (
+                                <button onClick={() => openNextJobSuggestions(b.worker_id!, b.worker, b.scheduled_at)}
+                                  title="Find nearby jobs for this professional"
+                                  className="px-2.5 py-1 rounded-lg text-[11px] font-black transition-all" style={{ background: '#F0FDFA', color: '#0F766E' }}>
+                                  🧭 Nearby jobs
+                                </button>
+                              )}
                               {b.status === 'in_progress' && (
                                 <button onClick={() => {
                                   if (!window.confirm(
@@ -3916,6 +3928,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           </div>
         </>
       )}
+
+      <NextJobsSuggestions onAssigned={load} />
 
       {selected && (
         <Drawer

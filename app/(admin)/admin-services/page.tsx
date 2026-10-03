@@ -176,6 +176,145 @@ function ServiceAreasSection({ serviceId, supabase }: { serviceId: string; supab
   )
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Extra Time Offer settings — the "+20 min" add-on customers can buy
+// while a service is in progress. Stored in app_settings (row
+// 'global'), which is what the customer app, and the payment backup
+// step (complete_extra_time_payment_recovery) both read. Changing it
+// here affects NEW extra-time purchases only — bookings that already
+// bought extra time keep the price they paid.
+// ═══════════════════════════════════════════════════════════════
+function ExtraTimeSettingsCard({ supabase }: { supabase: any }) {
+  const [price, setPrice] = useState('')
+  const [minutes, setMinutes] = useState('')
+  const [saved, setSaved] = useState<{ price: number; minutes: number } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [justSaved, setJustSaved] = useState(false)
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from('app_settings')
+        .select('extra_time_price, extra_time_minutes')
+        .eq('id', 'global')
+        .maybeSingle()
+      if (error) {
+        setErr(error.message)
+      } else if (data) {
+        setPrice(String(data.extra_time_price ?? ''))
+        setMinutes(String(data.extra_time_minutes ?? ''))
+        setSaved({ price: data.extra_time_price, minutes: data.extra_time_minutes })
+      } else {
+        setErr('Settings row not found (app_settings, id = global)')
+      }
+      setLoading(false)
+    })()
+  }, [])
+
+  const priceNum = Number(price)
+  const minutesNum = Number(minutes)
+  const priceValid = price !== '' && Number.isInteger(priceNum) && priceNum >= 1 && priceNum <= 10000
+  const minutesValid = minutes !== '' && Number.isInteger(minutesNum) && minutesNum >= 5 && minutesNum <= 180
+  const changed = saved != null && (priceNum !== saved.price || minutesNum !== saved.minutes)
+
+  async function save() {
+    if (!priceValid || !minutesValid) return
+    setSaving(true); setErr(null); setJustSaved(false)
+    try {
+      // Saved through the admin server (app/api/settings/extra-time),
+      // which checks the admin login — the browser itself isn't allowed
+      // to change app_settings, by design.
+      const res = await fetch('/api/settings/extra-time', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ price: priceNum, minutes: minutesNum }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setErr(json?.error ?? `Not saved (error ${res.status})`)
+        return
+      }
+      setSaved({ price: json.extra_time_price, minutes: json.extra_time_minutes })
+      setJustSaved(true)
+    } catch (e: any) {
+      setErr(e?.message ?? 'Could not save')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-5 mb-5">
+      <div className="flex items-start gap-3 mb-4">
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
+          style={{ background: '#EDE9FE', border: '1px solid #DDD6FE' }}>⏱️</div>
+        <div>
+          <h2 className="text-[15px] font-black text-slate-900">Extra Time Offer</h2>
+          <p className="text-[11.5px] text-slate-400 font-medium">
+            The add-on customers can buy while a service is in progress.
+            {saved && <> Currently <b className="text-slate-600">+{saved.minutes} min for ₹{saved.price}</b>.</>}
+          </p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="py-4 text-center text-slate-400 text-sm">Loading…</div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5 block">
+                Price (₹)
+              </label>
+              <input type="number" min={1} value={price}
+                onChange={e => { setPrice(e.target.value); setJustSaved(false) }}
+                className="w-full px-4 py-2.5 rounded-xl text-sm font-bold text-slate-800 outline-none bg-slate-50 border focus:border-cyan-400"
+                style={{ borderColor: price !== '' && !priceValid ? '#FCA5A5' : '#E2E8F0' }}/>
+            </div>
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5 block">
+                Extra minutes
+              </label>
+              <input type="number" min={5} max={180} value={minutes}
+                onChange={e => { setMinutes(e.target.value); setJustSaved(false) }}
+                className="w-full px-4 py-2.5 rounded-xl text-sm font-bold text-slate-800 outline-none bg-slate-50 border focus:border-cyan-400"
+                style={{ borderColor: minutes !== '' && !minutesValid ? '#FCA5A5' : '#E2E8F0' }}/>
+            </div>
+            <button onClick={save}
+              disabled={saving || !priceValid || !minutesValid || !changed}
+              className="h-[42px] px-5 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
+              {saving ? '…' : 'Save'}
+            </button>
+          </div>
+
+          {(!priceValid && price !== '') && (
+            <p className="text-[11px] text-red-500 font-semibold mt-2">Price must be a whole number from ₹1 to ₹10,000.</p>
+          )}
+          {(!minutesValid && minutes !== '') && (
+            <p className="text-[11px] text-red-500 font-semibold mt-2">Minutes must be a whole number from 5 to 180.</p>
+          )}
+          {err && (
+            <div className="mt-3 rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
+              <p className="text-xs font-bold text-red-600">{err}</p>
+            </div>
+          )}
+          {justSaved && saved && (
+            <div className="mt-3 rounded-xl px-3 py-2.5 bg-emerald-50 border border-emerald-200">
+              <p className="text-xs font-bold text-emerald-700">
+                ✓ Saved — customers now see +{saved.minutes} min for ₹{saved.price}.
+                Bookings that already bought extra time keep the price they paid.
+              </p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function AdminServices() {
   const [services, setServices] = useState<Service[]>([])
   const [loading, setLoading] = useState(true)
@@ -233,6 +372,8 @@ export default function AdminServices() {
           onChange={e => setSearch(e.target.value)}
           className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
       </div>
+
+      <ExtraTimeSettingsCard supabase={supabase} />
 
       {loadError && (
         <div className="mb-4 rounded-xl px-4 py-3 bg-red-50 border border-red-200">
@@ -544,4 +685,4 @@ function EditServiceModal({ service, onClose, onSaved }: {
       </div>
     </>
   )
-}
+}   
