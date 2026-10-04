@@ -1,26 +1,4 @@
-// app/api/admin-auth/suggest-jobs/route.ts
-//
-// Powers the "🧭 Nearby jobs" popup in admin Bookings for ONE
-// professional's day:
-//   - suggestions: best next jobs — least idle time first, then nearest
-//   - plan: the combination of unassigned jobs that fills the most
-//           working hours (then least travel), for "Assign all"
-//
-// GET ?worker_id=…&date=YYYY-MM-DD[&exclude=id1,id2]
-//   exclude = jobs the admin removed from the plan (plan recalculates
-//   without them).
-//
-// Checks the admin login itself — API routes aren't covered by
-// middleware.ts.
-import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/admin'
-import { verifyAdminSession } from '@/lib/adminAuth'
-
-// ═════════════════════════════════════════════════════════════════
-// Ranking + full-day planning (kept in this file on purpose — Next.js
-// route files may only export GET/POST/etc., so nothing below is
-// exported).
-// ═════════════════════════════════════════════════════════════════
+// app/api/admin-auth/suggest-jobs/planner.ts
 //
 // Ranking + full-day planning for one professional's day.
 //
@@ -40,17 +18,17 @@ import { verifyAdminSession } from '@/lib/adminAuth'
 //
 // Pure functions only — no database or network access here.
 
-type DayJob = {
+export type DayJob = {
   id: string; start_mins: number; dur_mins: number; xt: number
   lat: number | null; lng: number | null; pin: string | null; addr: string | null
   service: string; status: string
 }
-type DayCandidate = {
+export type DayCandidate = {
   id: string; scheduled_at: string; start_mins: number; dur_mins: number
   lat: number | null; lng: number | null; pin: string | null; addr: string | null
   service: string; customer_name: string | null; area: string | null; pincode: string | null
 }
-type DayContext =
+export type DayContext =
   | { ok: false; reason: string }
   | {
       ok: true; shift_start: number; shift_end: number
@@ -59,13 +37,13 @@ type DayContext =
       jobs: DayJob[]; candidates: DayCandidate[]
     }
 
-const TRAVEL_GAP_MINS = 30
-const EXTRA_TIME_GAP_MINS = 10
-const FAR_KM = 5
+export const TRAVEL_GAP_MINS = 30
+export const EXTRA_TIME_GAP_MINS = 10
+export const FAR_KM = 5
 
 type Place = { lat: number | null; lng: number | null; pin?: string | null; addr?: string | null; xt?: number }
 
-function kmBetween(a: Place | null | undefined, b: Place | null | undefined): number | null {
+export function kmBetween(a: Place | null | undefined, b: Place | null | undefined): number | null {
   if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return null
   const R = 6371, toRad = (d: number) => (d * Math.PI) / 180
   const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng)
@@ -78,7 +56,7 @@ function sameAddress(a: Place, b: Place) {
 }
 
 /** Travel gap between an existing/planned job and another job — same rule as booking. */
-function travelGap(a: Place, b: Place): number {
+export function travelGap(a: Place, b: Place): number {
   if (sameAddress(a, b)) return 0
   return (a.xt ?? 0) > 0 || (b.xt ?? 0) > 0 ? EXTRA_TIME_GAP_MINS : TRAVEL_GAP_MINS
 }
@@ -88,7 +66,7 @@ function toMins(hhmm: string) {
   return h * 60 + (m || 0)
 }
 
-function fmtMins(mins: number) {
+export function fmtMins(mins: number) {
   const h24 = Math.floor(mins / 60), m = mins % 60
   const h12 = h24 % 12 === 0 ? 12 : h24 % 12
   return `${h12}:${String(m).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`
@@ -109,7 +87,7 @@ function blockersOf(ctx: Extract<DayContext, { ok: true }>): Blocker[] {
 // ─────────────────────────────────────────────────────────────────
 // Suggestions
 // ─────────────────────────────────────────────────────────────────
-type Suggestion = {
+export type Suggestion = {
   booking_id: string; scheduled_at: string; start_mins: number; dur_mins: number
   service: string; customer_name: string | null; area: string | null; pincode: string | null
   idle_mins: number
@@ -119,7 +97,7 @@ type Suggestion = {
   far: boolean
 }
 
-function rankSuggestions(ctx: Extract<DayContext, { ok: true }>): Suggestion[] {
+export function rankSuggestions(ctx: Extract<DayContext, { ok: true }>): Suggestion[] {
   const blockers = blockersOf(ctx)
   const jobs = [...ctx.jobs].sort((a, b) => a.start_mins - b.start_mins)
 
@@ -180,7 +158,7 @@ function rankSuggestions(ctx: Extract<DayContext, { ok: true }>): Suggestion[] {
 // ─────────────────────────────────────────────────────────────────
 // Full-day plan
 // ─────────────────────────────────────────────────────────────────
-type TimelineStop = {
+export type TimelineStop = {
   kind: 'existing' | 'new'
   booking_id: string
   start_mins: number; dur_mins: number
@@ -189,7 +167,7 @@ type TimelineStop = {
   km_from_prev: number | null
   far: boolean
 }
-type DayPlan = {
+export type DayPlan = {
   new_booking_ids: string[]
   timeline: TimelineStop[]
   stats: {
@@ -200,7 +178,7 @@ type DayPlan = {
   }
 }
 
-function planDay(
+export function planDay(
   ctx: Extract<DayContext, { ok: true }>,
   excludeIds: Set<string> = new Set(),
 ): DayPlan {
@@ -294,61 +272,4 @@ function planDay(
       total_km: Math.round(totalKm * 10) / 10,
     },
   }
-}
-
-// ═════════════════════════════════════════════════════════════════
-
-export const dynamic = 'force-dynamic'
-export const revalidate = 0
-
-const REASON_TEXT: Record<string, string> = {
-  not_found: 'Professional not found.',
-  not_available: 'This professional is marked unavailable.',
-  holiday: 'This professional has a holiday on this date.',
-  day_off: 'This professional is not working on this date.',
-}
-
-export async function GET(req: NextRequest) {
-  const token = req.cookies.get('admin_session')?.value
-  const session = token ? await verifyAdminSession(token) : null
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-
-  const workerId = req.nextUrl.searchParams.get('worker_id')
-  const date = req.nextUrl.searchParams.get('date') // YYYY-MM-DD (IST)
-  const exclude = new Set(
-    (req.nextUrl.searchParams.get('exclude') ?? '').split(',').map(s => s.trim()).filter(Boolean)
-  )
-
-  if (!workerId || !date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    return NextResponse.json({ error: 'worker_id and date (YYYY-MM-DD) are required' }, { status: 400 })
-  }
-
-  const supabase = createServiceClient()
-  const { data, error } = await supabase.rpc('admin_worker_day_context', {
-    p_worker_id: workerId,
-    p_date: date,
-  })
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-  const ctx = data as DayContext
-  if (!ctx || ctx.ok !== true) {
-    const reason = (ctx as any)?.reason ?? 'unknown'
-    return NextResponse.json({
-      ok: false,
-      reason,
-      reason_text: REASON_TEXT[reason] ?? 'Nothing can be suggested for this day.',
-    })
-  }
-
-  const okCtx = ctx as Extract<DayContext, { ok: true }>
-  const ranked = rankSuggestions(okCtx)
-  const plan = planDay(okCtx, exclude)
-
-  return NextResponse.json({
-    ok: true,
-    shift: { start_mins: okCtx.shift_start, end_mins: okCtx.shift_end, breaks: okCtx.breaks },
-    total_fits: ranked.length,
-    suggestions: ranked.slice(0, 5),
-    plan,
-  })
 }
