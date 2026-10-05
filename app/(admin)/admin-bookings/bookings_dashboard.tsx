@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/client'
 import AssignMap from './assign_map'
 import RecurringPackageBadge from './recurring_package_badge'
 import NextJobsSuggestions, { openNextJobSuggestions } from './next_jobs_suggestions'
+import BookingsTable from './bookings_table'
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 import { fetchCompletedRevenue, getISTMonthStart } from '../_lib/revenue'
 
@@ -2686,6 +2687,18 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
   const [profile,   setProfile]   = useState<'all'|'live'|'completed'|'cancelled'>('all')
   const [filter,    setFilter]    = useState('all')
   const [selected,  setSelected]  = useState<Booking | null>(null)
+  // Table / Cards view switch (remembered on this browser)
+  const [viewMode, setViewModeState] = useState<'cards' | 'table'>('cards')
+  useEffect(() => {
+    try {
+      const v = window.localStorage.getItem('cleenzo_bookings_view')
+      if (v === 'table' || v === 'cards') setViewModeState(v)
+    } catch { /* storage blocked — keep default */ }
+  }, [])
+  function setViewMode(v: 'cards' | 'table') {
+    setViewModeState(v)
+    try { window.localStorage.setItem('cleenzo_bookings_view', v) } catch { /* ignore */ }
+  }
   const [mapFor,    setMapFor]    = useState<Booking | null>(null)
   const [selectedDate, setSelectedDate] = useState<string>('all')
   const [pinnedDate, setPinnedDate] = useState<Date | null>(null)
@@ -3363,10 +3376,29 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       </div>
 
       <div className="px-4 md:px-8 py-6">
-        <p className="text-[13px] mb-4" style={{ color: '#6B7280' }}>
-          <span className="font-black text-[18px]" style={{ color: '#1F2937' }}>{greetingForNow()}</span>
-          <span className="ml-2">{bookings.length} bookings on your plate{inProgressNow > 0 && ` · ${inProgressNow} in progress`}</span>
-        </p>
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+          <p className="text-[13px]" style={{ color: '#6B7280' }}>
+            <span className="font-black text-[18px]" style={{ color: '#1F2937' }}>{greetingForNow()}</span>
+            <span className="ml-2">{bookings.length} bookings on your plate{inProgressNow > 0 && ` · ${inProgressNow} in progress`}</span>
+          </p>
+          <div className="inline-flex rounded-xl p-1" style={{ background: '#EEF2F7', border: '1px solid #E2E8F0' }}>
+            {([
+              { key: 'cards', label: '▦ Cards' },
+              { key: 'table', label: '☰ Table' },
+            ] as const).map(opt => {
+              const on = viewMode === opt.key
+              return (
+                <button key={opt.key} onClick={() => setViewMode(opt.key)}
+                  className="px-3.5 py-1.5 rounded-lg text-[12px] font-black transition-all"
+                  style={on
+                    ? { background: '#FFFFFF', color: '#0E7490', boxShadow: '0 1px 3px rgba(15,23,42,0.12)' }
+                    : { background: 'transparent', color: '#64748B' }}>
+                  {opt.label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
         {[
@@ -3571,7 +3603,24 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         </div>
       </div>
 
-      {dateAreaFiltered.length === 0 ? (
+      {viewMode === 'table' ? (
+        <BookingsTable
+          bookings={dateAreaFiltered}
+          isOwner={isOwner}
+          canUnassign={canUnassign}
+          onDetails={b => setSelected(bookings.find(x => x.id === b.id) ?? null)}
+          onUnassign={id => quickUnassign(id)}
+          onComplete={id => {
+            const bk = bookings.find(x => x.id === id)
+            if (window.confirm(`Mark "${bk?.service_name ?? 'this booking'}" for ${bk?.customer ?? 'the customer'} as completed?`)) quickAct(id, 'completed')
+          }}
+          onCancel={id => {
+            const bk = bookings.find(x => x.id === id)
+            if (window.confirm(`Cancel "${bk?.service_name ?? 'this booking'}" for ${bk?.customer ?? 'the customer'}?\n\nThe customer will be notified.`)) quickAct(id, 'cancelled')
+          }}
+          onNearby={b => { if (b.worker_id) openNextJobSuggestions(b.worker_id, b.worker, b.scheduled_at) }}
+        />
+      ) : dateAreaFiltered.length === 0 ? (
         <div className="bg-white rounded-3xl p-16 text-center" style={{ border: '1px solid #EFEAFB' }}>
           <p className="text-5xl mb-3">
             {profile === 'live' ? '⚡' : profile === 'completed' ? '🎉' : profile === 'cancelled' ? '🙈' : '☕'}

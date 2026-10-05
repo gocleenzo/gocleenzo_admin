@@ -53,6 +53,33 @@ function todayIST(): string {
 
 const containerStyle = { width: '100%', height: '100%' }
 
+// NEW: time-slot filter for the orders layer (by the order's start time, IST).
+//   9–12  = starts 9:00 AM – 11:59 AM
+//   12–4  = starts 12:00 PM – 3:59 PM
+//   4–9   = starts 4:00 PM – 8:59 PM
+//   Other = anything before 9 AM or from 9 PM (chip only shows if there are any)
+type SlotKey = 'all' | 'morning' | 'afternoon' | 'evening' | 'other'
+const TIME_SLOTS: { key: Exclude<SlotKey, 'all' | 'other'>; label: string; from: number; to: number }[] = [
+  { key: 'morning',   label: '9 – 12',  from: 9 * 60,  to: 12 * 60 },
+  { key: 'afternoon', label: '12 – 4',  from: 12 * 60, to: 16 * 60 },
+  { key: 'evening',   label: '4 – 9',   from: 16 * 60, to: 21 * 60 },
+]
+
+function istMinutes(iso: string): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date(iso))
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0) % 24
+  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0)
+  return h * 60 + m
+}
+
+function slotOf(iso: string): Exclude<SlotKey, 'all'> {
+  const mins = istMinutes(iso)
+  const s = TIME_SLOTS.find((t) => mins >= t.from && mins < t.to)
+  return s ? s.key : 'other'
+}
+
 // A teardrop "pin" icon built as an inline SVG data-URL image — a
 // different, more reliable rendering path than a google.maps.Symbol
 // with a custom vector path (which silently failed to draw in this
@@ -116,6 +143,8 @@ export default function WorkerLiveMap() {
   // NEW: which day's orders to show — defaults to today (IST), changed
   // via the date picker that appears once the layer is switched on.
   const [ordersDate, setOrdersDate] = useState<string>(todayIST())
+  // NEW: which time slot of that day to show (All = every order)
+  const [slot, setSlot] = useState<SlotKey>('all')
   const [, setTick] = useState(0)
   const mapRef = useRef<google.maps.Map | null>(null)
   const infoRef = useRef<google.maps.InfoWindow | null>(null)
@@ -245,6 +274,20 @@ export default function WorkerLiveMap() {
     })
   }, [workers, isLoaded])
 
+  // NEW: orders narrowed to the chosen time slot, plus a count per slot
+  const slotCounts = useMemo(() => {
+    const c: Record<SlotKey, number> = { all: 0, morning: 0, afternoon: 0, evening: 0, other: 0 }
+    orders.forEach((o) => { c.all++; c[slotOf(o.scheduled_at)]++ })
+    return c
+  }, [orders])
+
+  const visibleOrders = useMemo(() => {
+    if (slot === 'all') return orders
+    const m = new Map<string, Order>()
+    orders.forEach((o) => { if (slotOf(o.scheduled_at) === slot) m.set(o.id, o) })
+    return m
+  }, [orders, slot])
+
   // NEW: renders/updates the today's-orders pin layer, independent of
   // the worker-dot effect above so toggling orders on/off never
   // touches worker markers and vice versa.
@@ -261,7 +304,7 @@ export default function WorkerLiveMap() {
 
     const seen = new Set<string>()
 
-    orders.forEach((o) => {
+    visibleOrders.forEach((o) => {
       seen.add(o.id)
       const meta = ORDER_STATUS_META[o.status] ?? ORDER_STATUS_META.pending
 
@@ -280,7 +323,7 @@ export default function WorkerLiveMap() {
           const cur = orders.get(o.id)
           if (!cur || !infoRef.current) return
           const curMeta = ORDER_STATUS_META[cur.status] ?? ORDER_STATUS_META.pending
-          const time = new Date(cur.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+          const time = new Date(cur.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })
           infoRef.current.setContent(
             `<div style="font-family:system-ui;font-size:13px;line-height:1.6;max-width:240px">
                <span style="color:${curMeta.color};font-weight:700">${curMeta.label}</span><br/>
@@ -306,7 +349,7 @@ export default function WorkerLiveMap() {
         orderMarkersRef.current.delete(id)
       }
     })
-  }, [orders, showOrders, isLoaded])
+  }, [orders, visibleOrders, showOrders, isLoaded])
 
   const counts = useMemo(() => {
     const now = Date.now()
@@ -351,7 +394,7 @@ export default function WorkerLiveMap() {
               border: `1px solid ${showOrders ? '#7C3AED40' : '#E2E8F0'}`,
             }}
           >
-            📦 {ordersDate === todayIST() ? "Today's Orders" : 'Orders'} {showOrders ? `(${orders.size})` : ''}
+            📦 {ordersDate === todayIST() ? "Today's Orders" : 'Orders'} {showOrders ? `(${slot === 'all' ? orders.size : `${visibleOrders.size}/${orders.size}`})` : ''}
           </button>
           {/* NEW: date picker for the orders layer — only shown once the
               layer is on, so it doesn't clutter the header otherwise.
@@ -378,6 +421,44 @@ export default function WorkerLiveMap() {
           </span>
         </div>
       </div>
+
+      {/* NEW: time-slot filter — only while the orders layer is on */}
+      {showOrders && (
+        <div className="px-5 md:px-6 py-2.5 bg-white border-b border-slate-100 flex items-center flex-wrap gap-2">
+          <span className="text-[11px] font-black text-slate-400 uppercase tracking-wide mr-1">🕘 Time slot</span>
+          {([
+            { key: 'all' as SlotKey, label: 'All day' },
+            ...TIME_SLOTS.map((t) => ({ key: t.key as SlotKey, label: t.label })),
+            ...(slotCounts.other > 0 ? [{ key: 'other' as SlotKey, label: 'Other times' }] : []),
+          ]).map((opt) => {
+            const on = slot === opt.key
+            const n = slotCounts[opt.key]
+            return (
+              <button
+                key={opt.key}
+                onClick={() => setSlot(opt.key)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black transition-all"
+                style={{
+                  background: on ? '#0891B2' : '#F1F5F9',
+                  color: on ? '#FFFFFF' : '#475569',
+                  border: `1px solid ${on ? '#0891B2' : '#E2E8F0'}`,
+                }}
+              >
+                {opt.label}
+                <span
+                  className="px-1.5 rounded-full text-[10px]"
+                  style={{ background: on ? 'rgba(255,255,255,0.25)' : '#E2E8F0', color: on ? '#FFFFFF' : '#64748B' }}
+                >
+                  {n}
+                </span>
+              </button>
+            )
+          })}
+          {slot !== 'all' && visibleOrders.size === 0 && (
+            <span className="text-[11px] font-semibold text-slate-400">No orders in this slot</span>
+          )}
+        </div>
+      )}
 
       {/* status legend */}
       <div className="px-5 md:px-6 py-2.5 bg-white border-b border-slate-100 flex items-center flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
