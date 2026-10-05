@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 
 /* ───────────────────────────── config ─────────────────────────────
@@ -17,12 +17,17 @@ const SUPPORT_WRITE_TABLE = 'support_queries'   // used for UPDATE (write) — t
 type Complaint = {
   id: string; title: string; description: string
   status: string; created_at: string | null; from: string
+  // professional(s) this complaint is about — the booking's professional,
+  // a worker_id on the row, or the professional who raised it themselves
+  proIds: string[]
 }
 type Review = {
   id: string; booking_id: string; service_rating: number; worker_rating: number
   comment: string; status: string; created_at: string
   customer: string; worker: string; service: string
+  worker_id: string | null
 }
+type Pro = { id: string; name: string; phone: string }
 
 /* pick the first key that exists & is non-empty on a row */
 function pick(row: any, keys: string[]): string | null {
@@ -63,12 +68,14 @@ export default function AdminFeedback() {
   const [hasStatus,  setHasStatus]  = useState(true)
   const [reviews,    setReviews]    = useState<Review[]>([])
   const [filter,     setFilter]     = useState('all')
+  const [pros,       setPros]       = useState<Pro[]>([])
+  const [proFilter,  setProFilter]  = useState<string>('all')
   const [loading,    setLoading]    = useState(true)
   const supabase = createClient()
 
   useEffect(() => {
     async function load() {
-      const [cRes, rRes] = await Promise.all([
+      const [cRes, rRes, pRes] = await Promise.all([
         // Support queries — select everything, we map flexibly below.
         // Reading from the VIEW is fine and intentional — it gives us
         // the joined registered_name/registered_phone from `users` for
@@ -76,9 +83,19 @@ export default function AdminFeedback() {
         supabase.from(SUPPORT_TABLE).select('*'),
         supabase
           .from('reviews')
-          .select('id,service_rating,worker_rating,comment,status,created_at,booking_id,services(name),customer:users!customer_id(full_name),worker:users!worker_id(full_name)')
+          .select('id,service_rating,worker_rating,comment,status,created_at,booking_id,worker_id,services(name),customer:users!customer_id(full_name),worker:users!worker_id(full_name)')
           .order('created_at', { ascending: false }),
+        // every professional, for the Professional filter
+        supabase.from('users').select('id, full_name, phone').eq('role', 'worker'),
       ])
+
+      if (pRes.data) {
+        setPros(pRes.data.map((u: any) => ({
+          id: String(u.id),
+          name: u.full_name || `Professional ${String(u.id).slice(0, 6)}`,
+          phone: u.phone ?? '',
+        })))
+      }
 
       if (cRes.error) {
         console.error('support queries load error:', cRes.error.message)
@@ -86,6 +103,16 @@ export default function AdminFeedback() {
       if (cRes.data && cRes.data.length) {
         // detect whether a status column exists at all
         setHasStatus(Object.prototype.hasOwnProperty.call(cRes.data[0], 'status'))
+
+        // complaints linked to a booking → find that booking's professional
+        const bookingIds = Array.from(new Set(
+          cRes.data.map((row: any) => row.booking_id).filter(Boolean).map(String)))
+        const bookingWorker: Record<string, string> = {}
+        if (bookingIds.length) {
+          const { data: bks } = await supabase
+            .from('bookings').select('id, worker_id').in('id', bookingIds)
+          ;(bks ?? []).forEach((b: any) => { if (b.worker_id) bookingWorker[String(b.id)] = String(b.worker_id) })
+        }
 
         const mapped: Complaint[] = cRes.data.map((row: any) => ({
           id:          String(row.id),
@@ -95,6 +122,11 @@ export default function AdminFeedback() {
           created_at:  pick(row, ['created_at', 'inserted_at', 'date']),
           from:        pick(row, ['full_name', 'name', 'customer_name', 'customer', 'email', 'user_email'])
                         ?? (row.user_id ? `User ${String(row.user_id).slice(0, 8)}` : '—'),
+          proIds:      [
+            row.worker_id ? String(row.worker_id) : null,
+            row.booking_id ? bookingWorker[String(row.booking_id)] ?? null : null,
+            row.user_id ? String(row.user_id) : null,   // raised by the professional
+          ].filter((x): x is string => !!x),
         }))
         // newest first (created_at may be missing on some rows)
         mapped.sort((a, b) =>
@@ -111,6 +143,7 @@ export default function AdminFeedback() {
         customer: r.customer?.full_name ?? 'Customer',
         worker:   r.worker?.full_name   ?? 'Worker',
         service:  r.services?.name      ?? 'Service',
+        worker_id: r.worker_id ? String(r.worker_id) : null,
       })))
 
       setLoading(false)
@@ -119,6 +152,28 @@ export default function AdminFeedback() {
   }, [])
 
   useEffect(() => { setFilter('all') }, [tab])
+
+  // ── Professional filter ──
+  const proReviews = useMemo(
+    () => proFilter === 'all' ? reviews : reviews.filter(r => r.worker_id === proFilter),
+    [reviews, proFilter])
+  const proComplaints = useMemo(
+    () => proFilter === 'all' ? complaints : complaints.filter(c => c.proIds.includes(proFilter)),
+    [complaints, proFilter])
+
+  // how many reviews / complaints each professional has (for the dropdown)
+  const proCounts = useMemo(() => {
+    const m: Record<string, { reviews: number; complaints: number }> = {}
+    const get = (id: string) => (m[id] ??= { reviews: 0, complaints: 0 })
+    reviews.forEach(r => { if (r.worker_id) get(r.worker_id).reviews++ })
+    const proSet = new Set(pros.map(p => p.id))
+    complaints.forEach(c => {
+      new Set(c.proIds.filter(id => proSet.has(id))).forEach(id => get(id).complaints++)
+    })
+    return m
+  }, [reviews, complaints, pros])
+
+  const selectedPro = pros.find(p => p.id === proFilter) ?? null
 
   async function updateComplaint(id: string, status: string) {
     const prev = complaints
@@ -172,8 +227,31 @@ export default function AdminFeedback() {
         ))}
       </div>
 
+      {/* professional filter */}
+      <div className="flex items-center gap-3 flex-wrap mb-4">
+        <ProPicker
+          pros={pros}
+          counts={proCounts}
+          tab={tab}
+          value={proFilter}
+          onChange={setProFilter}
+        />
+        {selectedPro && (
+          <button onClick={() => setProFilter('all')}
+            className="text-xs font-bold px-3 py-2 rounded-xl"
+            style={{ color: MUTED, background: CARD, border: `1px solid ${LINE}` }}>
+            ✕ Clear
+          </button>
+        )}
+      </div>
+
+      {/* selected professional's summary */}
+      {selectedPro && (
+        <ProSummary pro={selectedPro} reviews={proReviews} complaints={proComplaints} />
+      )}
+
       {/* reviews summary strip */}
-      {tab === 'reviews' && reviews.length > 0 && <ReviewSummary reviews={reviews} />}
+      {tab === 'reviews' && !selectedPro && proReviews.length > 0 && <ReviewSummary reviews={proReviews} />}
 
       {/* filter pills */}
       <div className="flex gap-2 overflow-x-auto pb-2 mb-5">
@@ -182,7 +260,7 @@ export default function AdminFeedback() {
           ...Object.entries(tab === 'reviews' ? REVIEW_CFG : COMPLAINT_CFG)
             .map(([k, v]) => ({ k, label: v.label, color: v.color })),
         ].map(f => {
-          const list  = tab === 'reviews' ? reviews : complaints
+          const list  = tab === 'reviews' ? proReviews : proComplaints
           const count = f.k === 'all' ? list.length : list.filter(x => x.status === f.k).length
           const on    = filter === f.k
           return (
@@ -200,8 +278,8 @@ export default function AdminFeedback() {
       </div>
 
       {tab === 'reviews'
-        ? <ReviewList    items={reviews}    filter={filter} onUpdate={updateReview} />
-        : <ComplaintList items={complaints} filter={filter} hasStatus={hasStatus} onUpdate={updateComplaint} />}
+        ? <ReviewList    items={proReviews}    filter={filter} onUpdate={updateReview} />
+        : <ComplaintList items={proComplaints} filter={filter} hasStatus={hasStatus} onUpdate={updateComplaint} />}
     </div>
   )
 }
@@ -223,6 +301,132 @@ function Stars({ n }: { n: number }) {
       <span style={{ color: STAR }}>{'★'.repeat(v)}</span>
       <span style={{ color: LINE }}>{'★'.repeat(5 - v)}</span>
     </span>
+  )
+}
+
+/* ───────────────────────── professional picker ───────────────────────── */
+function ProPicker({ pros, counts, tab, value, onChange }: {
+  pros: Pro[]
+  counts: Record<string, { reviews: number; complaints: number }>
+  tab: 'complaints' | 'reviews'
+  value: string
+  onChange: (id: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const boxRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
+
+  const countOf = (id: string) => {
+    const c = counts[id]
+    return c ? (tab === 'reviews' ? c.reviews : c.complaints) : 0
+  }
+
+  // professionals with the most reviews/complaints first, then A–Z
+  const list = pros
+    .filter(p => {
+      const t = q.trim().toLowerCase()
+      return !t || p.name.toLowerCase().includes(t) || p.phone.includes(t)
+    })
+    .sort((a, b) => countOf(b.id) - countOf(a.id) || a.name.localeCompare(b.name))
+
+  const selected = pros.find(p => p.id === value)
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <button onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all"
+        style={{
+          background: selected ? CYAN[50] : CARD,
+          color: selected ? CYAN[700] : INK,
+          border: `1px solid ${selected ? CYAN[500] + '66' : LINE}`,
+        }}>
+        <span>👷</span>
+        <span className="max-w-[220px] truncate">{selected ? selected.name : 'All professionals'}</span>
+        <span style={{ color: FAINT }}>▾</span>
+      </button>
+
+      {open && (
+        <div className="absolute z-30 mt-2 w-[300px] rounded-2xl overflow-hidden"
+          style={{ background: CARD, border: `1px solid ${LINE}`, boxShadow: '0 12px 32px rgba(15,23,42,0.14)' }}>
+          <div className="p-2" style={{ borderBottom: `1px solid ${LINE}` }}>
+            <input autoFocus value={q} onChange={e => setQ(e.target.value)}
+              placeholder="Search name or phone…"
+              className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+              style={{ background: PAGE, border: `1px solid ${LINE}`, color: INK }} />
+          </div>
+          <div className="max-h-[320px] overflow-y-auto py-1">
+            <button onClick={() => { onChange('all'); setOpen(false); setQ('') }}
+              className="w-full text-left px-4 py-2.5 text-sm font-bold hover:bg-slate-50"
+              style={{ color: value === 'all' ? CYAN[700] : INK }}>
+              All professionals
+            </button>
+            {list.map(p => {
+              const n = countOf(p.id)
+              const on = p.id === value
+              return (
+                <button key={p.id} onClick={() => { onChange(p.id); setOpen(false); setQ('') }}
+                  className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left hover:bg-slate-50"
+                  style={{ background: on ? CYAN[50] : undefined }}>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold truncate" style={{ color: on ? CYAN[700] : INK }}>{p.name}</span>
+                    {p.phone && <span className="block text-[11px]" style={{ color: FAINT }}>{p.phone}</span>}
+                  </span>
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0"
+                    style={{ background: n ? (tab === 'reviews' ? '#FEF3C7' : '#FEE2E2') : PAGE,
+                             color: n ? (tab === 'reviews' ? '#B45309' : '#B91C1C') : FAINT }}>
+                    {n} {tab === 'reviews' ? (n === 1 ? 'review' : 'reviews') : (n === 1 ? 'complaint' : 'complaints')}
+                  </span>
+                </button>
+              )
+            })}
+            {list.length === 0 && (
+              <p className="px-4 py-6 text-center text-xs" style={{ color: FAINT }}>No professional found</p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ───────────────────────── selected professional summary ───────────────────────── */
+function ProSummary({ pro, reviews, complaints }: { pro: Pro; reviews: Review[]; complaints: Complaint[] }) {
+  const rated = reviews.map(r => r.worker_rating).filter(Boolean)
+  const avg = rated.length ? rated.reduce((a, b) => a + b, 0) / rated.length : 0
+  const openCount = complaints.filter(c => c.status === 'open' || c.status === 'in_progress').length
+  const low = reviews.filter(r => r.worker_rating > 0 && r.worker_rating <= 2).length
+
+  const tiles = [
+    { label: 'Avg rating', value: rated.length ? avg.toFixed(1) : '—', extra: rated.length ? <Stars n={avg} /> : null },
+    { label: 'Reviews', value: String(reviews.length), extra: low ? <span className="text-[11px] font-bold" style={{ color: '#B91C1C' }}>{low} low (1–2★)</span> : null },
+    { label: 'Complaints', value: String(complaints.length), extra: null },
+    { label: 'Still open', value: String(openCount), extra: null, warn: openCount > 0 },
+  ]
+
+  return (
+    <div className="rounded-2xl p-4 mb-5" style={{ background: CARD, border: `1px solid ${LINE}` }}>
+      <p className="text-sm font-black mb-3" style={{ color: INK }}>
+        👷 {pro.name}{pro.phone && <span className="font-semibold ml-2" style={{ color: FAINT }}>{pro.phone}</span>}
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {tiles.map(t => (
+          <div key={t.label} className="rounded-xl p-3" style={{ background: PAGE, border: `1px solid ${LINE}` }}>
+            <p className="text-[11px] font-semibold mb-1" style={{ color: MUTED }}>{t.label}</p>
+            <p className="text-xl font-black" style={{ color: t.warn ? '#DC2626' : INK }}>{t.value}</p>
+            {t.extra && <div className="mt-0.5">{t.extra}</div>}
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
