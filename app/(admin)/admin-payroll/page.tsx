@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 
 type Worker = {
@@ -89,7 +89,7 @@ function monthRange() {
 }
 
 export default function PayrollPage() {
-  const [tab, setTab] = useState<'earnings' | 'claims' | 'referrals' | 'payouts'>('earnings')
+  const [tab, setTab] = useState<'wallet' | 'earnings' | 'claims' | 'referrals' | 'payouts'>('wallet')
   const [pendingCount, setPendingCount] = useState(0)
 
   useEffect(() => {
@@ -113,6 +113,7 @@ export default function PayrollPage() {
 
       <div className="inline-flex p-1 rounded-xl bg-slate-100 mb-5 flex-wrap">
         {([
+          ['wallet', '💸 Wallet & Payouts'],
           ['earnings', 'Earnings'],
           ['claims', 'Travel claims'],
           ['referrals', 'Refer & Earn'],
@@ -135,6 +136,7 @@ export default function PayrollPage() {
         ))}
       </div>
 
+      {tab === 'wallet' && <WalletTab />}
       {tab === 'earnings' && <EarningsTab />}
       {tab === 'claims' && <ClaimsTab />}
       {tab === 'referrals' && <ReferralsTab />}
@@ -1103,5 +1105,618 @@ function ActBtn({ label, color, busy, onClick, wide }: { label: string; color: s
       style={{ background: color }}>
       {busy ? '…' : label}
     </button>
+  )
+}
+
+// ═════════════════════ WALLET & PAYOUTS TAB ═════════════════════
+// Each professional's wallet — earned, paid, balance due, history.
+
+/* ───────────────────────── types ───────────────────────── */
+type W_ProRow = {
+  worker_id: string; full_name: string; phone: string | null; is_verified: boolean
+  balance: number; total_earned: number; total_paid: number
+  month_earned: number; month_paid: number; last_payout: string | null; joined_on: string | null
+}
+type W_Order = { booking_id: string; time: string; service: string; minutes: number }
+type W_Breakdown = {
+  date?: string; amount?: number
+  base_amount?: number; shift_hours?: number
+  order_amount?: number; order_hours?: number
+  overtime_amount?: number; overtime_hours?: number
+  travel_amount?: number; penalty_amount?: number
+  orders_count?: number; orders?: W_Order[]
+  tier?: string; orders_at?: number; period_from?: string; period_to?: string
+}
+type W_Txn = {
+  id: string; txn_date: string; kind: string; amount: number; title: string
+  breakdown: W_Breakdown | null; method: string | null; reference: string | null
+  note: string | null; created_at: string; editable: boolean
+}
+type W_Wallet = {
+  balance: number; total_earned: number; total_paid: number; total_deducted: number
+  month_earned: number; month_paid: number; last_payout: string | null
+  joined_on: string | null; today: W_Breakdown; txns: W_Txn[]
+}
+type W_EntryKind = 'payout' | 'advance' | 'deduction' | 'credit' | 'opening_balance'
+
+/* ───────────────────────── theme ───────────────────────── */
+const W_CYAN = { 50: '#ECFEFF', 100: '#CFFAFE', 500: '#06B6D4', 600: '#0891B2', 700: '#0E7490' }
+const W_GREEN = '#059669', W_GREEN_BG = '#ECFDF5'
+const W_RED = '#DC2626', W_RED_BG = '#FEF2F2'
+const W_INK = '#0F172A', W_BODY = '#475569', W_MUTED = '#64748B', W_FAINT = '#94A3B8'
+const W_LINE = '#E2E8F0', W_CARD = '#FFFFFF', W_PAGE = '#F8FAFC'
+
+/* ───────────────────────── helpers ───────────────────────── */
+const W_n = (v: unknown) => Number(v ?? 0) || 0
+const W_inr = (v: number, signed = false) => {
+  const s = `₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+  if (!signed) return v < 0 ? `−${s}` : s
+  return v < 0 ? `− ${s}` : `+ ${s}`
+}
+const W_fmtDate = (d: string | null | undefined) =>
+  d ? new Date(d + (d.length === 10 ? 'T00:00:00' : '')).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
+const W_todayIST = () => {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  return p // YYYY-MM-DD
+}
+
+const W_KIND_ICON: Record<string, string> = {
+  daily_earning: '📅', tier_bonus: '🏆', manual_bonus: '🎁', joining_bonus: '🎉', referral_bonus: '🤝',
+  payout: '💸', advance: '⏩', deduction: '➖', credit: '➕', opening_balance: '📘', settlement: '✅',
+}
+
+/* ───────────────────────── page ───────────────────────── */
+function WalletTab() {
+  const [rows, setRows] = useState<W_ProRow[]>([])
+  const [role, setRole] = useState<string>('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState<'owed' | 'name' | 'last_paid' | 'earned'>('owed')
+  const [openId, setOpenId] = useState<string | null>(null)
+  const [quickPay, setQuickPay] = useState<W_ProRow | null>(null)
+
+  const load = useCallback(async () => {
+    setError(null)
+    try {
+      const res = await fetch('/api/admin-auth/wallet', { cache: 'no-store' })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Could not load payouts')
+      setRows((json.professionals ?? []).map((r: any) => ({
+        ...r,
+        balance: W_n(r.balance), total_earned: W_n(r.total_earned), total_paid: W_n(r.total_paid),
+        month_earned: W_n(r.month_earned), month_paid: W_n(r.month_paid),
+      })))
+      setRole(json.role ?? '')
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const isOwner = role === 'owner'
+
+  const list = useMemo(() => {
+    const t = search.trim().toLowerCase()
+    const f = rows.filter(r => !t || r.full_name.toLowerCase().includes(t) || (r.phone ?? '').includes(t))
+    return f.sort((a, b) =>
+      sort === 'owed' ? b.balance - a.balance
+      : sort === 'earned' ? b.month_earned - a.month_earned
+      : sort === 'last_paid' ? (b.last_payout ?? '').localeCompare(a.last_payout ?? '')
+      : a.full_name.localeCompare(b.full_name))
+  }, [rows, search, sort])
+
+  const totals = useMemo(() => ({
+    due: rows.reduce((s, r) => s + Math.max(0, r.balance), 0),
+    monthEarned: rows.reduce((s, r) => s + r.month_earned, 0),
+    monthPaid: rows.reduce((s, r) => s + r.month_paid, 0),
+    owedCount: rows.filter(r => r.balance > 0).length,
+  }), [rows])
+
+  function exportCsv() {
+    const head = ['Professional', 'Phone', 'Balance due', 'Earned (all time)', 'Paid (all time)', 'Earned this month', 'Paid this month', 'Last paid', 'Joined']
+    const lines = list.map(r => [r.full_name, r.phone ?? '', r.balance, r.total_earned, r.total_paid, r.month_earned, r.month_paid, r.last_payout ?? '', r.joined_on ?? '']
+      .map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+    const blob = new Blob(['﻿' + [head.join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `cleenzo-payouts-${W_todayIST()}.csv`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+
+  const open = rows.find(r => r.worker_id === openId) ?? null
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+        <p className="text-sm" style={{ color: W_MUTED }}>
+          Each professional&apos;s wallet — what they earned, what you paid, and what is still due.
+          Record every payment here so it shows in their app.
+        </p>
+        <button onClick={exportCsv}
+          className="px-4 py-2 rounded-xl text-sm font-bold"
+          style={{ background: W_CARD, color: W_CYAN[700], border: `1px solid ${W_LINE}` }}>
+          ⬇ Export (Excel)
+        </button>
+      </div>
+
+      {/* totals */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        {[
+          { label: 'Total due to professionals', value: W_inr(totals.due), color: totals.due > 0 ? W_RED : W_INK },
+          { label: 'Professionals owed', value: String(totals.owedCount), color: W_INK },
+          { label: 'Earned this month', value: W_inr(totals.monthEarned), color: W_GREEN },
+          { label: 'Paid this month', value: W_inr(totals.monthPaid), color: W_INK },
+        ].map(t => (
+          <div key={t.label} className="rounded-2xl p-4" style={{ background: W_CARD, border: `1px solid ${W_LINE}` }}>
+            <p className="text-xs font-semibold" style={{ color: W_MUTED }}>{t.label}</p>
+            <p className="text-2xl font-black mt-1" style={{ color: t.color }}>{t.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* search + sort */}
+      <div className="flex items-center gap-3 flex-wrap mb-4">
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name or phone…"
+          className="flex-1 min-w-[200px] max-w-sm px-4 py-2.5 rounded-xl text-sm outline-none"
+          style={{ background: W_CARD, border: `1px solid ${W_LINE}`, color: W_INK }} />
+        <select value={sort} onChange={e => setSort(e.target.value as any)}
+          className="px-3 py-2.5 rounded-xl text-sm font-semibold outline-none"
+          style={{ background: W_CARD, border: `1px solid ${W_LINE}`, color: W_BODY }}>
+          <option value="owed">Most owed first</option>
+          <option value="earned">Most earned this month</option>
+          <option value="last_paid">Recently paid</option>
+          <option value="name">Name A–Z</option>
+        </select>
+        <button onClick={() => { setLoading(true); load() }}
+          className="px-3 py-2.5 rounded-xl text-sm font-bold"
+          style={{ background: W_CARD, border: `1px solid ${W_LINE}`, color: W_MUTED }}>↻ Refresh</button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl px-4 py-3 mb-4 text-sm font-semibold" style={{ background: W_RED_BG, color: W_RED }}>
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="py-20 flex justify-center">
+          <div className="w-10 h-10 rounded-full border-4 animate-spin" style={{ borderColor: W_CYAN[100], borderTopColor: W_CYAN[600] }} />
+        </div>
+      ) : (
+        <div className="rounded-2xl overflow-x-auto" style={{ background: W_CARD, border: `1px solid ${W_LINE}` }}>
+          <table className="w-full text-sm min-w-[820px]">
+            <thead>
+              <tr style={{ background: W_PAGE, color: W_MUTED }} className="text-left text-xs uppercase tracking-wide">
+                <th className="px-4 py-3 font-bold">Professional</th>
+                <th className="px-4 py-3 font-bold text-right">Balance due</th>
+                <th className="px-4 py-3 font-bold text-right">Earned (month)</th>
+                <th className="px-4 py-3 font-bold text-right">Paid (month)</th>
+                <th className="px-4 py-3 font-bold text-right">Paid (all time)</th>
+                <th className="px-4 py-3 font-bold">Last paid</th>
+                <th className="px-4 py-3 font-bold text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map(r => (
+                <tr key={r.worker_id} className="hover:bg-slate-50 cursor-pointer" style={{ borderTop: `1px solid ${W_LINE}` }}
+                  onClick={() => setOpenId(r.worker_id)}>
+                  <td className="px-4 py-3">
+                    <p className="font-bold" style={{ color: W_INK }}>{r.full_name}{r.is_verified && <span title="KYC verified"> ✅</span>}</p>
+                    <p className="text-xs" style={{ color: W_FAINT }}>{r.phone ?? ''}{r.joined_on && ` · joined ${W_fmtDate(r.joined_on)}`}</p>
+                  </td>
+                  <td className="px-4 py-3 text-right font-black" style={{ color: r.balance > 0 ? W_RED : r.balance < 0 ? W_GREEN : W_FAINT }}>
+                    {W_inr(r.balance)}
+                    {r.balance < 0 && <span className="block text-[10px] font-semibold">advance — adjusts from next earnings</span>}
+                  </td>
+                  <td className="px-4 py-3 text-right font-semibold" style={{ color: W_GREEN }}>{W_inr(r.month_earned)}</td>
+                  <td className="px-4 py-3 text-right" style={{ color: W_BODY }}>{W_inr(r.month_paid)}</td>
+                  <td className="px-4 py-3 text-right" style={{ color: W_BODY }}>{W_inr(r.total_paid)}</td>
+                  <td className="px-4 py-3" style={{ color: W_BODY }}>{W_fmtDate(r.last_payout)}</td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                    {isOwner && r.balance > 0 && (
+                      <button onClick={() => setQuickPay(r)}
+                        className="px-3 py-1.5 rounded-lg text-xs font-black text-white mr-2"
+                        style={{ background: W_CYAN[600] }}>💸 Pay</button>
+                    )}
+                    <button onClick={() => setOpenId(r.worker_id)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold"
+                      style={{ background: W_CYAN[50], color: W_CYAN[700] }}>History</button>
+                  </td>
+                </tr>
+              ))}
+              {list.length === 0 && (
+                <tr><td colSpan={7} className="px-4 py-12 text-center" style={{ color: W_FAINT }}>No professionals found</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {quickPay && (
+        <W_Modal onClose={() => setQuickPay(null)} title={`Record payout · ${quickPay.full_name}`}>
+          <W_EntryForm workerId={quickPay.worker_id} kind="payout" suggested={quickPay.balance}
+            onDone={() => { setQuickPay(null); load() }} onCancel={() => setQuickPay(null)} />
+        </W_Modal>
+      )}
+
+      {open && (
+        <W_WalletDrawer pro={open} isOwner={isOwner}
+          onClose={() => setOpenId(null)} onChanged={load} />
+      )}
+    </div>
+  )
+}
+
+/* ───────────────────────── drawer: one professional ───────────────────────── */
+function W_WalletDrawer({ pro, isOwner, onClose, onChanged }: {
+  pro: W_ProRow; isOwner: boolean; onClose: () => void; onChanged: () => void
+}) {
+  const [wallet, setWallet] = useState<W_Wallet | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [form, setForm] = useState<W_EntryKind | null>(null)
+  const [filter, setFilter] = useState<'all' | 'in' | 'out'>('all')
+
+  const load = useCallback(async () => {
+    setErr(null)
+    try {
+      const res = await fetch(`/api/admin-auth/wallet?worker_id=${pro.worker_id}`, { cache: 'no-store' })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || 'Could not load wallet')
+      const w = json.wallet
+      setWallet({
+        ...w,
+        balance: W_n(w.balance), total_earned: W_n(w.total_earned), total_paid: W_n(w.total_paid),
+        total_deducted: W_n(w.total_deducted), month_earned: W_n(w.month_earned), month_paid: W_n(w.month_paid),
+        txns: (w.txns ?? []).map((t: any) => ({ ...t, amount: W_n(t.amount) })),
+      })
+    } catch (e: any) { setErr(e.message) }
+  }, [pro.worker_id])
+
+  useEffect(() => { load() }, [load])
+
+  async function remove(t: W_Txn) {
+    if (!window.confirm(`Remove "${t.title}" (${W_inr(t.amount, true)}) from ${pro.full_name}'s wallet?`)) return
+    const res = await fetch(`/api/admin-auth/wallet?txn_id=${t.id}`, { method: 'DELETE' })
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) { alert(json.error || 'Could not remove'); return }
+    load(); onChanged()
+  }
+
+  const txns = (wallet?.txns ?? []).filter(t => filter === 'all' || (filter === 'in' ? t.amount > 0 : t.amount < 0))
+
+  // group by date
+  const groups: { date: string; items: W_Txn[] }[] = []
+  txns.forEach(t => {
+    const g = groups[groups.length - 1]
+    if (g && g.date === t.txn_date) g.items.push(t)
+    else groups.push({ date: t.txn_date, items: [t] })
+  })
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40" style={{ background: 'rgba(15,23,42,0.35)' }} onClick={onClose} />
+      <div className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-[560px] overflow-y-auto" style={{ background: W_PAGE }}>
+        <div className="sticky top-0 z-10 px-5 py-4 flex items-start justify-between gap-3"
+          style={{ background: W_CARD, borderBottom: `1px solid ${W_LINE}` }}>
+          <div>
+            <p className="text-lg font-black" style={{ color: W_INK }}>{pro.full_name}</p>
+            <p className="text-xs" style={{ color: W_FAINT }}>{pro.phone}{wallet?.joined_on && ` · joined ${W_fmtDate(wallet.joined_on)}`}</p>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 rounded-xl text-lg" style={{ background: W_PAGE, color: W_MUTED }}>✕</button>
+        </div>
+
+        <div className="p-5">
+          {err && <div className="rounded-xl px-4 py-3 mb-4 text-sm font-semibold" style={{ background: W_RED_BG, color: W_RED }}>{err}</div>}
+          {!wallet && !err && (
+            <div className="py-16 flex justify-center">
+              <div className="w-9 h-9 rounded-full border-4 animate-spin" style={{ borderColor: W_CYAN[100], borderTopColor: W_CYAN[600] }} />
+            </div>
+          )}
+
+          {wallet && (
+            <>
+              {/* balance card */}
+              <div className="rounded-2xl p-5 mb-4" style={{ background: `linear-gradient(135deg, ${W_CYAN[600]}, ${W_CYAN[700]})`, color: '#fff' }}>
+                <p className="text-xs font-semibold opacity-80">
+                  {wallet.balance < 0 ? 'Advance to be adjusted from next earnings' : 'Balance due'}
+                </p>
+                <p className="text-3xl font-black mt-1">{W_inr(Math.abs(wallet.balance))}</p>
+                {W_n((wallet as any).total_advance) > 0 && (
+                  <p className="text-[11px] opacity-80 mt-1">Advances given so far: {W_inr(W_n((wallet as any).total_advance))}</p>
+                )}
+                <div className="grid grid-cols-3 gap-3 mt-4 text-xs">
+                  <div><p className="opacity-75">Total earned</p><p className="font-black text-sm">{W_inr(wallet.total_earned)}</p></div>
+                  <div><p className="opacity-75">Total paid</p><p className="font-black text-sm">{W_inr(wallet.total_paid)}</p></div>
+                  <div><p className="opacity-75">This month</p><p className="font-black text-sm">+{W_inr(wallet.month_earned)} / −{W_inr(wallet.month_paid)}</p></div>
+                </div>
+              </div>
+
+              {/* today so far */}
+              {wallet.today && (W_n(wallet.today.amount) !== 0 || W_n(wallet.today.orders_count) > 0) && (
+                <div className="rounded-2xl p-4 mb-4" style={{ background: W_CARD, border: `1px dashed ${W_CYAN[500]}66` }}>
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-bold" style={{ color: W_INK }}>⏳ Today so far</p>
+                    <p className="text-sm font-black" style={{ color: W_CYAN[700] }}>{W_inr(W_n(wallet.today.amount))}</p>
+                  </div>
+                  <p className="text-[11px] mt-1" style={{ color: W_FAINT }}>Added to the balance tonight after the day ends</p>
+                </div>
+              )}
+
+              {/* actions */}
+              {isOwner && (
+                <div className="flex gap-2 flex-wrap mb-4">
+                  {([
+                    ['payout', '💸 Record payout', W_CYAN[600]],
+                    ['advance', '⏩ Give advance', '#D97706'],
+                    ['deduction', '➖ Deduction', W_RED],
+                    ['credit', '➕ Credit', W_GREEN],
+                    ['opening_balance', '📘 Opening balance', W_MUTED],
+                  ] as [W_EntryKind, string, string][]).map(([k, label, color]) => (
+                    <button key={k} onClick={() => setForm(form === k ? null : k)}
+                      className="px-3 py-2 rounded-xl text-xs font-black transition-all"
+                      style={form === k
+                        ? { background: color, color: '#fff' }
+                        : { background: W_CARD, color, border: `1px solid ${color}44` }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {form && (
+                <div className="rounded-2xl p-4 mb-4" style={{ background: W_CARD, border: `1px solid ${W_LINE}` }}>
+                  <W_EntryForm workerId={pro.worker_id} kind={form}
+                    suggested={form === 'payout' ? Math.max(0, wallet.balance) : undefined}
+                    onDone={() => { setForm(null); load(); onChanged() }}
+                    onCancel={() => setForm(null)} />
+                </div>
+              )}
+
+              {/* filter */}
+              <div className="flex gap-2 mb-3">
+                {([['all', 'All'], ['in', '🟢 Added'], ['out', '🔴 Taken out']] as const).map(([k, l]) => (
+                  <button key={k} onClick={() => setFilter(k)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold"
+                    style={filter === k
+                      ? { background: W_CYAN[50], color: W_CYAN[700], border: `1px solid ${W_CYAN[500]}55` }
+                      : { background: W_CARD, color: W_MUTED, border: `1px solid ${W_LINE}` }}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+
+              {/* history */}
+              {groups.length === 0 && (
+                <p className="text-center py-10 text-sm" style={{ color: W_FAINT }}>No entries yet</p>
+              )}
+              <div className="space-y-4">
+                {groups.map(g => (
+                  <div key={g.date}>
+                    <p className="text-[11px] font-bold uppercase tracking-wide mb-1.5" style={{ color: W_FAINT }}>
+                      {new Date(g.date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
+                    </p>
+                    <div className="space-y-2">
+                      {g.items.map(t => <W_TxnRow key={t.id} t={t} canRemove={isOwner && t.editable} onRemove={() => remove(t)} />)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </>
+  )
+}
+
+/* ───────────────────────── one history line ───────────────────────── */
+function W_TxnRow({ t, canRemove, onRemove }: { t: W_Txn; canRemove: boolean; onRemove: () => void }) {
+  const [open, setOpen] = useState(false)
+  const inFlow = t.amount >= 0
+  const hasDetail = t.kind === 'daily_earning' && !!t.breakdown
+  const b = t.breakdown ?? {}
+
+  return (
+    <div className="rounded-xl overflow-hidden" style={{ background: W_CARD, border: `1px solid ${W_LINE}` }}>
+      <button onClick={() => hasDetail && setOpen(o => !o)}
+        className="w-full flex items-center gap-3 px-3.5 py-3 text-left"
+        style={{ cursor: hasDetail ? 'pointer' : 'default' }}>
+        <span className="w-9 h-9 rounded-xl flex items-center justify-center text-base shrink-0"
+          style={{ background: inFlow ? W_GREEN_BG : W_RED_BG }}>{W_KIND_ICON[t.kind] ?? '•'}</span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-sm font-bold truncate" style={{ color: W_INK }}>{t.title}</span>
+          <span className="block text-[11px] truncate" style={{ color: W_FAINT }}>
+            {t.kind === 'payout' || t.kind === 'advance'
+              ? [t.method?.toUpperCase(), t.reference && `Ref ${t.reference}`, t.note].filter(Boolean).join(' · ') || 'Paid'
+              : t.note || (t.kind === 'daily_earning' ? `${W_n(b.shift_hours)} h shift · ${W_n(b.order_hours)} h orders` : '')}
+          </span>
+        </span>
+        <span className="text-sm font-black whitespace-nowrap" style={{ color: inFlow ? W_GREEN : W_RED }}>
+          {W_inr(t.amount, true)}
+        </span>
+        {hasDetail && <span className="text-xs" style={{ color: W_FAINT }}>{open ? '▴' : '▾'}</span>}
+      </button>
+
+      {open && hasDetail && (
+        <div className="px-4 pb-3 pt-1" style={{ borderTop: `1px dashed ${W_LINE}` }}>
+          <W_BreakdownTable b={b} />
+        </div>
+      )}
+
+      {canRemove && (
+        <div className="px-3.5 pb-2 -mt-1 text-right">
+          <button onClick={onRemove} className="text-[11px] font-bold" style={{ color: W_RED }}>Remove</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function W_BreakdownTable({ b }: { b: W_Breakdown }) {
+  const lines: [string, number][] = [
+    [`Base pay (${W_n(b.shift_hours)} h on shift)`, W_n(b.base_amount)],
+    [`Order pay (${W_n(b.orders_count)} ${W_n(b.orders_count) === 1 ? 'order' : 'orders'} · ${W_n(b.order_hours)} h)`, W_n(b.order_amount)],
+    ...(W_n(b.overtime_amount) ? [[`Overtime (${W_n(b.overtime_hours)} h)`, W_n(b.overtime_amount)] as [string, number]] : []),
+    [`Travel allowance`, W_n(b.travel_amount)],
+    ...(W_n(b.penalty_amount) ? [[`Leave penalty`, -W_n(b.penalty_amount)] as [string, number]] : []),
+  ]
+  return (
+    <div className="text-xs">
+      {lines.map(([label, v]) => (
+        <div key={label} className="flex justify-between py-1" style={{ color: W_BODY }}>
+          <span>{label}</span><span className="font-semibold" style={{ color: v < 0 ? W_RED : W_INK }}>{W_inr(v)}</span>
+        </div>
+      ))}
+      <div className="flex justify-between py-1.5 mt-1 font-black" style={{ borderTop: `1px solid ${W_LINE}`, color: W_INK }}>
+        <span>Total</span><span>{W_inr(W_n(b.amount))}</span>
+      </div>
+      {(b.orders ?? []).length > 0 && (
+        <div className="mt-2 rounded-lg p-2.5" style={{ background: W_PAGE }}>
+          <p className="font-bold mb-1" style={{ color: W_MUTED }}>Orders</p>
+          {(b.orders ?? []).map(o => (
+            <div key={o.booking_id} className="flex justify-between py-0.5" style={{ color: W_BODY }}>
+              <span>{o.time} · {o.service}</span>
+              <span style={{ color: W_FAINT }}>{o.minutes} min · #{String(o.booking_id).slice(0, 8)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ───────────────────────── add entry form ───────────────────────── */
+function W_EntryForm({ workerId, kind, suggested, onDone, onCancel }: {
+  workerId: string; kind: W_EntryKind; suggested?: number; onDone: () => void; onCancel: () => void
+}) {
+  const [amount, setAmount] = useState(suggested && suggested > 0 ? String(Math.round(suggested * 100) / 100) : '')
+  const [date, setDate] = useState(W_todayIST())
+  const [method, setMethod] = useState('upi')
+  const [reference, setReference] = useState('')
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const label = kind === 'payout' ? 'Record payout' : kind === 'advance' ? 'Record advance' : kind === 'deduction' ? 'Add deduction'
+    : kind === 'credit' ? 'Add credit' : 'Set opening balance'
+
+  async function save() {
+    setErr(null)
+    const amt = Number(amount)
+    if (!Number.isFinite(amt) || amt <= 0) { setErr('Enter an amount'); return }
+    if ((kind === 'deduction' || kind === 'credit') && !note.trim()) { setErr('Please write a reason'); return }
+    setBusy(true)
+    try {
+      const res = await fetch('/api/admin-auth/wallet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ worker_id: workerId, kind, amount: amt, date, method: kind === 'payout' || kind === 'advance' ? method : null, reference, note }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || 'Could not save')
+      onDone()
+    } catch (e: any) {
+      setErr(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const input = 'w-full px-3 py-2.5 rounded-xl text-sm outline-none'
+  const inputStyle = { background: W_PAGE, border: `1px solid ${W_LINE}`, color: W_INK }
+
+  return (
+    <div className="space-y-3">
+      {kind === 'opening_balance' && (
+        <p className="text-xs" style={{ color: W_MUTED }}>
+          Use this if the professional was already owed money before this wallet started (e.g. unpaid salary settled outside).
+        </p>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="text-xs font-bold" style={{ color: W_MUTED }}>Amount (₹)</span>
+          <input type="number" min={1} value={amount} onChange={e => setAmount(e.target.value)} className={input} style={inputStyle} />
+        </label>
+        <label className="block">
+          <span className="text-xs font-bold" style={{ color: W_MUTED }}>Date</span>
+          <input type="date" value={date} max={W_todayIST()} onChange={e => setDate(e.target.value)} className={input} style={inputStyle} />
+        </label>
+      </div>
+
+      {kind === 'advance' && (
+        <p className="text-xs" style={{ color: W_MUTED }}>
+          Money given in between when the professional asks. It shows in red in her wallet and is
+          adjusted automatically from her next earnings.
+        </p>
+      )}
+      {(kind === 'payout' || kind === 'advance') && (
+        <>
+          <div>
+            <span className="text-xs font-bold" style={{ color: W_MUTED }}>Paid via</span>
+            <div className="flex gap-2 mt-1">
+              {[['upi', 'UPI'], ['bank', 'Bank transfer'], ['cash', 'Cash']].map(([k, l]) => (
+                <button key={k} onClick={() => setMethod(k)}
+                  className="px-3 py-2 rounded-xl text-xs font-bold"
+                  style={method === k ? { background: W_CYAN[600], color: '#fff' } : { background: W_PAGE, color: W_BODY, border: `1px solid ${W_LINE}` }}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+          {method !== 'cash' && (
+            <label className="block">
+              <span className="text-xs font-bold" style={{ color: W_MUTED }}>Reference / UTR no. (optional)</span>
+              <input value={reference} onChange={e => setReference(e.target.value)} className={input} style={inputStyle} />
+            </label>
+          )}
+        </>
+      )}
+
+      <label className="block">
+        <span className="text-xs font-bold" style={{ color: W_MUTED }}>
+          {kind === 'deduction' || kind === 'credit' ? 'Reason (shown to the professional)' : kind === 'advance' ? 'Why she asked (optional, shown to her)' : 'Note (optional)'}
+        </span>
+        <input value={note} onChange={e => setNote(e.target.value)} className={input} style={inputStyle}
+          placeholder={kind === 'advance' ? 'e.g. Asked for medical emergency' : kind === 'deduction' ? 'e.g. Late penalty' : kind === 'credit' ? 'e.g. Extra travel for far job' : ''} />
+      </label>
+
+      {err && <p className="text-xs font-semibold" style={{ color: W_RED }}>{err}</p>}
+
+      <div className="flex gap-2 justify-end">
+        <button onClick={onCancel} className="px-4 py-2 rounded-xl text-sm font-bold" style={{ color: W_MUTED }}>Cancel</button>
+        <button onClick={save} disabled={busy}
+          className="px-4 py-2 rounded-xl text-sm font-black text-white disabled:opacity-50"
+          style={{ background: kind === 'deduction' ? W_RED : kind === 'credit' ? W_GREEN : kind === 'advance' ? '#D97706' : W_CYAN[600] }}>
+          {busy ? 'Saving…' : label}
+        </button>
+      </div>
+      {kind === 'payout' && (
+        <p className="text-[11px]" style={{ color: W_FAINT }}>
+          This only records a payment you already made. The professional gets a notification and sees it in red in their wallet.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/* ───────────────────────── modal ───────────────────────── */
+function W_Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <>
+      <div className="fixed inset-0 z-40" style={{ background: 'rgba(15,23,42,0.35)' }} onClick={onClose} />
+      <div className="fixed z-50 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[92vw] max-w-md rounded-2xl p-5"
+        style={{ background: W_CARD, boxShadow: '0 20px 50px rgba(15,23,42,0.25)' }}>
+        <div className="flex items-center justify-between mb-4">
+          <p className="font-black" style={{ color: W_INK }}>{title}</p>
+          <button onClick={onClose} className="text-lg" style={{ color: W_MUTED }}>✕</button>
+        </div>
+        {children}
+      </div>
+    </>
   )
 }
