@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useState, useEffect, useCallback } from 'react'
@@ -16,8 +16,7 @@ const NAV = [
   { href: '/admin-coverage',   emoji: '🛰️', label: 'Coverage',   color: '#0891B2' },
   { href: '/admin-slots',      emoji: '🗓️', label: 'Slots',      color: '#0891B2' },
   { href: '/admin-notifications', emoji: '🔔', label: 'Notifications', color: '#DB2777' },
-  { href: '/admin-areas',      emoji: '🗺️', label: 'Service Areas', color: '#0EA5E9' },
-  { href: '/admin-zones',      emoji: '📐', label: 'Service Zones', color: '#059669' },
+  { href: '/admin-service-coverage', emoji: '🗺️', label: 'Service Coverage', color: '#0891B2' },
   { href: '/admin-reports',    emoji: '📈', label: 'Reports',    color: '#059669' },
   { href: '/admin-payroll',    emoji: '💰', label: 'Payroll',    color: '#0891B2' },
   { href: '/admin-tiers',      emoji: '🏆', label: 'Tiers',       color: '#D97706' },

@@ -11,7 +11,26 @@ type AreaRow = {
   parent_area: string | null // consolidated grouping label, e.g. "Vile Parle" — falls back to `area` when null
   pincode: string | null
   is_active: boolean
+  // NEW: how orders are accepted for this pincode
+  //   'whole'      → anywhere in the pincode
+  //   'zones_only' → only inside a drawn coverage zone (Service Zones)
+  // is_active = false means Blocked.
+  coverage_mode: 'whole' | 'zones_only' | null
   created_at: string
+}
+
+type Setting = 'whole' | 'zones_only' | 'blocked'
+type ZoneLite = { pincode: string | null; is_active: boolean; is_exclusion: boolean }
+
+const SETTINGS: { key: Setting; label: string; hint: string; color: string; bg: string }[] = [
+  { key: 'whole',      label: 'Whole pincode',     hint: 'Orders from anywhere in this pincode',          color: '#047857', bg: '#D1FAE5' },
+  { key: 'zones_only', label: 'Only inside zones', hint: 'Only addresses inside a zone drawn on the map', color: '#0E7490', bg: '#CFFAFE' },
+  { key: 'blocked',    label: 'Blocked',           hint: 'No orders from this pincode',                   color: '#B91C1C', bg: '#FEE2E2' },
+]
+
+function settingOf(r: AreaRow): Setting {
+  if (!r.is_active) return 'blocked'
+  return r.coverage_mode === 'zones_only' ? 'zones_only' : 'whole'
 }
 
 const PINCODE_RE = /^[1-9][0-9]{5}$/ // Indian pincodes: 6 digits, doesn't start with 0
@@ -20,6 +39,7 @@ export default function AdminServiceAreas() {
   const supabase = createClient()
 
   const [rows, setRows] = useState<AreaRow[]>([])
+  const [zones, setZones] = useState<ZoneLite[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
 
@@ -53,6 +73,10 @@ export default function AdminServiceAreas() {
       if (error) { setErr(error.message); setLoading(false); return }
       const all = (data ?? []) as AreaRow[]
       setRows(all)
+      const { data: z } = await supabase
+        .from('service_zones')
+        .select('pincode, is_active, is_exclusion')
+      setZones((z ?? []) as ZoneLite[])
       if (!state && all.length > 0) {
         setState(all[0].state)
         setCity(all[0].city)
@@ -74,6 +98,8 @@ export default function AdminServiceAreas() {
     r => r.country === country && r.state === state && r.city === city
   )
   const activeCount = currentAreas.filter(r => r.is_active).length
+  const zonesForPincode = (pin: string | null) =>
+    zones.filter(z => z.is_active && !z.is_exclusion && !!pin && z.pincode === pin).length
   const missingPincodeCount = currentAreas.filter(r => !r.pincode).length
 
   const existingParentAreas = Array.from(
@@ -84,21 +110,26 @@ export default function AdminServiceAreas() {
     )
   ).sort()
 
-  async function toggleArea(row: AreaRow) {
-    setRows(prev => prev.map(r => r.id === row.id ? { ...r, is_active: !r.is_active } : r))
-    const { error } = await supabase
-      .from('service_areas')
-      .update({ is_active: !row.is_active })
-      .eq('id', row.id)
+  async function setSetting(row: AreaRow, next: Setting) {
+    if (settingOf(row) === next) return
+    if (next === 'blocked' && !window.confirm(
+      `Block ${row.pincode} (${row.area})? Customers there won't be able to book.`)) return
+    const patch = next === 'blocked'
+      ? { is_active: false }
+      : { is_active: true, coverage_mode: next }
+    setRows(prev => prev.map(r => r.id === row.id ? { ...r, ...patch } : r))
+    const { error } = await supabase.from('service_areas').update(patch).eq('id', row.id)
     if (error) {
-      setRows(prev => prev.map(r => r.id === row.id ? { ...r, is_active: row.is_active } : r))
-      setErr(error.message)
+      setRows(prev => prev.map(r => r.id === row.id ? row : r))
+      setErr(error.message.includes('coverage_mode')
+        ? 'Run coverage.sql in Supabase first, then try again.'
+        : error.message)
     }
   }
 
   async function deleteArea(row: AreaRow) {
     const label = row.area || row.pincode || 'this entry'
-    if (!window.confirm(`Remove "${label}" from ${row.city}? Customers in this pincode will no longer be able to book.`)) return
+    if (!window.confirm(`Remove "${label}" from ${row.city}? Customers in this pincode will then only be able to book if their address is inside a drawn zone. (To stop all orders from it, choose Blocked instead.)`)) return
     setRows(prev => prev.filter(r => r.id !== row.id))
     const { error } = await supabase.from('service_areas').delete().eq('id', row.id)
     if (error) { setErr(error.message); await load() }
@@ -149,6 +180,7 @@ export default function AdminServiceAreas() {
           area: label || pincode,
           parent_area: parentArea || null,
           is_active: true,
+          coverage_mode: 'whole',
         })
         .select('*')
         .single()
@@ -183,9 +215,12 @@ export default function AdminServiceAreas() {
       <div>
         <h1 className="text-xl font-black text-slate-800">Service Areas</h1>
         <p className="text-sm text-slate-500 mt-1">
-          Add the pincodes Cleenzo serves. A customer&apos;s address is matched by its
-          exact pincode — customers outside these pincodes can still browse the app,
-          but can&apos;t complete a booking.
+          Choose where orders can come from. Each pincode is either{' '}
+          <b className="text-emerald-700">Whole pincode</b>,{' '}
+          <b className="text-cyan-700">Only inside zones</b> (only addresses inside a shape drawn on
+          the Service Zones page), or <b className="text-red-700">Blocked</b>.
+          A pincode not listed here can only book if the address is inside a drawn zone.
+          🚫 Excluded zones always win.
         </p>
       </div>
 
@@ -259,7 +294,7 @@ export default function AdminServiceAreas() {
               Pincodes in {city}, {state}
             </p>
             <span className="text-[11px] font-bold text-cyan-700 bg-cyan-50 px-2.5 py-1 rounded-full">
-              {activeCount} active
+              {activeCount} taking orders
             </span>
           </div>
 
@@ -293,8 +328,8 @@ export default function AdminServiceAreas() {
                 <div key={row.id}
                   className="px-4 py-3 rounded-xl border space-y-2"
                   style={{
-                    background: row.is_active ? '#ECFEFF' : '#F8FAFC',
-                    borderColor: row.is_active ? '#A5F3FC' : '#E2E8F0',
+                    background: settingOf(row) === 'blocked' ? '#FEF2F2' : settingOf(row) === 'zones_only' ? '#ECFEFF' : '#F0FDF4',
+                    borderColor: settingOf(row) === 'blocked' ? '#FECACA' : settingOf(row) === 'zones_only' ? '#A5F3FC' : '#BBF7D0',
                   }}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3 flex-wrap">
@@ -313,26 +348,39 @@ export default function AdminServiceAreas() {
                           📍 Grouped: {row.parent_area}
                         </span>
                       )}
-                      <span className="text-[10px] font-black px-2 py-0.5 rounded-full"
-                        style={{
-                          background: row.is_active ? '#DCFCE7' : '#F1F5F9',
-                          color: row.is_active ? '#15803D' : '#94A3B8',
-                        }}>
-                        {row.is_active ? 'Live' : 'Disabled'}
-                      </span>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <button onClick={() => toggleArea(row)}
-                        className="relative w-11 h-6 rounded-full transition-colors"
-                        style={{ background: row.is_active ? '#0891B2' : '#CBD5E1' }}>
-                        <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
-                          style={{ left: row.is_active ? '22px' : '2px' }} />
-                      </button>
-                      <button onClick={() => deleteArea(row)}
-                        className="text-slate-400 hover:text-red-600 text-sm">
-                        ✕
-                      </button>
-                    </div>
+                    <button onClick={() => deleteArea(row)}
+                      className="text-slate-400 hover:text-red-600 text-sm">
+                      ✕
+                    </button>
+                  </div>
+
+                  {/* Whole pincode / Only inside zones / Blocked */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {SETTINGS.map(opt => {
+                      const on = settingOf(row) === opt.key
+                      return (
+                        <button key={opt.key} title={opt.hint}
+                          onClick={() => setSetting(row, opt.key)}
+                          className="px-3 py-1.5 rounded-lg text-[11px] font-black border transition-all"
+                          style={on
+                            ? { background: opt.bg, color: opt.color, borderColor: opt.color + '55' }
+                            : { background: '#fff', color: '#64748B', borderColor: '#E2E8F0' }}>
+                          {on ? '● ' : ''}{opt.label}
+                        </button>
+                      )
+                    })}
+                    {settingOf(row) === 'zones_only' && (
+                      zonesForPincode(row.pincode) > 0 ? (
+                        <span className="text-[11px] font-semibold text-cyan-700 ml-1">
+                          {zonesForPincode(row.pincode)} zone{zonesForPincode(row.pincode) > 1 ? 's' : ''} drawn for this pincode
+                        </span>
+                      ) : (
+                        <span className="text-[11px] font-bold text-amber-700 ml-1">
+                          ⚠ No zone tagged with {row.pincode} yet — draw one on Service Zones (any active zone still counts)
+                        </span>
+                      )
+                    )}
                   </div>
 
                   {editingParentId === row.id ? (

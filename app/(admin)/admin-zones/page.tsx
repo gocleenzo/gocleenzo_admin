@@ -135,6 +135,53 @@ export default function AdminServiceZones() {
   // the same satellite imagery.
   const [mapType, setMapType] = useState<'roadmap' | 'hybrid'>('roadmap');
 
+  // ── NEW: "Test a location" — click anywhere on the map and see
+  // whether a customer there could book, using the exact same rule
+  // the apps and the database use (check_serviceable). ──
+  const [testMode, setTestMode] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    point: LatLngPoint;
+    pincode: string | null;
+    ok: boolean;
+    reason: string;
+    message: string;
+    zoneName: string | null;
+    mode: string | null;
+  } | null>(null);
+
+  async function testPoint(point: LatLngPoint) {
+    setTesting(true);
+    let pincode: string | null = null;
+    try {
+      if (!geocoderRef.current) geocoderRef.current = new google.maps.Geocoder();
+      const res = await geocoderRef.current.geocode({ location: point });
+      for (const r of res.results) {
+        const pc = r.address_components.find((c) => c.types.includes('postal_code'));
+        if (pc) { pincode = pc.long_name; break; }
+      }
+    } catch { /* no pincode — the check still runs on the map point */ }
+    const { data, error } = await supabase.rpc('check_serviceable', {
+      p_lat: point.lat, p_lng: point.lng, p_pincode: pincode,
+    });
+    setTesting(false);
+    if (error) {
+      setErr(error.message.includes('check_serviceable')
+        ? 'Run coverage.sql in Supabase first, then try again.'
+        : error.message);
+      return;
+    }
+    const r = (data ?? {}) as any;
+    setTestResult({
+      point, pincode,
+      ok: !!r.ok,
+      reason: String(r.reason ?? ''),
+      message: String(r.message ?? ''),
+      zoneName: r.zone_name ?? null,
+      mode: r.mode ?? null,
+    });
+  }
+
   async function load() {
     setLoading(true);
     setErr(null);
@@ -236,6 +283,8 @@ export default function AdminServiceZones() {
 
   // ── Drawing controls ────────────────────────────────────────────
   function startDrawing() {
+    setTestMode(false);
+    setTestResult(null);
     setDraftPoints([]);
     setDraftName('');
     setDraftPincode(isValidPincode(pincodeSearch) ? pincodeSearch.trim() : '');
@@ -245,13 +294,18 @@ export default function AdminServiceZones() {
 
   const handleMapClick = useCallback(
     (e: google.maps.MapMouseEvent) => {
+      if (testMode && !isDrawing && e.latLng) {
+        testPoint({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+        return;
+      }
       if (!isDrawing || !e.latLng) return;
       setDraftPoints((prev) => [
         ...prev,
         { lat: e.latLng!.lat(), lng: e.latLng!.lng() },
       ]);
     },
-    [isDrawing]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isDrawing, testMode]
   );
 
   function undoLastPoint() {
@@ -353,9 +407,11 @@ export default function AdminServiceZones() {
         <div>
           <h1 className="text-xl font-black text-slate-800">Service Zones</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Draw a polygon around each area you serve. A customer&apos;s address is
-            matched by its exact point on the map — anything outside every active
-            zone can still be saved, but can&apos;t complete a booking.
+            Draw the exact areas you serve. A zone is used for pincodes set to
+            <b className="text-cyan-700"> Only inside zones</b> (Service Areas page) and for
+            any pincode not listed there. Pincodes set to <b className="text-emerald-700">Whole pincode</b>{' '}
+            don&apos;t need a zone. <b className="text-red-700">🚫 Excluded</b> zones always block,
+            even inside a whole pincode. Switch a zone off to stop orders from it.
           </p>
         </div>
 
@@ -403,6 +459,51 @@ export default function AdminServiceZones() {
         {err && (
           <div className="rounded-xl bg-red-50 border border-red-200 p-3">
             <p className="text-sm font-bold text-red-700">{err}</p>
+          </div>
+        )}
+
+        {/* ── NEW: Test a location ── */}
+        {!isDrawing && !hasDraft && (
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-black uppercase tracking-wide text-slate-500">🧪 Test a location</p>
+              <button
+                onClick={() => { setTestMode((v) => !v); setTestResult(null); }}
+                className="px-3 py-1.5 rounded-lg text-[11px] font-black"
+                style={testMode
+                  ? { background: '#7C3AED', color: '#fff' }
+                  : { background: '#F5F3FF', color: '#6D28D9' }}
+              >
+                {testMode ? 'Stop testing' : 'Start'}
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              {testMode
+                ? 'Click anywhere on the map to see if a customer there can book.'
+                : 'Check any spot with the same rule the apps use.'}
+            </p>
+            {testing && <p className="text-[12px] font-bold text-slate-500">Checking…</p>}
+            {testResult && !testing && (
+              <div className="rounded-xl p-3"
+                style={{ background: testResult.ok ? '#ECFDF5' : '#FEF2F2', border: `1px solid ${testResult.ok ? '#A7F3D0' : '#FECACA'}` }}>
+                <p className="text-sm font-black" style={{ color: testResult.ok ? '#047857' : '#B91C1C' }}>
+                  {testResult.ok ? '✅ Can book here' : '❌ Cannot book here'}
+                </p>
+                <p className="text-[11px] mt-1" style={{ color: '#475569' }}>
+                  Pincode: <b className="font-mono">{testResult.pincode ?? 'not found'}</b>
+                  {testResult.zoneName && <> · Zone: <b>{testResult.zoneName}</b></>}
+                </p>
+                <p className="text-[11px] mt-0.5" style={{ color: '#64748B' }}>
+                  {testResult.reason === 'ok' && testResult.mode === 'whole' && 'Whole pincode is open.'}
+                  {testResult.reason === 'ok' && testResult.mode !== 'whole' && 'Inside an active coverage zone.'}
+                  {testResult.reason === 'excluded' && 'Inside a 🚫 Excluded zone.'}
+                  {testResult.reason === 'blocked' && 'This pincode is set to Blocked.'}
+                  {testResult.reason === 'outside_zone' && 'Pincode is "Only inside zones" and this spot is outside every zone.'}
+                  {testResult.reason === 'not_serviceable' && 'Pincode not listed and spot is outside every zone.'}
+                  {testResult.reason === 'no_location' && 'No map point.'}
+                </p>
+              </div>
+            )}
           </div>
         )}
 
@@ -689,6 +790,11 @@ export default function AdminServiceZones() {
             Click the map to place points
           </div>
         )}
+        {testMode && !isDrawing && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 px-4 py-2 rounded-full text-white text-xs font-bold shadow-lg" style={{ background: '#7C3AED' }}>
+            🧪 Click the map to test a location
+          </div>
+        )}
         {!isLoaded ? (
           <div className="w-full h-full flex items-center justify-center bg-slate-50">
             <p className="text-sm text-slate-400">Loading map…</p>
@@ -706,7 +812,7 @@ export default function AdminServiceZones() {
               streetViewControl: false,
               mapTypeControl: false,
               fullscreenControl: false,
-              draggableCursor: isDrawing ? 'crosshair' : undefined,
+              draggableCursor: isDrawing || testMode ? 'crosshair' : undefined,
               mapTypeId: mapType,
             }}
           >
@@ -725,6 +831,22 @@ export default function AdminServiceZones() {
                   strokeWeight: 2,
                 }}
                 title={`Approximate center of ${pincodeSearch}`}
+              />
+            )}
+
+            {/* Test-a-location result pin */}
+            {testResult && !isDrawing && (
+              <Marker
+                position={testResult.point}
+                icon={{
+                  path: google.maps.SymbolPath.CIRCLE,
+                  scale: 9,
+                  fillColor: testResult.ok ? '#059669' : '#DC2626',
+                  fillOpacity: 1,
+                  strokeColor: '#FFFFFF',
+                  strokeWeight: 3,
+                }}
+                zIndex={2000}
               />
             )}
 
