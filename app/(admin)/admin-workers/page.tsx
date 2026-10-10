@@ -35,6 +35,17 @@ type Worker = {
   dailyHours: { date: string; secs: number }[]
   weeklyHours: { week: string; secs: number }[]
   monthlyHours: { month: string; secs: number }[]
+  // NEW (redesign): today's jobs for the timeline, areas, schedule & KYC warnings
+  todayJobs: TodayJob[]
+  pincodes: { pincode: string; label: string }[]
+  zones: string[]
+  scheduleUntil: string | null     // last date with a working shift (today or later)
+  hasScheduleRows: boolean         // has she ever had a schedule saved?
+  kycStatus: string | null         // incomplete | submitted | verified | rejected
+}
+
+type TodayJob = {
+  id: string; start: string; mins: number; status: string; service: string; area: string
 }
 
 const LOCATION_STALE_MS = 2 * 60 * 1000;
@@ -2606,6 +2617,203 @@ function DateDetailCard({ entry, highlight }: { entry: DateEntry; highlight?: bo
   )
 }
 
+
+// ════════════════════════════════════════════════════════════════
+// NEW DESIGN — profile panel
+// Same features as before, arranged in 5 groups instead of 12 tabs:
+//   🏠 Today   · timeline, key numbers, quick switches, work by service
+//   💼 Work    · Jobs · Schedule · Attendance · Hours
+//   💰 Money   · Earnings & bonus · Payouts · Tier · Referrals
+//   📍 Areas   · pincodes (+ zones from Service Coverage)
+//   🪪 Profile · Approval & KYC · Details · SOS
+// ════════════════════════════════════════════════════════════════
+
+type GroupKey = 'today' | 'work' | 'money' | 'areas' | 'profile'
+type SubKey =
+  | 'jobs' | 'schedreq' | 'attendance' | 'hours'
+  | 'money' | 'payouts' | 'tier' | 'referrals'
+  | 'approval' | 'details' | 'sos'
+
+const GROUPS: { key: GroupKey; label: string; icon: string; subs: { key: SubKey; label: string; ownerOnly?: boolean }[]; ownerOnly?: boolean }[] = [
+  { key: 'today',   label: 'Today',   icon: '🏠', subs: [] },
+  { key: 'work',    label: 'Work',    icon: '💼', subs: [
+    { key: 'jobs',       label: 'Jobs', ownerOnly: true },
+    { key: 'schedreq',   label: 'Schedule' },
+    { key: 'attendance', label: 'Attendance' },
+    { key: 'hours',      label: 'Hours', ownerOnly: true },
+  ] },
+  { key: 'money',   label: 'Money',   icon: '💰', ownerOnly: true, subs: [
+    { key: 'money',     label: 'Earnings & bonus' },
+    { key: 'payouts',   label: 'Payouts' },
+    { key: 'tier',      label: 'Tier' },
+    { key: 'referrals', label: 'Referrals' },
+  ] },
+  { key: 'areas',   label: 'Areas',   icon: '📍', subs: [] },
+  { key: 'profile', label: 'Profile', icon: '🪪', ownerOnly: true, subs: [
+    { key: 'approval', label: 'Approval & KYC' },
+    { key: 'details',  label: 'Details' },
+    { key: 'sos',      label: 'SOS' },
+  ] },
+]
+
+type Alert = { key: string; text: string; tone: 'red' | 'amber'; go?: [GroupKey, SubKey?] }
+
+function fmtDayShort(iso: string) {
+  return new Date(iso + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+}
+
+function alertsFor(w: Worker, isOwner: boolean): Alert[] {
+  const out: Alert[] = []
+  if (!w.is_active) return out
+  if (!w.worker_otp) out.push({ key: 'otp', text: 'OTP not set', tone: 'red' })
+  if (w.pincodes.length === 0 && w.zones.length === 0)
+    out.push({ key: 'area', text: 'No area assigned', tone: 'amber', go: ['areas'] })
+  if (w.hasScheduleRows && !w.scheduleUntil)
+    out.push({ key: 'sched', text: 'No schedule from today', tone: 'red', go: ['work', 'schedreq'] })
+  else if (w.scheduleUntil) {
+    const days = Math.round((new Date(w.scheduleUntil + 'T00:00:00').getTime() - new Date(new Date().toDateString()).getTime()) / 86400000)
+    if (days <= 2) out.push({ key: 'sched', text: `Schedule ends ${fmtDayShort(w.scheduleUntil)}`, tone: 'amber', go: ['work', 'schedreq'] })
+  }
+  if (isWorkingNow(w.todaySchedule) && !isLocationLive(w.locationUpdatedAt))
+    out.push({ key: 'loc', text: `Location off · ${locationAgoLabel(w.locationUpdatedAt)}`, tone: 'amber' })
+  if (isOwner && w.kycStatus && w.kycStatus !== 'verified')
+    out.push({
+      key: 'kyc',
+      text: w.kycStatus === 'submitted' ? 'KYC waiting for review' : w.kycStatus === 'rejected' ? 'KYC rejected' : 'KYC incomplete',
+      tone: w.kycStatus === 'submitted' ? 'amber' : 'red',
+      go: ['profile', 'approval'],
+    })
+  return out
+}
+
+function hhmm(mins: number) {
+  const h = Math.floor(mins / 60), m = mins % 60
+  const ap = h >= 12 ? 'PM' : 'AM'
+  const h12 = h % 12 === 0 ? 12 : h % 12
+  return m === 0 ? `${h12} ${ap}` : `${h12}:${String(m).padStart(2, '0')} ${ap}`
+}
+
+function jobStartMins(j: TodayJob) {
+  const d = new Date(j.start)
+  return d.getHours() * 60 + d.getMinutes()
+}
+
+// ── Today timeline: shift band, breaks, jobs, "now" line ────────
+function TodayTimeline({ w }: { w: Worker }) {
+  const jobs = w.todayJobs.filter(j => j.status !== 'cancelled')
+  const sched = w.todaySchedule && w.todaySchedule.enabled ? w.todaySchedule : null
+  let from = 7 * 60, to = 20 * 60
+  if (sched) { from = Math.min(from, timeToMins(sched.start)); to = Math.max(to, timeToMins(sched.end)) }
+  jobs.forEach(j => { const s = jobStartMins(j); from = Math.min(from, s); to = Math.max(to, s + j.mins) })
+  from = Math.floor(from / 60) * 60; to = Math.ceil(to / 60) * 60
+  const span = Math.max(60, to - from)
+  const pct = (m: number) => `${Math.max(0, Math.min(100, ((m - from) / span) * 100))}%`
+  const wid = (a: number, b: number) => `${Math.max(0.8, ((Math.min(b, to) - Math.max(a, from)) / span) * 100)}%`
+  const now = new Date(); const nowM = now.getHours() * 60 + now.getMinutes()
+  const ticks: number[] = []
+  for (let m = from; m <= to; m += span > 720 ? 180 : 120) ticks.push(m)
+
+  const tone = (s: string) =>
+    s === 'completed' ? { bg: '#CCFBF1', fg: '#0F766E', bd: '#5EEAD4' } :
+    s === 'in_progress' ? { bg: '#FEF3C7', fg: '#B45309', bd: '#FCD34D' } :
+    { bg: '#EDE9FE', fg: '#6D28D9', bd: '#C4B5FD' }
+
+  return (
+    <div>
+      <div className="relative h-12 rounded-xl bg-slate-100/80 overflow-hidden">
+        {sched && (
+          <div className="absolute top-0 bottom-0 bg-white border-x border-dashed border-slate-300"
+            style={{ left: pct(timeToMins(sched.start)), width: wid(timeToMins(sched.start), timeToMins(sched.end)) }}/>
+        )}
+        {sched?.breaks.map((b, i) => (
+          <div key={i} className="absolute top-0 bottom-0"
+            style={{ left: pct(timeToMins(b.from)), width: wid(timeToMins(b.from), timeToMins(b.to)),
+              background: 'repeating-linear-gradient(45deg,#E2E8F0 0 4px,#F1F5F9 4px 8px)' }}/>
+        ))}
+        {jobs.map(j => {
+          const s = jobStartMins(j), t = tone(j.status)
+          return (
+            <div key={j.id} title={`${hhmm(s)} · ${j.service} · ${j.area}`}
+              className="absolute top-1.5 bottom-1.5 rounded-lg px-1.5 flex items-center overflow-hidden border"
+              style={{ left: pct(s), width: wid(s, s + j.mins), background: t.bg, borderColor: t.bd }}>
+              <span className="text-[10px] font-black truncate" style={{ color: t.fg }}>{hhmm(s)}</span>
+            </div>
+          )
+        })}
+        {nowM >= from && nowM <= to && (
+          <div className="absolute top-0 bottom-0 w-0.5 bg-rose-500" style={{ left: pct(nowM) }}>
+            <span className="absolute -top-0.5 -left-1 w-2.5 h-2.5 rounded-full bg-rose-500"/>
+          </div>
+        )}
+      </div>
+      <div className="relative h-4 mt-1">
+        {ticks.map(m => (
+          <span key={m} className="absolute text-[10px] text-slate-400 -translate-x-1/2" style={{ left: pct(m) }}>{hhmm(m)}</span>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-3 mt-1 text-[10px] text-slate-400">
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded bg-white border border-dashed border-slate-300"/>Shift</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ background: '#CCFBF1' }}/>Done</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ background: '#FEF3C7' }}/>Now</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ background: '#EDE9FE' }}/>Coming</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-0.5 bg-rose-500"/>Now</span>
+      </div>
+    </div>
+  )
+}
+
+function nextJobOf(w: Worker): TodayJob | null {
+  const now = Date.now()
+  return w.todayJobs
+    .filter(j => j.status !== 'cancelled' && j.status !== 'completed' && j.status !== 'in_progress' && new Date(j.start).getTime() >= now - 15 * 60000)
+    .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())[0] ?? null
+}
+
+// ── The "right now" strip under the header ─────────────────────
+function NowStrip({ w }: { w: Worker }) {
+  const next = nextJobOf(w)
+  const sched = w.todaySchedule
+  let tone = { bg: '#F8FAFC', bd: '#E2E8F0', fg: '#475569', dot: '#94A3B8' }
+  let title = '', sub = ''
+  if (!w.is_active) { tone = { bg: '#FEF2F2', bd: '#FECACA', fg: '#B91C1C', dot: '#DC2626' }; title = 'Inactive'; sub = 'Not receiving jobs' }
+  else if (w.is_busy) {
+    tone = { bg: '#FFFBEB', bd: '#FDE68A', fg: '#B45309', dot: '#D97706' }
+    title = `On a job · ${w.current_service ?? 'Service'}`
+    sub = next ? `Next: ${hhmm(jobStartMins(next))} · ${next.service}` : 'No more jobs after this today'
+  } else if (!w.is_available) { title = 'Marked unavailable'; sub = 'Turn on from the ⋯ menu' }
+  else if (isWorkingNow(sched)) {
+    tone = { bg: '#ECFDF5', bd: '#A7F3D0', fg: '#047857', dot: '#059669' }
+    title = 'Free now'
+    sub = next ? `Next job ${hhmm(jobStartMins(next))} · ${next.service} · ${next.area}` : `No more jobs today · shift till ${hhmm(timeToMins(sched!.end))}`
+  } else if (sched && sched.enabled) {
+    tone = { bg: '#FFF7ED', bd: '#FED7AA', fg: '#C2410C', dot: '#F97316' }
+    title = 'Off shift'
+    sub = `Today's shift ${hhmm(timeToMins(sched.start))} – ${hhmm(timeToMins(sched.end))}`
+  } else if (sched && !sched.enabled) { title = 'Day off today'; sub = 'Marked off in schedule' }
+  else { title = 'Available'; sub = next ? `Next job ${hhmm(jobStartMins(next))} · ${next.service}` : 'No schedule saved for today' }
+
+  return (
+    <div className="mx-5 rounded-2xl border px-4 py-3 flex items-center gap-3"
+      style={{ background: tone.bg, borderColor: tone.bd }}>
+      <span className="relative flex w-2.5 h-2.5 shrink-0">
+        {w.is_busy && <span className="absolute inset-0 rounded-full animate-ping opacity-60" style={{ background: tone.dot }}/>}
+        <span className="relative w-2.5 h-2.5 rounded-full" style={{ background: tone.dot }}/>
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-black truncate" style={{ color: tone.fg }}>{title}</p>
+        <p className="text-[11px] truncate" style={{ color: tone.fg, opacity: 0.85 }}>{sub}</p>
+      </div>
+      {w.is_busy && w.work_started_at && <LiveTimer start={w.work_started_at} color="#B45309"/>}
+      {w.worker_otp && (
+        <div className="shrink-0 text-right pl-3 border-l" style={{ borderColor: tone.bd }}>
+          <p className="text-[9px] font-black uppercase tracking-wider text-violet-500">OTP</p>
+          <p className="font-mono font-black text-[15px] tracking-[0.18em] text-violet-700 leading-none">{w.worker_otp}</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling, onReload, isOwner }: {
   w: Worker; index: number; onClose: () => void
   onEdit: () => void; onDelete: () => void
@@ -2614,269 +2822,342 @@ function WorkerDetail({ w, index, onClose, onEdit, onDelete, onToggle, toggling,
   onReload: () => void
   isOwner: boolean
 }) {
-  const avatarColors = ['#0891B2','#0E7490','#06B6D4','#0891B2','#155E75','#0E7490']
-  const avatarBg     = avatarColors[index % avatarColors.length]
+  const accent = '#0891B2'
   const completionRate = w.totalOrders > 0 ? Math.round((w.completed / w.totalOrders) * 100) : 0
-  const inShift      = isWorkingNow(w.todaySchedule)
-  const todayMins    = todayNetMins(w.todaySchedule)
-  const st           = statusOf(w)
+  const todayMins = todayNetMins(w.todaySchedule)
+  const st = statusOf(w)
+  const alerts = alertsFor(w, isOwner)
 
-  const [tab, setTab]             = useState<'overview'|'approval'|'schedreq'|'attendance'|'hours'|'jobs'|'areas'|'money'|'payouts'|'referrals'|'tier'|'sos'>('overview')
+  const groups = GROUPS
+    .filter(g => isOwner || !g.ownerOnly)
+    .map(g => ({ ...g, subs: g.subs.filter(s => isOwner || !s.ownerOnly) }))
+
+  const [group, setGroup] = useState<GroupKey>('today')
+  const [sub, setSub] = useState<SubKey | null>(null)
   const [jobsShown, setJobsShown] = useState(10)
+  const [menuOpen, setMenuOpen] = useState(false)
 
+  useEffect(() => { setGroup('today'); setSub(null); setJobsShown(10); setMenuOpen(false) }, [w.id])
   useEffect(() => {
-    setTab('overview')
-    setJobsShown(10)
-  }, [w.id])
-
-  // Assistants only get Overview/Schedule/Attendance/Areas — everything
-  // else (approval/KYC, hours, jobs, money, payouts, referrals, tier,
-  // sos) and Delete Worker stay owner-only.
-  const ASSISTANT_TAB_KEYS = ['overview', 'schedreq', 'attendance', 'areas'] as const
-
-  useEffect(() => {
-    if (!isOwner && !(ASSISTANT_TAB_KEYS as readonly string[]).includes(tab)) {
-      setTab('overview')
-    }
+    if (!groups.find(g => g.key === group)) { setGroup('today'); setSub(null) }
   }, [isOwner])
 
-  const ALL_TABS = [
-    { key: 'overview' as const, label: 'Overview', icon: '▦' },
-    { key: 'approval' as const, label: 'Approval & KYC', icon: '✅' },
-    { key: 'schedreq' as const, label: 'Schedule', icon: '🗓' },
-    { key: 'attendance' as const, label: 'Attendance', icon: '📆' },
-    { key: 'hours'    as const, label: 'Hours',    icon: '⏱' },
-    { key: 'jobs'     as const, label: 'Jobs',     icon: '≡' },
-    { key: 'areas'    as const, label: 'Areas',    icon: '📍' },
-    { key: 'money'    as const, label: 'Pay, Earnings & Bonus', icon: '₹' },
-    { key: 'payouts'  as const, label: 'Payouts',  icon: '💸' },
-    { key: 'referrals'as const, label: 'Referrals',icon: '🎁' },
-    { key: 'tier'     as const, label: 'Tier',     icon: '🏆' },
-    { key: 'sos'      as const, label: 'SOS',      icon: '🆘' },
-  ]
-  const TABS = isOwner ? ALL_TABS : ALL_TABS.filter(t => (ASSISTANT_TAB_KEYS as readonly string[]).includes(t.key))
+  const curGroup = groups.find(g => g.key === group) ?? groups[0]
+  const curSub: SubKey | null = curGroup.subs.length === 0 ? null
+    : (sub && curGroup.subs.find(s => s.key === sub) ? sub : curGroup.subs[0].key)
+
+  function go(g: GroupKey, s?: SubKey) {
+    if (!groups.find(x => x.key === g)) return
+    setGroup(g); setSub(s ?? null)
+  }
+
+  const todayDone = w.todayJobs.filter(j => j.status === 'completed').length
+  const todayLeft = w.todayJobs.filter(j => j.status !== 'completed' && j.status !== 'cancelled').length
+  const areaLine = [...w.pincodes.map(p => p.label ? `${p.pincode} ${p.label}` : p.pincode), ...w.zones].slice(0, 3).join(' · ')
+  const moreAreas = w.pincodes.length + w.zones.length - 3
 
   return (
-    <div className="bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm">
+    <div className="bg-white rounded-3xl overflow-hidden border border-slate-200 shadow-sm">
 
-      <div className="relative px-6 pt-6 pb-5 overflow-hidden"
-        style={{ background: `linear-gradient(135deg,${avatarBg}0D,transparent 60%)` }}>
-        <button onClick={onClose}
-          className="absolute top-4 right-4 w-8 h-8 rounded-lg bg-white/70 backdrop-blur text-slate-400 flex items-center justify-center hover:bg-white hover:text-slate-600 transition-all border border-slate-200/60">✕</button>
-
-        <div className="flex items-center gap-4">
+      {/* ── Header ── */}
+      <div className="px-5 pt-5 pb-4">
+        <div className="flex items-start gap-3.5 flex-wrap sm:flex-nowrap">
           <div className="relative shrink-0">
-            <div className="w-16 h-16 rounded-2xl flex items-center justify-center font-black text-2xl text-white"
-              style={{ background: `linear-gradient(135deg,${avatarBg},${avatarBg}BB)`, opacity: w.is_active ? 1 : 0.5, boxShadow: `0 8px 20px ${avatarBg}35` }}>
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center font-black text-xl text-white"
+              style={{ background: `linear-gradient(135deg,${accent},#4F46E5)`, opacity: w.is_active ? 1 : 0.5 }}>
               {w.full_name[0]?.toUpperCase()}
             </div>
-            <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full border-[3px] border-white" style={{ background: st.color }}/>
+            <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-[3px] border-white" style={{ background: st.color }}/>
           </div>
-          <div className="min-w-0">
-            <h2 className="text-xl font-black text-slate-900 leading-tight truncate">{w.full_name}</h2>
-            <p className="text-sm text-slate-500 mt-0.5">+91 {w.phone}</p>
-            <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-              <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full border"
-                style={{ background: `${st.color}12`, color: st.color, borderColor: `${st.color}30` }}>
-                <span className="w-1.5 h-1.5 rounded-full" style={{ background: st.color }}/>{st.label}
-              </span>
-              {w.is_verified && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700 border border-cyan-200">✓ Verified</span>}
-              {isLocationLive(w.locationUpdatedAt) ? (
-                <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"/>📍 Location On
-                </span>
-              ) : (
-                <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200">
-                  📍 Location Off · {locationAgoLabel(w.locationUpdatedAt)}
-                </span>
+          <div className="min-w-0 flex-1 basis-[calc(100%-4.5rem)] sm:basis-auto">
+            <h2 className="text-lg font-black text-slate-900 leading-tight truncate">{w.full_name}</h2>
+            <p className="text-[12px] text-slate-500 mt-0.5">+91 {w.phone}</p>
+            <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+              {w.is_verified && <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700">✓ Verified</span>}
+              {isLocationLive(w.locationUpdatedAt)
+                ? <span className="inline-flex items-center gap-1 text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"/>Location on</span>
+                : <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">Location off · {locationAgoLabel(w.locationUpdatedAt)}</span>}
+              {areaLine && (
+                <button onClick={() => go('areas')} className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-50 text-slate-500 hover:text-cyan-700 truncate max-w-[220px]">
+                  📍 {areaLine}{moreAreas > 0 ? ` +${moreAreas}` : ''}
+                </button>
               )}
-              {!w.is_active && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200">Inactive</span>}
             </div>
           </div>
-        </div>
 
-        {w.is_busy && w.current_service && w.work_started_at && (
-          <div className="mt-4 px-3 py-2.5 rounded-xl bg-white border border-amber-200 flex items-center justify-between">
-            <div className="min-w-0">
-              <p className="text-[10px] font-black uppercase tracking-wider text-amber-600">⚡ On a job now</p>
-              <p className="text-xs font-bold text-slate-700 truncate">{w.current_service}</p>
+          <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto justify-end">
+            {w.phone && w.phone !== '—' && (
+              <>
+                <a href={`tel:+91${w.phone}`} title="Call"
+                  className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-50 border border-slate-200 hover:border-cyan-300 hover:bg-cyan-50 transition-all text-sm">📞</a>
+                <a href={`https://wa.me/91${w.phone}`} target="_blank" rel="noreferrer" title="WhatsApp"
+                  className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-50 border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 transition-all text-sm">💬</a>
+              </>
+            )}
+            <div className="relative">
+              <button onClick={() => setMenuOpen(o => !o)} title="More"
+                className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-50 border border-slate-200 hover:border-slate-300 text-slate-600 font-black">⋯</button>
+              {menuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)}/>
+                  <div className="absolute right-0 top-11 z-20 w-56 rounded-2xl bg-white border border-slate-200 shadow-xl p-1.5">
+                    <button onClick={() => { setMenuOpen(false); onEdit() }}
+                      className="w-full text-left px-3 py-2.5 rounded-xl text-[13px] font-bold text-slate-700 hover:bg-slate-50">✏️ Edit details & OTP</button>
+                    <button disabled={w.is_busy || !w.is_active || toggling === 'is_available'}
+                      onClick={() => { setMenuOpen(false); onToggle('is_available') }}
+                      className="w-full text-left px-3 py-2.5 rounded-xl text-[13px] font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40">
+                      {w.is_available ? '⏸ Mark unavailable' : '▶️ Mark available'}
+                      {w.is_busy && <span className="block text-[10px] font-medium text-slate-400">On a job right now</span>}
+                    </button>
+                    <button disabled={toggling === 'is_active'}
+                      onClick={() => { setMenuOpen(false); if (!w.is_active || confirm(`Deactivate ${w.full_name}? They won't get new jobs.`)) onToggle('is_active') }}
+                      className="w-full text-left px-3 py-2.5 rounded-xl text-[13px] font-bold hover:bg-slate-50 disabled:opacity-40"
+                      style={{ color: w.is_active ? '#B45309' : '#047857' }}>
+                      {w.is_active ? '🚫 Deactivate' : '✅ Activate'}
+                    </button>
+                    {isOwner && (
+                      <>
+                        <div className="h-px bg-slate-100 my-1"/>
+                        <button onClick={() => { setMenuOpen(false); onDelete() }}
+                          className="w-full text-left px-3 py-2.5 rounded-xl text-[13px] font-bold text-red-600 hover:bg-red-50">🗑 Remove worker</button>
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
-            <LiveTimer start={w.work_started_at} color="#D97706"/>
+            <button onClick={onClose} title="Close"
+              className="w-9 h-9 rounded-xl flex items-center justify-center text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-all">✕</button>
           </div>
-        )}
-
-        <div className="flex gap-2 mt-4">
-          {w.phone && (
-            <a href={`tel:+91${w.phone}`} className="flex-1 h-9 rounded-lg flex items-center justify-center gap-1.5 text-xs font-bold bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:text-slate-800 transition-all">
-              📞 Call
-            </a>
-          )}
-          <button onClick={onEdit} className="flex-1 h-9 rounded-lg flex items-center justify-center gap-1.5 text-xs font-bold bg-white text-slate-600 border border-slate-200 hover:border-slate-300 hover:text-slate-800 transition-all">
-            ✏️ Edit
-          </button>
-          {isOwner && (
-            <button onClick={onDelete} className="w-9 h-9 rounded-lg flex items-center justify-center text-xs bg-white text-red-400 border border-slate-200 hover:border-red-200 hover:bg-red-50 transition-all">🗑</button>
-          )}
         </div>
+        {(toggling) && <p className="text-[11px] text-slate-400 mt-2">Updating…</p>}
       </div>
 
-      {w.worker_otp && (
-        <div className="px-6 py-2.5 bg-violet-50/50 border-y border-violet-100 flex items-center justify-between">
-          <span className="text-[11px] font-bold text-violet-500 uppercase tracking-wide">🔐 Worker OTP</span>
-          <span className="font-mono font-black text-lg tracking-[0.2em] text-violet-700">{w.worker_otp}</span>
+      <NowStrip w={w}/>
+
+      {/* ── Alerts (only when something needs attention) ── */}
+      {alerts.length > 0 && (
+        <div className="px-5 pt-3 flex flex-wrap gap-1.5">
+          {alerts.map(a => (
+            <button key={a.key} onClick={() => a.go && go(a.go[0], a.go[1])}
+              className="text-[11px] font-bold px-2.5 py-1 rounded-lg border transition-all hover:brightness-95"
+              style={a.tone === 'red'
+                ? { background: '#FEF2F2', color: '#B91C1C', borderColor: '#FECACA', cursor: a.go ? 'pointer' : 'default' }
+                : { background: '#FFFBEB', color: '#B45309', borderColor: '#FDE68A', cursor: a.go ? 'pointer' : 'default' }}>
+              ⚠ {a.text}{a.go ? ' ›' : ''}
+            </button>
+          ))}
         </div>
       )}
 
-      <div className="flex gap-1 px-4 pt-3 border-b border-slate-100 overflow-x-auto">
-        {TABS.map(t => (
-          <button key={t.key} onClick={() => setTab(t.key)}
-            className="relative px-3 py-2 text-xs font-bold transition-colors flex-shrink-0 whitespace-nowrap"
-            style={{ color: tab === t.key ? avatarBg : '#94A3B8' }}>
-            {t.label}
-            {tab === t.key && <span className="absolute left-2 right-2 -bottom-px h-0.5 rounded-full" style={{ background: avatarBg }}/>}
-          </button>
-        ))}
+      {/* ── Group switcher ── */}
+      <div className="px-5 pt-4">
+        <div className="grid gap-1 p-1 rounded-2xl bg-slate-100" style={{ gridTemplateColumns: `repeat(${groups.length}, minmax(0,1fr))` }}>
+          {groups.map(g => (
+            <button key={g.key} onClick={() => go(g.key)}
+              className="py-2 rounded-xl text-[12px] font-black transition-all flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5"
+              style={group === g.key
+                ? { background: '#fff', color: accent, boxShadow: '0 1px 3px rgba(15,23,42,0.08)' }
+                : { color: '#64748B' }}>
+              <span>{g.icon}</span><span>{g.label}</span>
+            </button>
+          ))}
+        </div>
+        {curGroup.subs.length > 1 && (
+          <div className="flex gap-1.5 mt-3 overflow-x-auto pb-0.5">
+            {curGroup.subs.map(s => (
+              <button key={s.key} onClick={() => setSub(s.key)}
+                className="px-3 py-1.5 rounded-full text-[11px] font-bold whitespace-nowrap border transition-all"
+                style={curSub === s.key
+                  ? { background: '#ECFEFF', color: '#0E7490', borderColor: '#67E8F9' }
+                  : { background: '#fff', color: '#64748B', borderColor: '#E2E8F0' }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 340px)' }}>
+      {/* ── Content ── */}
+      <div className="overflow-y-auto mt-2" style={{ maxHeight: 'calc(100vh - 360px)', minHeight: 240 }}>
 
-        {tab === 'overview' && (
-          <div className="p-5 space-y-4">
-            <div className="grid grid-cols-2 gap-2.5">
-              {[
-                ...(isOwner ? [{ label: 'Revenue',   value: `₹${w.totalRevenue.toLocaleString('en-IN')}`, accent: '#0891B2' }] : []),
-                { label: 'Total Jobs',value: w.totalOrders, accent: '#7C3AED' },
-                { label: 'Completed', value: w.completed,   accent: '#059669' },
-                { label: 'Today\'s Hrs',value: todayMins > 0 ? minsToLabel(todayMins) : '—', accent: '#D97706' },
-              ].map(s => (
-                <div key={s.label} className="rounded-xl border border-slate-200 p-3.5">
-                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide mb-1">{s.label}</p>
-                  <p className="text-xl font-black leading-none" style={{ color: s.accent }}>{s.value}</p>
-                </div>
-              ))}
-            </div>
-
-            <div className="rounded-xl border border-slate-200 p-4">
-              <div className="flex justify-between mb-2">
-                <p className="text-xs font-semibold text-slate-500">Completion rate</p>
-                <p className="text-sm font-black text-slate-700">{completionRate}%</p>
+        {group === 'today' && (
+          <div className="p-5 pt-3 space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[11px] font-black uppercase tracking-wider text-slate-400">Today</p>
+                <p className="text-[11px] font-bold text-slate-500">
+                  {w.todayJobs.filter(j => j.status !== 'cancelled').length} jobs · {todayDone} done · {todayLeft} left
+                  {todayMins > 0 && <> · shift {minsToLabel(todayMins)}</>}
+                </p>
               </div>
-              <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
-                <div className="h-full rounded-full transition-all" style={{ width: `${completionRate}%`, background: `linear-gradient(90deg,${avatarBg},${avatarBg}99)` }}/>
-              </div>
-              <p className="text-[11px] text-slate-400 mt-1.5">{w.completed} of {w.totalOrders} jobs completed</p>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2.5">
-              {[
-                { field: 'is_available' as const, label: w.is_busy ? 'On a Job' : w.is_available ? 'Mark Unavailable' : 'Mark Available', color: '#059669', on: w.is_available, disabled: w.is_busy || !w.is_active },
-                { field: 'is_active'    as const, label: w.is_active ? 'Deactivate' : 'Activate', color: '#7C3AED', on: w.is_active, disabled: false },
-              ].map(ctrl => (
-                <button key={ctrl.field} onClick={() => !ctrl.disabled && onToggle(ctrl.field)}
-                  disabled={ctrl.disabled || toggling === ctrl.field}
-                  className="rounded-xl px-3 py-3 text-left transition-all border hover:border-slate-300 disabled:opacity-40 active:scale-[0.98]"
-                  style={{ borderColor: ctrl.on ? `${ctrl.color}40` : '#E2E8F0', background: ctrl.on ? `${ctrl.color}0A` : '#fff' }}>
-                  <p className="text-xs font-black" style={{ color: ctrl.on ? ctrl.color : '#94A3B8' }}>
-                    {toggling === ctrl.field ? 'Updating…' : ctrl.label}
-                  </p>
-                </button>
-              ))}
-            </div>
-
-            {isOwner && w.serviceBreakdown.length > 0 && (
-              <div className="rounded-xl border border-slate-200 overflow-hidden">
-                <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                  <p className="text-xs font-black text-slate-700">✅ Completed work by service</p>
-                  <span className="text-[11px] font-black text-cyan-700">
-                    ₹{w.serviceBreakdown.reduce((s, x) => s + x.income, 0).toLocaleString('en-IN')} total
-                  </span>
-                </div>
-                <div className="divide-y divide-slate-100">
-                  {w.serviceBreakdown.map(sv => (
-                    <div key={sv.name} className="flex items-center justify-between px-4 py-2.5">
-                      <div className="min-w-0">
-                        <p className="text-[13px] font-bold text-slate-800 truncate">{sv.name}</p>
-                        <p className="text-[11px] text-slate-400">{sv.count} job{sv.count > 1 ? 's' : ''} · {secsToHrsLabel(sv.secs)}</p>
-                      </div>
-                      <p className="text-[13px] font-black text-cyan-700 flex-shrink-0">₹{sv.income.toLocaleString('en-IN')}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {(w.joined_at || w.created_at) && (
-              <div className="flex items-center justify-between px-4 py-3 rounded-xl border border-slate-200">
-                <p className="text-xs text-slate-400">Member since</p>
-                <p className="text-xs font-bold text-slate-700">{new Date(w.joined_at ?? w.created_at!).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === 'schedreq' && <ScheduleDateRequestTab workerId={w.id} supabase={createClient()} onChanged={onReload} />}
-
-        {tab === 'attendance' && <AttendanceTab workerId={w.id} supabase={createClient()} isOwner={isOwner} />}
-
-        {tab === 'hours' && (
-          <div className="p-5">
-            <WorkHoursPanel w={w}/>
-          </div>
-        )}
-
-        {tab === 'jobs' && (
-          <div className="p-5">
-            <p className="text-[11px] font-black uppercase tracking-wider text-slate-400 mb-2">Completed Jobs ({w.completedList.length})</p>
-            {w.completedList.length === 0
-              ? <div className="rounded-xl p-8 text-center border border-slate-200"><p className="text-slate-400 text-sm">No completed jobs yet</p></div>
-              : (
-                <>
-                <div className="space-y-2">
-                  {w.completedList.slice(0, jobsShown).map(job => {
-                    const jobDur = job.work_started_at && job.work_ended_at ? elapsed(job.work_started_at, job.work_ended_at) : null
-                    const doneOn = job.work_ended_at ?? job.scheduled_at
+              <TodayTimeline w={w}/>
+              {w.todayJobs.filter(j => j.status !== 'cancelled').length > 0 && (
+                <div className="mt-3 rounded-2xl border border-slate-100 divide-y divide-slate-100">
+                  {w.todayJobs.filter(j => j.status !== 'cancelled').map(j => {
+                    const js = JOB_STATUS[j.status] ?? JOB_STATUS.pending
                     return (
-                      <div key={job.id} className="rounded-xl p-3 border border-slate-100 hover:border-slate-200 transition-all">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-slate-800 font-semibold text-xs truncate">{job.service_name}</p>
-                            <p className="text-[10px] text-slate-400 mt-0.5">📅 {new Date(doneOn).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' })} · 📍 {job.area}</p>
-                            {jobDur && <p className="text-[10px] text-green-600 mt-0.5 font-mono">⏱ {dur(jobDur)}</p>}
-                          </div>
-                          <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                            <span className="text-[9px] font-black px-2 py-0.5 rounded-full" style={{ background: '#D1FAE5', color: '#059669' }}>Done</span>
-                            <p className="text-xs font-black text-cyan-700">₹{job.final_amount.toLocaleString('en-IN')}</p>
-                          </div>
+                      <div key={j.id} className="flex items-center gap-3 px-3 py-2">
+                        <span className="text-[11px] font-black text-slate-700 w-16 shrink-0">{hhmm(jobStartMins(j))}</span>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[12px] font-bold text-slate-800 truncate">{j.service}</p>
+                          <p className="text-[10px] text-slate-400 truncate">📍 {j.area} · {minsToLabel(j.mins)}</p>
                         </div>
+                        <span className="text-[10px] font-black px-2 py-0.5 rounded-full shrink-0" style={{ background: js.bg, color: js.color }}>{js.label}</span>
                       </div>
                     )
                   })}
                 </div>
-                {jobsShown < w.completedList.length && (
-                  <button onClick={() => setJobsShown(n => n + 10)}
-                    className="w-full mt-3 py-2.5 rounded-xl text-xs font-black text-cyan-700 bg-cyan-50 border border-cyan-200 hover:bg-cyan-100 transition-all">
-                    Load more ({w.completedList.length - jobsShown} left)
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                ...(isOwner ? [{ label: 'Revenue', value: `₹${w.totalRevenue.toLocaleString('en-IN')}`, color: '#0E7490' }] : []),
+                { label: 'Jobs done', value: `${w.completed}`, extra: `${completionRate}%`, color: '#047857' },
+                { label: 'This month', value: secsToHrsLabel(w.thisMonthWorkSecs), extra: 'worked', color: '#6D28D9' },
+                { label: "Today's shift", value: todayMins > 0 ? minsToLabel(todayMins) : '—', color: '#B45309' },
+                ...(!isOwner ? [{ label: 'Total jobs', value: `${w.totalOrders}`, color: '#334155' }] : []),
+              ].map(s => (
+                <div key={s.label} className="rounded-2xl bg-slate-50 px-3 py-2.5">
+                  <p className="text-[10px] font-bold text-slate-400">{s.label}</p>
+                  <p className="text-[17px] font-black leading-tight mt-0.5" style={{ color: s.color }}>
+                    {s.value}{s.extra && <span className="text-[10px] font-bold text-slate-400 ml-1">{s.extra}</span>}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-2xl border border-slate-100 px-4 py-3">
+              <div className="flex justify-between items-center mb-1.5">
+                <p className="text-[11px] font-bold text-slate-500">Completion rate</p>
+                <p className="text-[11px] font-black text-slate-700">{w.completed} of {w.totalOrders} · {completionRate}%</p>
+              </div>
+              <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                <div className="h-full rounded-full" style={{ width: `${completionRate}%`, background: `linear-gradient(90deg,${accent},#4F46E5)` }}/>
+              </div>
+            </div>
+
+            {isOwner && w.serviceBreakdown.length > 0 && (
+              <div className="rounded-2xl border border-slate-100 overflow-hidden">
+                <div className="px-4 py-2.5 flex items-center justify-between bg-slate-50/70">
+                  <p className="text-[11px] font-black text-slate-600">Completed work by service</p>
+                  <span className="text-[11px] font-black text-cyan-700">₹{w.serviceBreakdown.reduce((s, x) => s + x.income, 0).toLocaleString('en-IN')}</span>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {w.serviceBreakdown.slice(0, 6).map(sv => (
+                    <div key={sv.name} className="flex items-center justify-between px-4 py-2">
+                      <div className="min-w-0">
+                        <p className="text-[12px] font-bold text-slate-800 truncate">{sv.name}</p>
+                        <p className="text-[10px] text-slate-400">{sv.count} job{sv.count > 1 ? 's' : ''} · {secsToHrsLabel(sv.secs)}</p>
+                      </div>
+                      <p className="text-[12px] font-black text-cyan-700 shrink-0">₹{sv.income.toLocaleString('en-IN')}</p>
+                    </div>
+                  ))}
+                </div>
+                {w.serviceBreakdown.length > 6 && (
+                  <button onClick={() => go('work', 'jobs')} className="w-full py-2 text-[11px] font-bold text-cyan-700 bg-slate-50/70 hover:bg-cyan-50">
+                    See all jobs ›
                   </button>
                 )}
-                </>
-              )
-            }
+              </div>
+            )}
           </div>
         )}
 
-        {tab === 'approval' && <ApprovalTab workerId={w.id} onChanged={onReload} />}
+        {group === 'work' && curSub === 'schedreq' && <ScheduleDateRequestTab workerId={w.id} supabase={createClient()} onChanged={onReload} />}
+        {group === 'work' && curSub === 'attendance' && <AttendanceTab workerId={w.id} supabase={createClient()} isOwner={isOwner} />}
+        {group === 'work' && curSub === 'hours' && <div className="p-5"><WorkHoursPanel w={w}/></div>}
+        {group === 'work' && curSub === 'jobs' && (
+          <div className="p-5 pt-3">
+            <p className="text-[11px] font-black uppercase tracking-wider text-slate-400 mb-2">Completed jobs ({w.completedList.length})</p>
+            {w.completedList.length === 0
+              ? <div className="rounded-2xl p-8 text-center border border-slate-100"><p className="text-slate-400 text-sm">No completed jobs yet</p></div>
+              : (
+                <>
+                  <div className="rounded-2xl border border-slate-100 divide-y divide-slate-100">
+                    {w.completedList.slice(0, jobsShown).map(job => {
+                      const jobDur = job.work_started_at && job.work_ended_at ? elapsed(job.work_started_at, job.work_ended_at) : null
+                      const doneOn = job.work_ended_at ?? job.scheduled_at
+                      return (
+                        <div key={job.id} className="flex items-center gap-3 px-3 py-2.5">
+                          <div className="w-11 shrink-0 text-center">
+                            <p className="text-[13px] font-black text-slate-700 leading-none">{new Date(doneOn).getDate()}</p>
+                            <p className="text-[9px] font-bold text-slate-400 uppercase">{new Date(doneOn).toLocaleDateString('en-IN', { month: 'short' })}</p>
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[12px] font-bold text-slate-800 truncate">{job.service_name}</p>
+                            <p className="text-[10px] text-slate-400 truncate">📍 {job.area}{jobDur ? ` · ⏱ ${dur(jobDur)}` : ''}</p>
+                          </div>
+                          <p className="text-[12px] font-black text-cyan-700 shrink-0">₹{job.final_amount.toLocaleString('en-IN')}</p>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {jobsShown < w.completedList.length && (
+                    <button onClick={() => setJobsShown(n => n + 10)}
+                      className="w-full mt-3 py-2.5 rounded-xl text-xs font-black text-cyan-700 bg-cyan-50 hover:bg-cyan-100 transition-all">
+                      Load more ({w.completedList.length - jobsShown} left)
+                    </button>
+                  )}
+                </>
+              )}
+          </div>
+        )}
 
-        {tab === 'areas' && <AreasTab workerId={w.id} supabase={createClient()} />}
-        {tab === 'money' && <MoneyTab workerId={w.id} supabase={createClient()} />}
-        {tab === 'payouts' && <PayoutsTab workerId={w.id} />}
-        {tab === 'referrals' && <ReferralsTab workerId={w.id} />}
-        {tab === 'tier' && <TierTab workerId={w.id} />}
-        {tab === 'sos' && <SosTab workerId={w.id} supabase={createClient()} />}
+        {group === 'money' && curSub === 'money' && <MoneyTab workerId={w.id} supabase={createClient()} />}
+        {group === 'money' && curSub === 'payouts' && <PayoutsTab workerId={w.id} />}
+        {group === 'money' && curSub === 'tier' && <TierTab workerId={w.id} />}
+        {group === 'money' && curSub === 'referrals' && <ReferralsTab workerId={w.id} />}
 
+        {group === 'areas' && (
+          <div>
+            <AreasTab workerId={w.id} supabase={createClient()} />
+            <div className="px-5 pb-5">
+              <div className="rounded-2xl border border-slate-100 px-4 py-3">
+                <p className="text-[11px] font-black text-slate-500 mb-1.5">Zones (drawn on the map)</p>
+                {w.zones.length === 0
+                  ? <p className="text-[12px] text-slate-400">Not in any zone team.</p>
+                  : <div className="flex flex-wrap gap-1.5">{w.zones.map(z => (
+                      <span key={z} className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-violet-50 text-violet-700">{z}</span>
+                    ))}</div>}
+                <a href="/admin-service-coverage" className="inline-block mt-2 text-[11px] font-bold text-cyan-700 hover:underline">Manage zones in Service Coverage ›</a>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {group === 'profile' && curSub === 'approval' && <ApprovalTab workerId={w.id} onChanged={onReload} />}
+        {group === 'profile' && curSub === 'sos' && <SosTab workerId={w.id} supabase={createClient()} />}
+        {group === 'profile' && curSub === 'details' && (
+          <div className="p-5 pt-3 space-y-3">
+            <div className="rounded-2xl border border-slate-100 divide-y divide-slate-100">
+              {[
+                ['Name', w.full_name],
+                ['Phone', `+91 ${w.phone}`],
+                ['Email', w.email || '—'],
+                ['Worker OTP', w.worker_otp || 'Not set'],
+                ['ID verified', w.is_verified ? 'Yes' : 'No'],
+                ['Account', w.is_active ? 'Active' : 'Inactive'],
+                ['Available for jobs', w.is_available ? 'Yes' : 'No'],
+                ['KYC', w.kycStatus ? w.kycStatus[0].toUpperCase() + w.kycStatus.slice(1) : '—'],
+                ['Member since', (w.joined_at || w.created_at) ? new Date(w.joined_at ?? w.created_at!).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : '—'],
+              ].map(([k, v]) => (
+                <div key={k} className="flex items-center justify-between px-4 py-2.5">
+                  <span className="text-[12px] text-slate-400">{k}</span>
+                  <span className={`text-[12px] font-bold text-slate-800 ${k === 'Worker OTP' ? 'font-mono tracking-widest text-violet-700' : ''}`}>{v}</span>
+                </div>
+              ))}
+            </div>
+            <button onClick={onEdit}
+              className="w-full py-2.5 rounded-xl text-xs font-black text-cyan-700 bg-cyan-50 hover:bg-cyan-100 transition-all">✏️ Edit details</button>
+          </div>
+        )}
       </div>
     </div>
   )
 }
+
 function WorkerForm({ mode, init, onClose, onSaved }: { mode: 'add'|'edit'; init: any; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState(init)
   const [saving, setSaving] = useState(false)
@@ -3053,93 +3334,85 @@ function statusOf(w: Worker): { color: string; label: string } {
   return { color: '#94A3B8', label: 'Unavailable' }
 }
 
-// NEW: shared table body renderer for both the Active and Inactive
-// worker sections, so the two tables can never visually drift apart
-// from each other over time — one component, two data sets.
-function WorkersTable({ list, selected, selIndex, onSelectRow, isOwner }: {
-  list: Worker[]
-  selected: Worker | null
-  selIndex: number
-  onSelectRow: (w: Worker, i: number) => void
-  isOwner: boolean
+type ListFilter = 'all' | 'onjob' | 'free' | 'offshift' | 'unavailable' | 'attention' | 'inactive'
+
+// ── Worker list: one clean row per professional ────────────────
+function WorkerRow({ w, selected, onClick, isOwner, compact }: {
+  w: Worker; selected: boolean; onClick: () => void; isOwner: boolean; compact: boolean
 }) {
+  const st = statusOf(w)
+  const alerts = alertsFor(w, isOwner)
+  const next = nextJobOf(w)
+  const jobsToday = w.todayJobs.filter(j => j.status !== 'cancelled')
+  const doneToday = jobsToday.filter(j => j.status === 'completed').length
+  const live = isLocationLive(w.locationUpdatedAt)
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="border-b border-slate-100 bg-slate-50/50">
-            {(isOwner ? ['Worker','Status','Location','Verified','Jobs','Done','Revenue','OTP'] : ['Worker','Status','Location','Verified','Jobs','Done','OTP']).map(c => (
-              <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {list.map((w, i) => {
-            const st = statusOf(w)
-            const avatarColors = ['#0891B2','#0E7490','#06B6D4','#0891B2','#155E75','#0E7490']
-            const avatarBg = avatarColors[i % avatarColors.length]
-            const isSel = selected?.id === w.id
-            return (
-              <tr key={w.id}
-                onClick={() => onSelectRow(w, i)}
-                className="border-b border-slate-50 last:border-0 hover:bg-slate-50/70 transition-colors cursor-pointer"
-                style={{ background: isSel ? `${avatarBg}08` : undefined }}>
-                <td className="px-4 py-3.5">
-                  <div className="flex items-center gap-2.5">
-                    <div className="relative shrink-0">
-                      <div className="w-9 h-9 rounded-lg flex items-center justify-center font-black text-sm text-white"
-                        style={{ background: `linear-gradient(135deg,${avatarBg},${avatarBg}CC)`, opacity: w.is_active ? 1 : 0.5 }}>
-                        {w.full_name[0]?.toUpperCase()}
-                      </div>
-                      <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white" style={{ background: st.color }}/>
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-bold text-slate-800 text-[13px] truncate max-w-[150px]">{w.full_name}</p>
-                      <p className="text-[11px] text-slate-400">+91 {w.phone}</p>
-                    </div>
-                  </div>
-                </td>
-                <td className="px-4 py-3.5 whitespace-nowrap">
-                  <span className="inline-flex items-center gap-1.5 text-[11px] font-bold">
-                    <span className="w-2 h-2 rounded-full" style={{ background: st.color }}/>
-                    <span style={{ color: st.color }}>{st.label}</span>
-                    {w.is_busy && w.work_started_at && (
-                      <LiveTimer start={w.work_started_at} color="#D97706"/>
-                    )}
-                  </span>
-                </td>
-                <td className="px-4 py-3.5 whitespace-nowrap">
-                  {isLocationLive(w.locationUpdatedAt) ? (
-                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"/>
-                      📍 On
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-red-500">
-                      <span className="w-2 h-2 rounded-full bg-red-400"/>
-                      Off · {locationAgoLabel(w.locationUpdatedAt)}
-                    </span>
-                  )}
-                </td>
-                <td className="px-4 py-3.5 whitespace-nowrap">
-                  {w.is_verified
-                    ? <span className="text-[11px] font-bold text-cyan-700">✓ Verified</span>
-                    : <span className="text-[11px] text-slate-400">—</span>}
-                </td>
-                <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-slate-700">{w.totalOrders}</td>
-                <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-semibold text-emerald-600">{w.completed}</td>
-                {isOwner && <td className="px-4 py-3.5 whitespace-nowrap text-[13px] font-black text-cyan-700">₹{w.totalRevenue.toLocaleString('en-IN')}</td>}
-                <td className="px-4 py-3.5 whitespace-nowrap">
-                  {w.worker_otp
-                    ? <span className="font-mono font-bold text-[12px] text-violet-700">{w.worker_otp}</span>
-                    : <span className="text-[11px] text-red-400">not set</span>}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+    <button onClick={onClick}
+      className="w-full text-left flex items-center gap-3 px-4 py-3 transition-all border-l-[3px]"
+      style={{
+        background: selected ? '#ECFEFF' : undefined,
+        borderLeftColor: selected ? '#0891B2' : 'transparent',
+      }}>
+      <div className="relative shrink-0">
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm text-white"
+          style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)', opacity: w.is_active ? 1 : 0.45 }}>
+          {w.full_name[0]?.toUpperCase()}
+        </div>
+        <span className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 border-white" style={{ background: st.color }}/>
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 min-w-0">
+          <p className="font-black text-slate-800 text-[13px] truncate">{w.full_name}</p>
+          {w.is_verified && <span className="text-[10px] text-cyan-600 shrink-0" title="Verified">✓</span>}
+          {alerts.length > 0 && (
+            <span className="shrink-0 text-[9px] font-black px-1.5 py-0.5 rounded-full"
+              title={alerts.map(a => a.text).join(' · ')}
+              style={alerts.some(a => a.tone === 'red')
+                ? { background: '#FEE2E2', color: '#B91C1C' }
+                : { background: '#FEF3C7', color: '#B45309' }}>
+              ⚠ {alerts.length}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 mt-0.5 text-[11px] min-w-0">
+          <span className="font-bold shrink-0" style={{ color: st.color }}>{st.label}</span>
+          {w.is_busy && w.work_started_at
+            ? <span className="shrink-0"><LiveTimer start={w.work_started_at} color="#D97706"/></span>
+            : null}
+          <span className="text-slate-300">·</span>
+          <span className="text-slate-500 truncate">
+            {w.is_busy && w.current_service
+              ? w.current_service
+              : next
+                ? `Next ${hhmm(jobStartMins(next))} · ${next.area}`
+                : jobsToday.length > 0 ? 'Done for today' : 'No jobs today'}
+          </span>
+        </div>
+      </div>
+
+      {!compact && (
+        <div className="hidden md:flex items-center gap-1 shrink-0" title={`${doneToday} of ${jobsToday.length} jobs done today`}>
+          {jobsToday.length === 0
+            ? <span className="text-[10px] text-slate-300">—</span>
+            : jobsToday.slice(0, 6).map(j => (
+                <span key={j.id} className="w-2 h-5 rounded-sm"
+                  style={{ background: j.status === 'completed' ? '#5EEAD4' : j.status === 'in_progress' ? '#FCD34D' : '#C4B5FD' }}/>
+              ))}
+        </div>
+      )}
+
+      <div className="shrink-0 text-right w-[74px]">
+        {isOwner
+          ? <p className="text-[12px] font-black text-cyan-700">₹{w.totalRevenue > 99999 ? (w.totalRevenue / 1000).toFixed(0) + 'k' : w.totalRevenue.toLocaleString('en-IN')}</p>
+          : <p className="text-[12px] font-black text-slate-700">{w.completed} done</p>}
+        <p className="text-[10px] mt-0.5 flex items-center justify-end gap-1" style={{ color: live ? '#047857' : '#94A3B8' }}>
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: live ? '#10B981' : '#CBD5E1' }}/>
+          {live ? 'Live' : locationAgoLabel(w.locationUpdatedAt)}
+        </p>
+      </div>
+    </button>
   )
 }
 
@@ -3162,22 +3435,57 @@ export default function AdminWorkers() {
   const [toDelete, setToDelete] = useState<Worker | null>(null)
   const [toggling, setToggling] = useState<string | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
-  const [showInactive, setShowInactive] = useState(false)
+  const [filter,   setFilter]   = useState<ListFilter>('all')
+  const [areaPin,  setAreaPin]  = useState('')
   const supabase = createClient()
 
   async function load() {
-    setLoading(true)
+    setLoading(prev => prev && workers.length === 0)
     const todayStr = (() => {
       const d = new Date()
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     })()
-    const [{ data: users }, { data: wRows }, { data: bkng }, { data: active }, { data: todayRows }] = await Promise.all([
+    const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0)
+    const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1)
+
+    const [{ data: users }, { data: wRows }, { data: bkng }, { data: active }, { data: todayRows },
+           { data: pinRows }, { data: zoneRows }, { data: futureRows }, { data: areaRows }] = await Promise.all([
       supabase.from('users').select('id,full_name,phone,email,created_at,is_active').eq('role','worker'),
       supabase.from('workers').select('user_id,is_available,is_verified,joined_at,worker_otp,location_updated_at'),
-      supabase.from('bookings').select('worker_id,status,final_amount,scheduled_at,work_started_at,work_ended_at,work_duration_seconds,service_duration_minutes,extra_time_mins,booking_duration_minutes,services(name,duration_minutes),addresses(area)').order('created_at', { ascending: false }),
+      supabase.from('bookings').select('id,worker_id,status,final_amount,scheduled_at,work_started_at,work_ended_at,work_duration_seconds,service_duration_minutes,extra_time_mins,booking_duration_minutes,services(name,duration_minutes),addresses(area),booking_items(service_name)').order('created_at', { ascending: false }),
       supabase.from('bookings').select('worker_id,work_started_at,services(name)').eq('status','in_progress'),
       supabase.from('worker_schedule_dates').select('worker_id,enabled,start_time,end_time,breaks').eq('date', todayStr),
+      supabase.from('worker_pincodes').select('worker_id,pincode'),
+      supabase.from('zone_workers').select('worker_id,service_zones(name)'),
+      supabase.from('worker_schedule_dates').select('worker_id,date,enabled').gte('date', todayStr),
+      supabase.from('service_areas').select('*'),
     ]) as any[]
+
+    // "Has this worker ever had a schedule saved?" — used for the
+    // "No schedule from today" warning (a worker with NO schedule rows at
+    // all simply works default hours, so she shouldn't be warned).
+    let schedEver = new Set<string>()
+    try {
+      const { data: anyRows } = await supabase.from('worker_schedule_dates').select('worker_id').lt('date', todayStr).gte('date', new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10))
+      schedEver = new Set((anyRows ?? []).map((r: any) => r.worker_id))
+    } catch {}
+
+    let kycMap: Record<string, string> = {}
+    try {
+      const kr = await fetch('/api/kyc', { cache: 'no-store' })
+      if (kr.ok) {
+        const kj = await kr.json()
+        ;(kj.list ?? []).forEach((k: any) => { kycMap[k.worker_id] = k.status })
+      }
+    } catch {}
+
+    const areaName: Record<string, string> = {}
+    ;(areaRows ?? []).forEach((a: any) => {
+      const p = String(a.pincode ?? '').replace(/\D/g, '').slice(-6)
+      const nm = a.area_name ?? a.name ?? a.area ?? a.locality ?? ''
+      if (p && nm) areaName[p] = String(nm)
+    })
+
     const wMap: Record<string,any> = {}
     ;(wRows ?? []).forEach((w: any) => { wMap[w.user_id] = w })
     const todayMap: Record<string, TodayEntry> = {}
@@ -3191,6 +3499,28 @@ export default function AdminWorkers() {
     })
     const busyMap: Record<string,any> = {}
     ;(active ?? []).forEach((b: any) => { if (b.worker_id) busyMap[b.worker_id] = { service: b.services?.name ?? 'Service', work_started_at: b.work_started_at ?? new Date().toISOString() } })
+
+    const pinMap: Record<string, string[]> = {}
+    ;(pinRows ?? []).forEach((r: any) => {
+      const p = String(r.pincode ?? '').trim(); if (!p) return
+      ;(pinMap[r.worker_id] ??= []).includes(p) || pinMap[r.worker_id].push(p)
+    })
+    const zoneMap: Record<string, string[]> = {}
+    ;(zoneRows ?? []).forEach((r: any) => {
+      const nm = r.service_zones?.name; if (!nm) return
+      ;(zoneMap[r.worker_id] ??= []).push(nm)
+    })
+    const schedUntil: Record<string, string> = {}
+    ;(futureRows ?? []).forEach((r: any) => {
+      if (r.enabled === false) { schedEver.add(r.worker_id); return }
+      if (!schedUntil[r.worker_id] || r.date > schedUntil[r.worker_id]) schedUntil[r.worker_id] = r.date
+      schedEver.add(r.worker_id)
+    })
+
+    const svcName = (b: any) => {
+      const items = (b.booking_items ?? []).map((i: any) => i.service_name).filter(Boolean)
+      return items.length > 0 ? items.join(' + ') : (b.services?.name ?? 'Service')
+    }
 
     const list: Worker[] = (users ?? []).map((u: any) => {
       const w    = wMap[u.id] ?? {}
@@ -3229,6 +3559,27 @@ export default function AdminWorkers() {
           work_started_at: b.work_started_at ?? null, work_ended_at: b.work_ended_at ?? null,
         }))
 
+      const todayJobs: TodayJob[] = wb
+        .filter((b: any) => {
+          const t = new Date(b.work_started_at ?? b.scheduled_at).getTime()
+          return t >= dayStart.getTime() && t < dayEnd.getTime()
+        })
+        .map((b: any) => {
+          const base = b.service_duration_minutes ?? b.booking_duration_minutes ?? b.services?.duration_minutes ?? 60
+          const realMins = b.work_started_at && b.work_ended_at
+            ? Math.round((new Date(b.work_ended_at).getTime() - new Date(b.work_started_at).getTime()) / 60000)
+            : null
+          return {
+            id: b.id ?? Math.random().toString(),
+            start: b.work_started_at ?? b.scheduled_at,
+            mins: Math.max(30, realMins ?? (Number(base) + Number(b.extra_time_mins ?? 0))),
+            status: b.status,
+            service: svcName(b),
+            area: b.addresses?.area ?? '—',
+          }
+        })
+        .sort((a: TodayJob, b: TodayJob) => new Date(a.start).getTime() - new Date(b.start).getTime())
+
       const wh = buildWorkHours(comp)
       return {
         id: u.id, full_name: u.full_name ?? 'Unknown', phone: u.phone ?? '—', email: u.email ?? '',
@@ -3245,6 +3596,12 @@ export default function AdminWorkers() {
         recentBookings,
         serviceBreakdown,
         completedList,
+        todayJobs,
+        pincodes: (pinMap[u.id] ?? []).sort().map(p => ({ pincode: p, label: areaName[p.replace(/\D/g, '').slice(-6)] ?? '' })),
+        zones: zoneMap[u.id] ?? [],
+        scheduleUntil: schedUntil[u.id] ?? null,
+        hasScheduleRows: schedEver.has(u.id),
+        kycStatus: kycMap[u.id] ?? null,
         ...wh,
       }
     }).sort((a, b) => b.totalRevenue - a.totalRevenue)
@@ -3255,7 +3612,7 @@ export default function AdminWorkers() {
       const pj = await pr.json()
       setPendingCount(pj.count ?? 0)
     } catch {}
-    if (selected) { const updated = list.find(w => w.id === selected.id); if (updated) setSelected(updated) }
+    setSelected(prev => prev ? (list.find(w => w.id === prev.id) ?? prev) : prev)
     const workSecsRows = list
       .filter(w => w.totalWorkSecs > 0)
       .map(w => ({ user_id: w.id, total_work_seconds: w.totalWorkSecs }))
@@ -3266,6 +3623,12 @@ export default function AdminWorkers() {
   }
 
   useEffect(() => { load() }, [])
+
+  // keep live status fresh without a full page reload
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === 'visible') load() }, 60000)
+    return () => clearInterval(t)
+  }, [])
 
   async function quickToggle(w: Worker, field: 'is_available'|'is_active') {
     setToggling(field)
@@ -3283,15 +3646,46 @@ export default function AdminWorkers() {
     await load(); setToggling(null)
   }
 
-  const isReallyAvailable = (w: Worker) => w.is_active && w.is_available && !w.is_busy && isWorkingNow(w.todaySchedule)
+  const isFree = (w: Worker) => w.is_active && w.is_available && !w.is_busy && isWorkingNow(w.todaySchedule)
+  const isOff  = (w: Worker) => w.is_active && w.is_available && !w.is_busy && !isWorkingNow(w.todaySchedule) && !!w.todaySchedule
+  const isUnav = (w: Worker) => w.is_active && !w.is_busy && !isFree(w) && !isOff(w)
 
-  const filtered   = workers.filter(w => w.full_name.toLowerCase().includes(search.toLowerCase()) || w.phone.includes(search))
-  const activeFiltered   = filtered.filter(w => w.is_active)
-  const inactiveFiltered = filtered.filter(w => !w.is_active)
-  const busyCount  = workers.filter(w => w.is_busy).length
-  const freeCount  = workers.filter(w => isReallyAvailable(w)).length
-  const offShift   = workers.filter(w => w.is_active && w.is_available && !w.is_busy && !isWorkingNow(w.todaySchedule) && w.todaySchedule).length
-  const totalRev   = workers.reduce((s, w) => s + w.totalRevenue, 0)
+  const activeW = workers.filter(w => w.is_active)
+  const counts: Record<ListFilter, number> = {
+    all: activeW.length,
+    onjob: activeW.filter(w => w.is_busy).length,
+    free: activeW.filter(isFree).length,
+    offshift: activeW.filter(isOff).length,
+    unavailable: activeW.filter(isUnav).length,
+    attention: activeW.filter(w => alertsFor(w, isOwner).length > 0).length,
+    inactive: workers.filter(w => !w.is_active).length,
+  }
+
+  // Area dropdown: every pincode that has at least one professional
+  const areaOptions = Array.from(new Set(workers.flatMap(w => w.pincodes.map(p => p.pincode)))).sort().map(p => {
+    const label = workers.flatMap(w => w.pincodes).find(x => x.pincode === p)?.label ?? ''
+    return { pincode: p, label, count: workers.filter(w => w.is_active && w.pincodes.some(x => x.pincode === p)).length }
+  })
+
+  const rank = (w: Worker) => !w.is_active ? 5 : w.is_busy ? 0 : isFree(w) ? 1 : isOff(w) ? 2 : 3
+  const q = search.toLowerCase().trim()
+  const shown = workers
+    .filter(w => filter === 'inactive' ? !w.is_active : w.is_active)
+    .filter(w =>
+      filter === 'onjob' ? w.is_busy :
+      filter === 'free' ? isFree(w) :
+      filter === 'offshift' ? isOff(w) :
+      filter === 'unavailable' ? isUnav(w) :
+      filter === 'attention' ? alertsFor(w, isOwner).length > 0 : true)
+    .filter(w => !areaPin || w.pincodes.some(p => p.pincode === areaPin))
+    .filter(w => !q || w.full_name.toLowerCase().includes(q) || w.phone.includes(q) ||
+      w.pincodes.some(p => p.pincode.includes(q) || p.label.toLowerCase().includes(q)) ||
+      w.zones.some(z => z.toLowerCase().includes(q)))
+    .sort((a, b) => rank(a) - rank(b) || b.completed - a.completed)
+
+  const totalRev = workers.reduce((s, w) => s + w.totalRevenue, 0)
+  const jobsToday = workers.reduce((s, w) => s + w.todayJobs.filter(j => j.status !== 'cancelled').length, 0)
+  const doneToday = workers.reduce((s, w) => s + w.todayJobs.filter(j => j.status === 'completed').length, 0)
 
   function selectRow(w: Worker, i: number) {
     setSelected(selected?.id === w.id ? null : w)
@@ -3307,110 +3701,108 @@ export default function AdminWorkers() {
     </div>
   )
 
+  const FILTERS: { key: ListFilter; label: string; dot: string }[] = [
+    { key: 'all',         label: 'All active',      dot: '#0891B2' },
+    { key: 'onjob',       label: 'On job',          dot: '#D97706' },
+    { key: 'free',        label: 'Free now',        dot: '#059669' },
+    { key: 'offshift',    label: 'Off shift',       dot: '#F97316' },
+    { key: 'unavailable', label: 'Unavailable',     dot: '#94A3B8' },
+    { key: 'attention',   label: 'Needs attention', dot: '#DC2626' },
+    { key: 'inactive',    label: 'Inactive',        dot: '#64748B' },
+  ]
+
   return (
     <div className="min-h-screen px-4 md:px-8 py-7 bg-slate-50">
 
-      <div className="flex items-center justify-between gap-4 mb-5">
+      {/* ── Header ── */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
         <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl"
-            style={{ background: '#06B6D414', border: '1px solid #06B6D425' }}>👷</div>
+          <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl bg-white border border-slate-200">👷</div>
           <div>
-            <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">Workers</h1>
-            <p className="text-xs text-slate-400 font-medium">
-              {workers.length} total · {busyCount} on job · {freeCount} free now
-              {pendingCount > 0 && <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-black text-[10px]">✅ {pendingCount} pending approval{pendingCount > 1 ? 's' : ''}</span>}
+            <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">Professionals</h1>
+            <p className="text-xs text-slate-500 font-medium">
+              <span className="font-bold text-amber-600">{counts.onjob} on job</span>
+              {' · '}<span className="font-bold text-emerald-600">{counts.free} free now</span>
+              {' · '}{doneToday}/{jobsToday} jobs done today
+              {isOwner && <> · ₹{totalRev > 99999 ? (totalRev / 100000).toFixed(1) + 'L' : totalRev.toLocaleString('en-IN')} earned</>}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <input type="text" placeholder="Search name or phone…" value={search} onChange={e => setSearch(e.target.value)}
-            className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-44 md:w-64"/>
+        <div className="flex items-center gap-2 flex-wrap">
+          {pendingCount > 0 && (
+            <span className="px-3 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 font-black text-[11px]">
+              ✅ {pendingCount} waiting for approval
+            </span>
+          )}
+          <select value={areaPin} onChange={e => setAreaPin(e.target.value)}
+            className="px-3 py-2.5 rounded-xl text-sm font-semibold outline-none bg-white border"
+            style={{ borderColor: areaPin ? '#0891B2' : '#E2E8F0', color: areaPin ? '#0E7490' : '#334155' }}>
+            <option value="">📍 All areas</option>
+            {areaOptions.map(a => (
+              <option key={a.pincode} value={a.pincode}>{a.pincode}{a.label ? ` · ${a.label}` : ''} ({a.count})</option>
+            ))}
+          </select>
+          <input type="text" placeholder="Search name, phone, area…" value={search} onChange={e => setSearch(e.target.value)}
+            className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-48 md:w-60"/>
           <button onClick={() => setDrawer('add')}
             className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-white font-black text-sm active:scale-95 transition-all whitespace-nowrap"
-            style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)', boxShadow: '0 4px 12px rgba(8,145,178,0.28)' }}>
+            style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
             + Add
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
-        {[
-          { label: 'Total Workers',  value: workers.length, accent: '#0891B2', icon: '👷' },
-          { label: 'On Job Now',     value: busyCount,      accent: '#0891B2', icon: '⚡' },
-          { label: 'Free in Shift',  value: freeCount,      accent: '#059669', icon: '🟢' },
-          ...(isOwner ? [{ label: 'Total Revenue',  value: `₹${totalRev > 99999 ? (totalRev/1000).toFixed(0)+'k' : totalRev.toLocaleString('en-IN')}`, accent: '#0E7490', icon: '💰' }] : []),
-        ].map(c => (
-          <div key={c.label} className="bg-white rounded-2xl border border-slate-200/80 p-5 hover:border-slate-300 hover:shadow-sm transition-all">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">{c.label}</span>
-              <span className="w-6 h-6 rounded-md flex items-center justify-center text-sm" style={{ background: `${c.accent}14` }}>{c.icon}</span>
-            </div>
-            <p className="text-2xl font-black text-slate-900 leading-none">{c.value}</p>
-          </div>
-        ))}
-      </div>
-
-      <div className="flex gap-4 mb-3 px-1 flex-wrap">
-        {[['#D97706','On job'],['#059669','Free & in shift'],['#F97316','Off shift'],['#94A3B8','Unavailable'],['#DC2626','Inactive']].map(([c,l]) => (
-          <div key={l} className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full" style={{ background: c }}/>
-            <span className="text-[11px] text-slate-400">{l}</span>
-          </div>
-        ))}
+      {/* ── Status filters (also the counts) ── */}
+      <div className="flex gap-2 mb-4 overflow-x-auto pb-1">
+        {FILTERS.map(f => {
+          const on = filter === f.key
+          const n = counts[f.key]
+          return (
+            <button key={f.key} onClick={() => setFilter(f.key)}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-2xl border whitespace-nowrap transition-all"
+              style={on
+                ? { background: '#0F172A', borderColor: '#0F172A', color: '#fff' }
+                : { background: '#fff', borderColor: '#E2E8F0', color: '#475569' }}>
+              <span className="w-2 h-2 rounded-full" style={{ background: f.dot }}/>
+              <span className="text-[12px] font-bold">{f.label}</span>
+              <span className="text-[11px] font-black px-1.5 rounded-md"
+                style={on ? { background: 'rgba(255,255,255,0.15)' } : { background: '#F1F5F9' }}>{n}</span>
+            </button>
+          )
+        })}
       </div>
 
       <div className="flex flex-col lg:flex-row gap-4">
-        <div className={`${selected ? 'hidden lg:block lg:w-1/2' : 'w-full'} space-y-4`}>
-
-          {activeFiltered.length === 0 && inactiveFiltered.length === 0
-            ? (
-              <div className="rounded-xl p-16 text-center bg-white border border-slate-200">
-                <p className="text-4xl mb-3">👷</p>
-                <p className="text-slate-700 font-bold">No workers found</p>
-                <button onClick={() => setDrawer('add')} className="mt-4 px-6 py-2.5 rounded-xl text-white font-black text-sm" style={{ background: 'linear-gradient(135deg,#0891B2,#0E7490)' }}>+ Add First Worker</button>
-              </div>
-            ) : (
-              <>
-                {activeFiltered.length === 0 ? (
-                  <div className="rounded-xl p-10 text-center bg-white border border-slate-200">
-                    <p className="text-3xl mb-2">👷</p>
-                    <p className="text-slate-500 font-semibold text-sm">No active workers match this search</p>
-                  </div>
-                ) : (
-                  <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-                    <WorkersTable list={activeFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow} isOwner={isOwner}/>
-                  </div>
-                )}
-
-                {inactiveFiltered.length > 0 && (
-                  <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-                    <button
-                      onClick={() => setShowInactive(s => !s)}
-                      className="w-full flex items-center justify-between px-4 py-3.5 bg-red-50/50 hover:bg-red-50 transition-colors">
-                      <div className="flex items-center gap-2.5">
-                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: '#DC2626' }}/>
-                        <span className="text-sm font-black text-red-700">
-                          Inactive Workers ({inactiveFiltered.length})
-                        </span>
-                      </div>
-                      <span className="text-red-400 text-sm transition-transform" style={{ transform: showInactive ? 'rotate(180deg)' : 'none' }}>
-                        ▾
-                      </span>
-                    </button>
-                    {showInactive && (
-                      <div className="border-t border-red-100">
-                        <WorkersTable list={inactiveFiltered} selected={selected} selIndex={selIndex} onSelectRow={selectRow} isOwner={isOwner}/>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </>
-            )
-          }
+        <div className={`${selected ? 'hidden lg:block lg:w-[42%]' : 'w-full'}`}>
+          {shown.length === 0 ? (
+            <div className="rounded-3xl p-14 text-center bg-white border border-slate-200">
+              <p className="text-4xl mb-3">👷</p>
+              <p className="text-slate-700 font-bold">No professionals here</p>
+              <p className="text-sm text-slate-400 mt-1">Try another filter, area or search</p>
+              {workers.length === 0 && (
+                <button onClick={() => setDrawer('add')} className="mt-4 px-6 py-2.5 rounded-xl text-white font-black text-sm" style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>+ Add first professional</button>
+              )}
+            </div>
+          ) : (
+            <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden divide-y divide-slate-100 shadow-sm">
+              {shown.map((w, i) => (
+                <WorkerRow key={w.id} w={w} isOwner={isOwner}
+                  compact={!!selected}
+                  selected={selected?.id === w.id}
+                  onClick={() => selectRow(w, i)}/>
+              ))}
+            </div>
+          )}
+          <div className="flex flex-wrap gap-3 mt-3 px-2 text-[10px] text-slate-400">
+            <span className="flex items-center gap-1"><span className="w-2 h-3 rounded-sm" style={{ background: '#5EEAD4' }}/>Job done</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-3 rounded-sm" style={{ background: '#FCD34D' }}/>Working now</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-3 rounded-sm" style={{ background: '#C4B5FD' }}/>Coming up</span>
+            <span className="flex items-center gap-1"><span className="font-black text-amber-600">⚠</span>Needs attention</span>
+          </div>
         </div>
 
         {selected && (
-          <div className="w-full lg:w-1/2 lg:sticky lg:top-6 lg:self-start">
+          <div className="w-full lg:flex-1 lg:sticky lg:top-6 lg:self-start min-w-0">
             <WorkerDetail
               w={selected} index={selIndex}
               onClose={() => setSelected(null)}

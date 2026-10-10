@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 
@@ -12,6 +12,15 @@ type OrderRow = {
   created_at: string
   service_name: string
   worker_name: string
+}
+
+// Every saved (non-deleted) address of a customer — used by the
+// 📍 Area filter, so a customer with homes in two areas shows in both.
+type AddrLite = {
+  pincode: string | null      // cleaned: 6 digits or null
+  area: string | null
+  full_address: string | null
+  is_default: boolean
 }
 
 type CustomerRow = {
@@ -33,6 +42,9 @@ type CustomerRow = {
   // pin currently (possibly wrongly) sits, rather than opening blank.
   default_lat: number | null
   default_lng: number | null
+  // All saved addresses (for the area filter)
+  addresses: AddrLite[]
+  pincodes: string[]          // unique cleaned pincodes across all addresses
   // Derived from bookings
   orders: OrderRow[]
   totalOrders: number
@@ -41,6 +53,15 @@ type CustomerRow = {
   totalSpent: number
   lastOrderDate: string | null
 }
+
+type AreaOption = {
+  pincode: string
+  label: string        // most common area name for this pincode
+  customers: number
+  inService: boolean
+}
+
+const NO_ADDRESS = '__none__'
 
 const STATUS: Record<string, { label: string; color: string; bg: string; icon: string }> = {
   pending:      { label: 'Pending',      color: '#D97706', bg: '#FEF3C7', icon: '⏳' },
@@ -53,11 +74,23 @@ const STATUS: Record<string, { label: string; color: string; bg: string; icon: s
 
 type SortKey = 'orders' | 'spent' | 'recent'
 
+// "400 053", "Mumbai 400053" → "400053". Anything that isn't 6 digits → null.
+function cleanPin(p: any): string | null {
+  const d = String(p ?? '').replace(/\D/g, '')
+  if (d.length < 6) return null
+  return d.slice(-6)
+}
+
 // Helper: build the best available one-line address string for a customer
 function formatAddress(c: Pick<CustomerRow, 'default_full_address' | 'default_area' | 'default_city' | 'default_pincode'>): string | null {
   if (c.default_full_address) return c.default_full_address
   const parts = [c.default_area, c.default_city, c.default_pincode].filter(Boolean)
   return parts.length > 0 ? parts.join(', ') : null
+}
+
+function csvCell(v: any): string {
+  const s = String(v ?? '')
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
 // ── NEW: Edit Location modal — thin wrapper around the existing
@@ -154,6 +187,7 @@ function UserDrawer({
 }) {
   const address = formatAddress(user)
   const [editingLocation, setEditingLocation] = useState(false)
+  const otherAddresses = user.addresses.filter(a => !a.is_default)
 
   return (
     <>
@@ -241,6 +275,25 @@ function UserDrawer({
             )}
           </div>
 
+          {/* Other saved addresses */}
+          {otherAddresses.length > 0 && (
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
+                Other Saved Addresses · {otherAddresses.length}
+              </p>
+              <div className="space-y-2">
+                {otherAddresses.map((a, i) => (
+                  <div key={i} className="rounded-2xl px-4 py-2.5 bg-slate-50 border border-slate-200">
+                    <p className="text-[13px] text-slate-700">
+                      📍 {a.full_address || [a.area, a.pincode].filter(Boolean).join(', ') || '—'}
+                    </p>
+                    {a.pincode && <p className="text-[11px] text-slate-400 mt-0.5">Pincode: {a.pincode}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Order history */}
           <div>
             <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
@@ -306,6 +359,9 @@ export default function AdminUsers() {
   const [search, setSearch] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('recent')
   const [selected, setSelected] = useState<CustomerRow | null>(null)
+  // 📍 Area filter: '' = all areas, NO_ADDRESS = no address saved, else a pincode
+  const [areaFilter, setAreaFilter] = useState('')
+  const [servicePins, setServicePins] = useState<Set<string>>(new Set())
   const supabase = createClient()
 
   const load = useCallback(async () => {
@@ -314,19 +370,18 @@ export default function AdminUsers() {
     // NOTE: 'customer' is assumed to be the exact value stored in
     // users.role for regular app users (as opposed to 'worker' / 'admin').
     // If your role enum uses a different value, change it here.
-    const [{ data: userRows }, { data: addrRows }, { data: bookingRows }] = await Promise.all([
+    const [{ data: userRows }, { data: addrRows }, { data: bookingRows }, { data: areaRows }] = await Promise.all([
       supabase.from('users')
         .select('id,full_name,phone,email,city,is_active,is_verified,created_at,is_deleted')
         .eq('role', 'customer')
         .eq('is_deleted', false)
         .order('created_at', { ascending: false }),
-      // NEW: also select id/latitude/longitude — needed so "Edit
-      // Location" knows exactly which address row to update, and can
-      // center the map on where the pin currently (possibly wrongly)
-      // sits instead of opening blank.
+      // ALL saved addresses (not just the default) — the area filter
+      // needs every address, so a customer with two homes shows in both
+      // areas. The default one still drives the Address column / Edit
+      // Location exactly as before.
       supabase.from('addresses')
         .select('id,user_id,area,city,pincode,full_address,latitude,longitude,is_default,is_deleted')
-        .eq('is_default', true)
         .eq('is_deleted', false),
       supabase.from('bookings')
         .select(
@@ -336,10 +391,31 @@ export default function AdminUsers() {
            booking_items(service_name,services(name))`
         )
         .order('scheduled_at', { ascending: false }),
+      // Your Service Coverage pincodes — used to split the area list into
+      // "In service area" and "Outside service area".
+      supabase.from('service_areas').select('pincode,is_active'),
     ])
 
+    const svc = new Set<string>()
+    ;(areaRows ?? []).forEach((a: any) => {
+      const p = cleanPin(a.pincode)
+      if (p && a.is_active !== false) svc.add(p)
+    })
+    setServicePins(svc)
+
     const addrByUser: Record<string, any> = {}
-    ;(addrRows ?? []).forEach((a: any) => { addrByUser[a.user_id] = a })
+    const allAddrByUser: Record<string, AddrLite[]> = {}
+    ;(addrRows ?? []).forEach((a: any) => {
+      if (!a.user_id) return
+      if (a.is_default) addrByUser[a.user_id] = a
+      if (!allAddrByUser[a.user_id]) allAddrByUser[a.user_id] = []
+      allAddrByUser[a.user_id].push({
+        pincode: cleanPin(a.pincode),
+        area: (a.area ?? '').toString().trim() || null,
+        full_address: a.full_address ?? null,
+        is_default: a.is_default === true,
+      })
+    })
 
     const ordersByUser: Record<string, OrderRow[]> = {}
     ;(bookingRows ?? []).forEach((b: any) => {
@@ -363,11 +439,13 @@ export default function AdminUsers() {
 
     const rows: CustomerRow[] = (userRows ?? []).map((u: any) => {
       const addr = addrByUser[u.id]
+      const allAddr = allAddrByUser[u.id] ?? []
       const orders = ordersByUser[u.id] ?? []
       const completed = orders.filter(o => o.status === 'completed')
       const cancelled = orders.filter(o => o.status === 'cancelled')
       const totalSpent = completed.reduce((s, o) => s + o.final_amount, 0)
       const lastOrderDate = orders.length > 0 ? orders[0].scheduled_at : null
+      const pins = Array.from(new Set(allAddr.map(a => a.pincode).filter((p): p is string => !!p)))
 
       return {
         id: u.id,
@@ -385,6 +463,8 @@ export default function AdminUsers() {
         default_full_address: addr?.full_address ?? null,
         default_lat: addr?.latitude ?? null,
         default_lng: addr?.longitude ?? null,
+        addresses: allAddr,
+        pincodes: pins,
         orders,
         totalOrders: orders.length,
         completedOrders: completed.length,
@@ -405,9 +485,44 @@ export default function AdminUsers() {
     setSelected(prev => (prev ? (customers.find(c => c.id === prev.id) ?? prev) : prev))
   }, [customers])
 
+  // ── Area list: every pincode customers have saved, with the most
+  // common area name and how many customers live there.
+  const { areaOptions, noAddressCount } = useMemo(() => {
+    const count: Record<string, number> = {}
+    const names: Record<string, Record<string, number>> = {}
+    let none = 0
+    customers.forEach(c => {
+      if (c.pincodes.length === 0) none++
+      c.pincodes.forEach(p => { count[p] = (count[p] ?? 0) + 1 })
+      c.addresses.forEach(a => {
+        if (!a.pincode || !a.area) return
+        if (!names[a.pincode]) names[a.pincode] = {}
+        names[a.pincode][a.area] = (names[a.pincode][a.area] ?? 0) + 1
+      })
+    })
+    const opts: AreaOption[] = Object.keys(count).map(p => {
+      const n = names[p] ?? {}
+      const best = Object.keys(n).sort((a, b) => n[b] - n[a])[0] ?? ''
+      return { pincode: p, label: best, customers: count[p], inService: servicePins.has(p) }
+    })
+    opts.sort((a, b) => b.customers - a.customers || a.pincode.localeCompare(b.pincode))
+    return { areaOptions: opts, noAddressCount: none }
+  }, [customers, servicePins])
+
+  const inServiceOpts  = areaOptions.filter(o => o.inService)
+  const outServiceOpts = areaOptions.filter(o => !o.inService)
+  const selectedArea   = areaOptions.find(o => o.pincode === areaFilter) ?? null
+
   const filtered = customers.filter(c => {
+    if (areaFilter === NO_ADDRESS) {
+      if (c.pincodes.length > 0) return false
+    } else if (areaFilter) {
+      if (!c.pincodes.includes(areaFilter)) return false
+    }
     const q = search.toLowerCase()
-    const addr = formatAddress(c)?.toLowerCase() ?? ''
+    if (!q) return true
+    const addr = [formatAddress(c), ...c.addresses.map(a => a.full_address ?? a.area ?? '')]
+      .join(' ').toLowerCase()
     return (
       c.full_name.toLowerCase().includes(q) ||
       c.phone.includes(q) ||
@@ -425,9 +540,43 @@ export default function AdminUsers() {
     return bT - aT
   })
 
-  const totalCustomers = customers.length
-  const activeCustomers = customers.filter(c => c.totalOrders > 0).length
-  const totalRevenue = customers.reduce((s, c) => s + c.totalSpent, 0)
+  // Summary cards follow the area filter, so you see each area's numbers.
+  const base = areaFilter ? filtered : customers
+  const totalCustomers = base.length
+  const activeCustomers = base.filter(c => c.totalOrders > 0).length
+  const totalRevenue = base.reduce((s, c) => s + c.totalSpent, 0)
+
+  const areaTitle = areaFilter === NO_ADDRESS
+    ? 'with no address saved'
+    : selectedArea
+      ? `in ${selectedArea.pincode}${selectedArea.label ? ` · ${selectedArea.label}` : ''}`
+      : ''
+
+  function downloadCsv() {
+    const header = ['Name', 'Phone', 'Email', 'Pincode', 'Area', 'Address', 'Orders', 'Completed', 'Total Spent', 'Last Order', 'Joined']
+    const lines = sorted.map(c => {
+      // When an area is picked, show the address in THAT area
+      const inArea = areaFilter && areaFilter !== NO_ADDRESS
+        ? c.addresses.find(a => a.pincode === areaFilter) : null
+      const pin  = inArea?.pincode ?? cleanPin(c.default_pincode) ?? c.pincodes[0] ?? ''
+      const area = inArea?.area ?? c.default_area ?? ''
+      const addr = inArea?.full_address ?? formatAddress(c) ?? ''
+      return [
+        c.full_name, c.phone, c.email ?? '', pin, area, addr,
+        c.totalOrders, c.completedOrders, c.totalSpent,
+        c.lastOrderDate ? new Date(c.lastOrderDate).toLocaleDateString('en-IN') : '',
+        new Date(c.created_at).toLocaleDateString('en-IN'),
+      ].map(csvCell).join(',')
+    })
+    const blob = new Blob(['﻿' + [header.join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const tag = areaFilter === NO_ADDRESS ? 'no-address' : (areaFilter || 'all')
+    a.href = url
+    a.download = `cleenzo-customers-${tag}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -448,18 +597,70 @@ export default function AdminUsers() {
             style={{ background: '#0891B214', border: '1px solid #0891B225' }}>👥</div>
           <div>
             <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">Users</h1>
-            <p className="text-xs text-slate-400 font-medium">{totalCustomers} customers · {activeCustomers} with orders</p>
+            <p className="text-xs text-slate-400 font-medium">{customers.length} customers · {customers.filter(c => c.totalOrders > 0).length} with orders</p>
           </div>
         </div>
-        <input type="text" placeholder="Search name, phone, email, address…" value={search} onChange={e => setSearch(e.target.value)}
-          className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
+        <div className="flex flex-col sm:flex-row gap-2 w-full md:w-auto">
+          {/* 📍 Area filter */}
+          <select value={areaFilter} onChange={e => setAreaFilter(e.target.value)}
+            className="px-3 py-2.5 rounded-xl text-sm font-semibold outline-none bg-white border w-full sm:w-72"
+            style={{
+              borderColor: areaFilter ? '#0891B2' : '#E2E8F0',
+              color: areaFilter ? '#0E7490' : '#334155',
+            }}>
+            <option value="">📍 All areas ({customers.length})</option>
+            {inServiceOpts.length > 0 && (
+              <optgroup label="✅ In your service area">
+                {inServiceOpts.map(o => (
+                  <option key={o.pincode} value={o.pincode}>
+                    {o.pincode}{o.label ? ` · ${o.label}` : ''} ({o.customers})
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {outServiceOpts.length > 0 && (
+              <optgroup label="🚫 Outside service area">
+                {outServiceOpts.map(o => (
+                  <option key={o.pincode} value={o.pincode}>
+                    {o.pincode}{o.label ? ` · ${o.label}` : ''} ({o.customers})
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label="Other">
+              <option value={NO_ADDRESS}>No address saved ({noAddressCount})</option>
+            </optgroup>
+          </select>
+          <input type="text" placeholder="Search name, phone, email, address…" value={search} onChange={e => setSearch(e.target.value)}
+            className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full sm:w-72"/>
+        </div>
       </div>
+
+      {/* Area banner */}
+      {areaFilter && (
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4 px-4 py-2.5 rounded-xl border"
+          style={{ background: '#ECFEFF', borderColor: '#A5F3FC' }}>
+          <p className="text-sm font-bold text-cyan-800">
+            📍 Showing {filtered.length} customer{filtered.length === 1 ? '' : 's'} {areaTitle}
+            {selectedArea && (
+              <span className="ml-2 text-[11px] font-bold px-2 py-0.5 rounded-full"
+                style={selectedArea.inService
+                  ? { background: '#D1FAE5', color: '#047857' }
+                  : { background: '#FEE2E2', color: '#B91C1C' }}>
+                {selectedArea.inService ? 'In service area' : 'Outside service area'}
+              </span>
+            )}
+          </p>
+          <button onClick={() => setAreaFilter('')}
+            className="text-xs font-bold text-cyan-700 hover:text-cyan-900">✕ Clear area</button>
+        </div>
+      )}
 
       {/* Summary cards */}
       <div className="grid grid-cols-3 gap-3 mb-4">
         <div className="rounded-2xl p-3.5 bg-white border border-slate-200/80 shadow-sm">
           <p className="text-xl font-black text-slate-800">{totalCustomers}</p>
-          <p className="text-[11px] font-bold text-slate-500 mt-0.5">Total Customers</p>
+          <p className="text-[11px] font-bold text-slate-500 mt-0.5">{areaFilter ? 'Customers here' : 'Total Customers'}</p>
         </div>
         <div className="rounded-2xl p-3.5 bg-white border border-slate-200/80 shadow-sm">
           <p className="text-xl font-black text-cyan-700">{activeCustomers}</p>
@@ -467,27 +668,33 @@ export default function AdminUsers() {
         </div>
         <div className="rounded-2xl p-3.5 bg-white border border-slate-200/80 shadow-sm">
           <p className="text-xl font-black text-green-700">₹{totalRevenue.toLocaleString('en-IN')}</p>
-          <p className="text-[11px] font-bold text-slate-500 mt-0.5">Total Revenue</p>
+          <p className="text-[11px] font-bold text-slate-500 mt-0.5">{areaFilter ? 'Revenue here' : 'Total Revenue'}</p>
         </div>
       </div>
 
-      {/* Sort pills */}
-      <div className="flex gap-2 mb-3">
-        {[
-          { key: 'recent', label: '🕒 Most Recent' },
-          { key: 'orders', label: '📦 Most Orders' },
-          { key: 'spent',  label: '💰 Highest Spend' },
-        ].map(opt => (
-          <button key={opt.key} onClick={() => setSortKey(opt.key as SortKey)}
-            className="px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all"
-            style={{
-              background: sortKey === opt.key ? '#CFFAFE' : '#fff',
-              color: sortKey === opt.key ? '#0891B2' : '#64748B',
-              border: `1px solid ${sortKey === opt.key ? '#0891B2' : '#E2E8F0'}`,
-            }}>
-            {opt.label}
-          </button>
-        ))}
+      {/* Sort pills + download */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div className="flex gap-2">
+          {[
+            { key: 'recent', label: '🕒 Most Recent' },
+            { key: 'orders', label: '📦 Most Orders' },
+            { key: 'spent',  label: '💰 Highest Spend' },
+          ].map(opt => (
+            <button key={opt.key} onClick={() => setSortKey(opt.key as SortKey)}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all"
+              style={{
+                background: sortKey === opt.key ? '#CFFAFE' : '#fff',
+                color: sortKey === opt.key ? '#0891B2' : '#64748B',
+                border: `1px solid ${sortKey === opt.key ? '#0891B2' : '#E2E8F0'}`,
+              }}>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <button onClick={downloadCsv} disabled={sorted.length === 0}
+          className="px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap bg-white border border-slate-200 text-slate-600 hover:border-cyan-500 hover:text-cyan-700 disabled:opacity-40 transition-all">
+          ⬇ Download list ({sorted.length})
+        </button>
       </div>
 
       {/* Table */}
@@ -495,7 +702,7 @@ export default function AdminUsers() {
         <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center shadow-sm">
           <p className="text-4xl mb-3">👥</p>
           <p className="text-slate-700 font-bold">No users found</p>
-          <p className="text-sm text-slate-400 mt-1">Try a different search</p>
+          <p className="text-sm text-slate-400 mt-1">Try a different search or area</p>
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
@@ -510,7 +717,17 @@ export default function AdminUsers() {
               </thead>
               <tbody>
                 {sorted.map(c => {
-                  const address = formatAddress(c)
+                  // When an area is picked and the default address is
+                  // elsewhere, show the address that's actually in that area.
+                  const inArea = areaFilter && areaFilter !== NO_ADDRESS
+                    && cleanPin(c.default_pincode) !== areaFilter
+                    ? c.addresses.find(a => a.pincode === areaFilter) ?? null
+                    : null
+                  const address = inArea
+                    ? (inArea.full_address || [inArea.area, inArea.pincode].filter(Boolean).join(', '))
+                    : formatAddress(c)
+                  const pin = inArea ? inArea.pincode : c.default_pincode
+                  const morePins = c.pincodes.filter(p => p !== cleanPin(pin)).length
                   return (
                     <tr key={c.id}
                       className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
@@ -530,15 +747,30 @@ export default function AdminUsers() {
                         </div>
                       </td>
                       {/* Address */}
-                      <td className="px-4 py-3.5 max-w-[240px]">
+                      <td className="px-4 py-3.5 max-w-[260px]">
                         {address ? (
                           <>
                             <p className="text-[12px] font-bold text-slate-700 truncate" title={address}>
                               📍 {address}
                             </p>
-                            {c.default_pincode && (
-                              <p className="text-[10px] text-slate-400">PIN {c.default_pincode}</p>
-                            )}
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              {pin && (
+                                <button onClick={e => { e.stopPropagation(); const p = cleanPin(pin); if (p) setAreaFilter(p) }}
+                                  title="Show everyone in this area"
+                                  className="text-[10px] font-bold px-1.5 py-0.5 rounded-md hover:underline"
+                                  style={servicePins.has(cleanPin(pin) ?? '')
+                                    ? { background: '#ECFEFF', color: '#0E7490' }
+                                    : { background: '#FEF2F2', color: '#B91C1C' }}>
+                                  PIN {pin}
+                                </button>
+                              )}
+                              {inArea && (
+                                <span className="text-[10px] font-bold text-amber-600">not default</span>
+                              )}
+                              {morePins > 0 && (
+                                <span className="text-[10px] text-slate-400">+{morePins} more area{morePins > 1 ? 's' : ''}</span>
+                              )}
+                            </div>
                           </>
                         ) : (
                           <span className="text-[11px] text-slate-300">No address saved</span>
