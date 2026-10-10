@@ -89,7 +89,7 @@ function monthRange() {
 }
 
 export default function PayrollPage() {
-  const [tab, setTab] = useState<'wallet' | 'earnings' | 'claims' | 'referrals' | 'payouts'>('wallet')
+  const [tab, setTab] = useState<'wallet' | 'earnings' | 'tiers' | 'claims' | 'referrals' | 'payouts'>('wallet')
   const [pendingCount, setPendingCount] = useState(0)
 
   useEffect(() => {
@@ -115,6 +115,7 @@ export default function PayrollPage() {
         {([
           ['wallet', '💸 Wallet & Payouts'],
           ['earnings', 'Earnings'],
+          ['tiers', '🏆 Tiers & bonus'],
           ['claims', 'Travel claims'],
           ['referrals', 'Refer & Earn'],
           ['payouts', 'Payout requests'],
@@ -138,6 +139,7 @@ export default function PayrollPage() {
 
       {tab === 'wallet' && <WalletTab />}
       {tab === 'earnings' && <EarningsTab />}
+      {tab === 'tiers' && <TiersTab />}
       {tab === 'claims' && <ClaimsTab />}
       {tab === 'referrals' && <ReferralsTab />}
       {tab === 'payouts' && <PayoutsTab />}
@@ -148,8 +150,8 @@ export default function PayrollPage() {
 // ─────────────────────────── EARNINGS ───────────────────────────
 function EarningsTab() {
   const supabase = createClient()
-  const [preset, setPreset] = useState<'week' | 'month' | 'custom'>('week')
-  const [range, setRange] = useState(weekRange())
+  const [preset, setPreset] = useState<'week' | 'month' | 'custom'>('month')
+  const [range, setRange] = useState(monthRange())
   const [workers, setWorkers] = useState<Worker[]>([])
   const [grand, setGrand] = useState<Grand | null>(null)
   const [loading, setLoading] = useState(true)
@@ -170,6 +172,19 @@ function EarningsTab() {
   // Workers page and the Reports page, so this keeps the same pattern
   // rather than inventing a third way to read the same table.
   const [bonusByWorker, setBonusByWorker] = useState<Record<string, number>>({})
+  const [bonusSplit, setBonusSplit] = useState<Record<string, { ref: number; tier: number; manual: number }>>({})
+  // MONTHLY: every bonus is counted only inside the selected period, so on
+  // the 1st of the month (period = "Month") all bonus figures start at ₹0.
+  const inRange = (d: any) => {
+    if (!d) return false
+    const k = String(d).slice(0, 10)
+    return k >= range.from && k <= range.to
+  }
+  // a tier reward belongs to the month it was earned for (period = 1st of month)
+  const tierInRange = (t: any) => {
+    const p = t.period ? String(t.period).slice(0, 7) : String(t.earned_at ?? '').slice(0, 7)
+    return p >= range.from.slice(0, 7) && p <= range.to.slice(0, 7)
+  }
   const [bonusLoading, setBonusLoading] = useState(false)
 
   const [refPaid, setRefPaid] = useState(0)
@@ -203,32 +218,42 @@ function EarningsTab() {
     try {
       const [refRes, tierRes, claimRes, poRes, bonusRes] = await Promise.all([
         fetch('/api/referrals?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
-        fetch('/api/tiers?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
+        Promise.resolve(supabase.from('tier_rewards').select('bonus_amount, status, period, earned_at')).catch(() => null),
         fetch('/api/payroll/claims?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
         fetch('/api/payroll/payouts?status=all', { cache: 'no-store' }).then(r => r.json()).catch(() => null),
         // NEW: aggregate manual-bonus totals across every worker, for
         // the breakdown-by-source list — same earned('earned')+paid
         // status split every other source here already uses.
-        Promise.resolve(supabase.from('worker_manual_bonuses').select('amount, status')).catch(() => null),
+        Promise.resolve(supabase.from('worker_manual_bonuses').select('amount, status, created_at')).catch(() => null),
       ])
       const refs = refRes?.referrals ?? refRes?.rows ?? []
       let rp = 0, rq = 0
-      for (const r of refs) { if (r.status === 'paid') rp += Number(r.amount ?? 0); else if (r.status === 'earned') rq += Number(r.amount ?? 0) }
+      for (const r of refs) {
+        if (!inRange(r.earned_at ?? r.paid_at ?? r.created_at)) continue
+        if (r.status === 'paid') rp += Number(r.amount ?? 0); else if (r.status === 'earned') rq += Number(r.amount ?? 0)
+      }
       setRefPaid(rp); setRefPend(rq)
 
-      const tiers = tierRes?.rewards ?? tierRes?.rows ?? []
+      const tiers = (tierRes as any)?.data ?? []
       let tp = 0, tq = 0
-      for (const t of tiers) { if (t.status === 'paid') tp += Number(t.amount ?? 0); else if (t.status === 'earned') tq += Number(t.amount ?? 0) }
+      for (const t of tiers) {
+        if (!tierInRange(t)) continue
+        if (t.status === 'paid') tp += Number(t.bonus_amount ?? 0); else if (t.status === 'earned') tq += Number(t.bonus_amount ?? 0)
+      }
       setTierPaid(tp); setTierPend(tq)
 
       const claims = claimRes?.claims ?? []
       let cp = 0, cq = 0
-      for (const c of claims) { if (c.status === 'approved') cp += Number(c.amount ?? 0); else if (c.status === 'pending') cq += Number(c.amount ?? 0) }
+      for (const c of claims) {
+        if (!inRange(c.date ?? c.created_at)) continue
+        if (c.status === 'approved') cp += Number(c.amount ?? 0); else if (c.status === 'pending') cq += Number(c.amount ?? 0)
+      }
       setTravelPaid(cp); setTravelPend(cq)
 
       const payouts = poRes?.requests ?? []
       let pp = 0, pq = 0
       for (const p of payouts) {
+        if (!inRange(p.to ?? p.requested_at)) continue
         const bo = Number(p.base ?? 0) + Number(p.order ?? 0)
         if (p.status === 'paid') pp += bo
         else if (p.status !== 'rejected') pq += bo
@@ -238,13 +263,14 @@ function EarningsTab() {
       const bonusRows = (bonusRes as any)?.data ?? []
       let mbp = 0, mbq = 0
       for (const b of bonusRows) {
+        if (!inRange(b.created_at)) continue
         if (b.status === 'paid') mbp += Number(b.amount ?? 0)
         else if (b.status === 'earned') mbq += Number(b.amount ?? 0)
       }
       setManualBonusPaid(mbp); setManualBonusPend(mbq)
     } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [range])
 
   useEffect(() => { load() }, [load])
   useEffect(() => { loadExtras() }, [loadExtras])
@@ -266,41 +292,44 @@ function EarningsTab() {
             const [refRes, tierRes, manualRes] = await Promise.all([
               fetch(`/api/referrals?status=all&worker_id=${w.worker_id}`, { cache: 'no-store' })
                 .then(r => r.json()).catch(() => null),
-              fetch(`/api/tiers?status=all&worker_id=${w.worker_id}`, { cache: 'no-store' })
-                .then(r => r.json()).catch(() => null),
+              Promise.resolve(
+                supabase.from('tier_rewards').select('bonus_amount, status, period, earned_at').eq('worker_id', w.worker_id)
+              ).catch(() => null),
               // NEW: this worker's manual bonuses, same direct-Supabase
               // pattern as loadExtras() above, just scoped to one
               // worker_id instead of aggregated across everyone.
               Promise.resolve(
-                supabase.from('worker_manual_bonuses').select('amount, status').eq('worker_id', w.worker_id)
+                supabase.from('worker_manual_bonuses').select('amount, status, created_at').eq('worker_id', w.worker_id)
               ).catch(() => null),
             ])
             const refs = refRes?.referrals ?? refRes?.rows ?? []
             const refTotal = refs
-              .filter((r: any) => r.status === 'earned' || r.status === 'paid')
+              .filter((r: any) => (r.status === 'earned' || r.status === 'paid') && inRange(r.earned_at ?? r.paid_at ?? r.created_at))
               .reduce((s: number, r: any) => s + Number(r.amount ?? 0), 0)
 
-            const tiers = tierRes?.rewards ?? tierRes?.rows ?? []
+            const tiers = (tierRes as any)?.data ?? []
             const tierTotal = tiers
-              .filter((t: any) => t.status === 'earned' || t.status === 'paid')
-              .reduce((s: number, t: any) => s + Number(t.amount ?? 0), 0)
+              .filter((t: any) => (t.status === 'earned' || t.status === 'paid') && tierInRange(t))
+              .reduce((s: number, t: any) => s + Number(t.bonus_amount ?? 0), 0)
 
             const manualRows = (manualRes as any)?.data ?? []
             const manualTotal = manualRows
-              .filter((b: any) => b.status === 'earned' || b.status === 'paid')
+              .filter((b: any) => (b.status === 'earned' || b.status === 'paid') && inRange(b.created_at))
               .reduce((s: number, b: any) => s + Number(b.amount ?? 0), 0)
 
-            return [w.worker_id, refTotal + tierTotal + manualTotal] as const
+            return [w.worker_id, refTotal + tierTotal + manualTotal, { ref: refTotal, tier: tierTotal, manual: manualTotal }] as const
           } catch {
-            return [w.worker_id, 0] as const
+            return [w.worker_id, 0, { ref: 0, tier: 0, manual: 0 }] as const
           }
         }))
         if (cancelled) return
         const map: Record<string, number> = {}
-        for (const [id, amt] of entries) {
-          if (amt > 0) map[id] = amt
+        const split: Record<string, { ref: number; tier: number; manual: number }> = {}
+        for (const [id, amt, sp] of entries) {
+          if (amt > 0) { map[id] = amt; split[id] = sp }
         }
         setBonusByWorker(map)
+        setBonusSplit(split)
       } finally {
         if (!cancelled) setBonusLoading(false)
       }
@@ -320,48 +349,6 @@ function EarningsTab() {
 
   return (
     <div>
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="rounded-xl p-4" style={{ background: 'linear-gradient(135deg,#ECFDF5,#D1FAE5)' }}>
-          <p className="text-[10px] font-black uppercase tracking-wider text-green-600">Total paid out</p>
-          <p className="text-2xl font-black text-green-700 mt-1">{inr(paidTotal)}</p>
-        </div>
-        <div className="rounded-xl p-4" style={{ background: 'linear-gradient(135deg,#FFFBEB,#FEF3C7)' }}>
-          <p className="text-[10px] font-black uppercase tracking-wider text-amber-600">Pending / owed</p>
-          <p className="text-2xl font-black text-amber-700 mt-1">{inr(pendTotal)}</p>
-        </div>
-      </div>
-      <div className="rounded-xl bg-white border border-slate-200 overflow-hidden mb-5">
-        <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200">
-          <p className="text-xs font-black text-slate-700">Money breakdown by source</p>
-        </div>
-        {[
-          ['Base + Order pay', poPaidBO, poPendBO, '#0891B2'],
-          ['Travel allowance', travelPaid, travelPend, '#D97706'],
-          ['Refer & Earn', refPaid, refPend, '#7C3AED'],
-          ['Tier bonus', tierPaid, tierPend, '#059669'],
-          // NEW: manual one-time bonuses, same row shape as every
-          // other source above.
-          ['Manual bonus', manualBonusPaid, manualBonusPend, '#DB2777'],
-        ].map(([label, paid, pend, color]) => (
-          <div key={label as string} className="flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full" style={{ background: color as string }} />
-              <span className="text-[13px] font-bold text-slate-700">{label as string}</span>
-            </div>
-            <div className="flex items-center gap-5">
-              <div className="text-right">
-                <p className="text-[9px] text-slate-400 uppercase">Paid</p>
-                <p className="text-[13px] font-black text-green-600">{inr(paid as number)}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-[9px] text-slate-400 uppercase">Pending</p>
-                <p className="text-[13px] font-black text-amber-600">{inr(pend as number)}</p>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="inline-flex p-1 rounded-xl bg-slate-100">
           {(['week', 'month', 'custom'] as const).map((p) => (
@@ -384,7 +371,49 @@ function EarningsTab() {
               className="px-2 py-1.5 rounded-lg border border-slate-200 text-xs" />
           </div>
         )}
-        <span className="text-xs text-slate-400 ml-auto">{range.from} → {range.to}</span>
+        <span className="text-xs text-slate-400 ml-auto">{range.from} → {range.to}{preset === 'month' && ' · bonuses restart at ₹0 on the 1st'}</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div className="rounded-xl p-4" style={{ background: 'linear-gradient(135deg,#ECFDF5,#D1FAE5)' }}>
+          <p className="text-[10px] font-black uppercase tracking-wider text-green-600">Total paid out</p>
+          <p className="text-2xl font-black text-green-700 mt-1">{inr(paidTotal)}</p>
+        </div>
+        <div className="rounded-xl p-4" style={{ background: 'linear-gradient(135deg,#FFFBEB,#FEF3C7)' }}>
+          <p className="text-[10px] font-black uppercase tracking-wider text-amber-600">Pending / owed</p>
+          <p className="text-2xl font-black text-amber-700 mt-1">{inr(pendTotal)}</p>
+        </div>
+      </div>
+      <div className="rounded-xl bg-white border border-slate-200 overflow-hidden mb-5">
+        <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200">
+          <p className="text-xs font-black text-slate-700">Money breakdown by source · selected period</p>
+        </div>
+        {[
+          ['Base + Order pay', poPaidBO, poPendBO, '#0891B2'],
+          ['Travel allowance', travelPaid, travelPend, '#D97706'],
+          ['Refer & Earn', refPaid, refPend, '#7C3AED'],
+          ['Tier bonus (in wallet)', tierPaid, tierPend, '#059669'],
+          // NEW: manual one-time bonuses, same row shape as every
+          // other source above.
+          ['Manual bonus', manualBonusPaid, manualBonusPend, '#DB2777'],
+        ].map(([label, paid, pend, color]) => (
+          <div key={label as string} className="flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full" style={{ background: color as string }} />
+              <span className="text-[13px] font-bold text-slate-700">{label as string}</span>
+            </div>
+            <div className="flex items-center gap-5">
+              <div className="text-right">
+                <p className="text-[9px] text-slate-400 uppercase">Paid</p>
+                <p className="text-[13px] font-black text-green-600">{inr(paid as number)}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[9px] text-slate-400 uppercase">Pending</p>
+                <p className="text-[13px] font-black text-amber-600">{inr(pend as number)}</p>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
 
       {grand && (
@@ -487,10 +516,14 @@ function EarningsTab() {
                   Loading bonus…
                 </div>
               ) : (bonusByWorker[selected.worker_id] ?? 0) > 0 && (
-                <BreakRow label="Bonus" sub="Refer & Earn + Tier bonus + Manual bonus (earned + paid)" amt={bonusByWorker[selected.worker_id]} color="#7c3aed" />
+                <>
+                  {(bonusSplit[selected.worker_id]?.tier ?? 0) > 0 && <BreakRow label="Tier bonus" sub="Reached a tier this period · goes into wallet" amt={bonusSplit[selected.worker_id].tier} color="#059669" />}
+                  {(bonusSplit[selected.worker_id]?.manual ?? 0) > 0 && <BreakRow label="Manual bonus" sub="Given by admin this period" amt={bonusSplit[selected.worker_id].manual} color="#db2777" />}
+                  {(bonusSplit[selected.worker_id]?.ref ?? 0) > 0 && <BreakRow label="Refer & Earn" sub="Referral earned this period" amt={bonusSplit[selected.worker_id].ref} color="#7c3aed" />}
+                </>
               )}
             </div>
-            <p className="text-[11px] text-slate-400 mt-4">Travel allowance is now automatic — no claim submission needed. The Bonus amount shown here covers this worker&apos;s full lifetime earned+paid referral, tier, and manual bonus total, not just this date range.</p>
+            <p className="text-[11px] text-slate-400 mt-4">Travel allowance is now automatic — no claim submission needed. Bonuses shown here are only the ones earned in this date range — on the 1st of every month they start again from ₹0.</p>
           </div>
         </div>
       )}
@@ -1718,5 +1751,218 @@ function W_Modal({ title, children, onClose }: { title: string; children: React.
         {children}
       </div>
     </>
+  )
+}
+
+// ─────────────────────────── TIERS & BONUS (MONTHLY) ───────────────────────────
+// Tier = orders completed in the chosen month (Indian time). Everyone
+// starts again from zero on the 1st. Tier bonus goes into the wallet the
+// day it's earned; on the 1st, last month's rewards turn "Settled".
+type T_Cfg = { tier: string; rank: number; min_orders: number; bonus_amount: number; label?: string | null }
+
+function T_monthKeyIst(d = new Date()) {
+  const ist = new Date(d.getTime() + (330 + d.getTimezoneOffset()) * 60000)
+  return `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, '0')}`
+}
+function T_monthLabel(k: string) {
+  return new Date(k + '-01T00:00:00').toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+}
+function T_cap(t?: string | null) { return t ? t[0].toUpperCase() + t.slice(1) : 'New' }
+
+function TiersTab() {
+  const supabase = createClient()
+  const thisMonth = T_monthKeyIst()
+  const months = useMemo(() => {
+    const out: string[] = []
+    const [y, m] = thisMonth.split('-').map(Number)
+    for (let i = 0; i < 6; i++) {
+      const d = new Date(y, m - 1 - i, 1)
+      out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+    }
+    return out
+  }, [thisMonth])
+  const [month, setMonth] = useState(thisMonth)
+  const [loading, setLoading] = useState(true)
+  const [cfg, setCfg] = useState<T_Cfg[]>([])
+  const [rows, setRows] = useState<{ id: string; name: string; phone: string; orders: number; tierBonus: number; tierStatus: string; manual: number; reached: string | null }[]>([])
+  const [sort, setSort] = useState<'orders' | 'bonus' | 'name'>('orders')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [y, m] = month.split('-').map(Number)
+      // month window in IST, as UTC instants
+      const fromUtc = new Date(Date.UTC(y, m - 1, 1) - 330 * 60000).toISOString()
+      const toUtc = new Date(Date.UTC(y, m, 1) - 330 * 60000).toISOString()
+      const [{ data: cfgRows }, { data: users }, { data: bk }, { data: tr }, { data: mb }] = await Promise.all([
+        supabase.from('tier_config').select('*'),
+        supabase.from('users').select('id,full_name,phone,is_active').eq('role', 'worker'),
+        supabase.from('bookings').select('worker_id,work_ended_at,scheduled_at')
+          .eq('status', 'completed')
+          .gte('scheduled_at', new Date(Date.parse(fromUtc) - 3 * 86400000).toISOString())
+          .lt('scheduled_at', new Date(Date.parse(toUtc) + 86400000).toISOString()),
+        supabase.from('tier_rewards').select('worker_id,tier,bonus_amount,status,period,earned_at'),
+        supabase.from('worker_manual_bonuses').select('worker_id,amount,status,created_at')
+          .gte('created_at', fromUtc).lt('created_at', toUtc),
+      ]) as any[]
+
+      const conf: T_Cfg[] = (cfgRows ?? []).filter((c: any) => c.tier !== 'new')
+        .sort((a: any, b: any) => (a.min_orders ?? 0) - (b.min_orders ?? 0))
+      setCfg(conf)
+
+      const count: Record<string, number> = {}
+      for (const b of (bk ?? [])) {
+        const t = Date.parse(b.work_ended_at ?? b.scheduled_at)
+        if (t >= Date.parse(fromUtc) && t < Date.parse(toUtc) && b.worker_id) count[b.worker_id] = (count[b.worker_id] ?? 0) + 1
+      }
+      const tb: Record<string, { amt: number; earned: number; best: string | null; bestRank: number }> = {}
+      for (const r of (tr ?? [])) {
+        const p = String(r.period ?? r.earned_at ?? '').slice(0, 7)
+        if (p !== month || r.status === 'rejected') continue
+        const e = (tb[r.worker_id] ??= { amt: 0, earned: 0, best: null, bestRank: -1 })
+        e.amt += Number(r.bonus_amount ?? 0)
+        if (r.status === 'earned') e.earned += Number(r.bonus_amount ?? 0)
+        const rank = conf.findIndex(c => c.tier === r.tier)
+        if (rank > e.bestRank) { e.bestRank = rank; e.best = r.tier }
+      }
+      const man: Record<string, number> = {}
+      for (const b of (mb ?? [])) if (b.status !== 'rejected') man[b.worker_id] = (man[b.worker_id] ?? 0) + Number(b.amount ?? 0)
+
+      setRows((users ?? []).filter((u: any) => u.is_active !== false || count[u.id] || tb[u.id]).map((u: any) => {
+        const n = count[u.id] ?? 0
+        const reached = conf.filter(c => n >= c.min_orders).slice(-1)[0]?.tier ?? tb[u.id]?.best ?? null
+        const t = tb[u.id]
+        return {
+          id: u.id, name: u.full_name ?? '—', phone: u.phone ?? '',
+          orders: n, reached,
+          tierBonus: t?.amt ?? 0,
+          tierStatus: !t ? '' : t.earned > 0 ? 'In wallet' : 'Settled',
+          manual: man[u.id] ?? 0,
+        }
+      }))
+    } catch { setRows([]) } finally { setLoading(false) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [month])
+  useEffect(() => { load() }, [load])
+
+  const sorted = [...rows].sort((a, b) =>
+    sort === 'name' ? a.name.localeCompare(b.name)
+    : sort === 'bonus' ? (b.tierBonus + b.manual) - (a.tierBonus + a.manual)
+    : b.orders - a.orders)
+  const totTier = rows.reduce((s, r) => s + r.tierBonus, 0)
+  const totManual = rows.reduce((s, r) => s + r.manual, 0)
+  const reachedCount = rows.filter(r => r.reached).length
+  const isCurrent = month === thisMonth
+  const istNow = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000)
+  const daysLeft = new Date(istNow.getFullYear(), istNow.getMonth() + 1, 0).getDate() - istNow.getDate()
+  const nextReset = new Date(istNow.getFullYear(), istNow.getMonth() + 1, 1).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+  const tierColor: Record<number, string> = { 0: '#B45309', 1: '#64748B', 2: '#CA8A04', 3: '#7C3AED', 4: '#0891B2' }
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <div className="inline-flex p-1 rounded-xl bg-slate-100 overflow-x-auto max-w-full">
+          {months.map(k => (
+            <button key={k} onClick={() => setMonth(k)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-colors ${month === k ? 'bg-white text-cyan-700 shadow-sm' : 'text-slate-500'}`}>
+              {k === thisMonth ? 'This month' : new Date(k + '-01T00:00:00').toLocaleDateString('en-IN', { month: 'short', year: '2-digit' })}
+            </button>
+          ))}
+        </div>
+        <span className="text-xs text-slate-400 ml-auto">
+          {isCurrent ? <>🔄 Tiers restart from zero on <b className="text-slate-600">{nextReset}</b> · {daysLeft} day{daysLeft === 1 ? '' : 's'} left</> : <>{T_monthLabel(month)} · closed</>}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        {[
+          { l: 'Tier bonus', v: inr(totTier), c: '#059669', s: isCurrent ? 'in wallets, settles on the 1st' : 'settled' },
+          { l: 'Manual bonus', v: inr(totManual), c: '#DB2777', s: 'given this month' },
+          { l: 'Reached a tier', v: `${reachedCount}`, c: '#7C3AED', s: `of ${rows.length} professionals` },
+          { l: 'Orders done', v: `${rows.reduce((s, r) => s + r.orders, 0)}`, c: '#0891B2', s: T_monthLabel(month) },
+        ].map(g => (
+          <div key={g.l} className="rounded-xl bg-white border border-slate-200 p-3">
+            <p className="text-[11px] text-slate-500 font-semibold">{g.l}</p>
+            <p className="text-lg font-black mt-0.5" style={{ color: g.c }}>{g.v}</p>
+            <p className="text-[10px] text-slate-400">{g.s}</p>
+          </div>
+        ))}
+      </div>
+
+      {cfg.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-4">
+          {cfg.map((c, i) => (
+            <span key={c.tier} className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-white border border-slate-200" style={{ color: tierColor[i] ?? '#334155' }}>
+              🏆 {c.label || T_cap(c.tier)} · {c.min_orders} orders · {inr(c.bonus_amount)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-b border-slate-200">
+          <p className="text-xs font-black text-slate-700">{T_monthLabel(month)} · professionals</p>
+          <div className="inline-flex gap-1">
+            {(['orders', 'bonus', 'name'] as const).map(k => (
+              <button key={k} onClick={() => setSort(k)}
+                className={`px-2 py-1 rounded-md text-[11px] font-bold ${sort === k ? 'bg-white text-cyan-700 shadow-sm' : 'text-slate-500'}`}>
+                {k === 'orders' ? 'Most orders' : k === 'bonus' ? 'Most bonus' : 'Name'}
+              </button>
+            ))}
+          </div>
+        </div>
+        {loading ? (
+          <div className="px-4 py-10 text-center text-slate-400 text-sm">Loading…</div>
+        ) : sorted.length === 0 ? (
+          <div className="px-4 py-10 text-center text-slate-400 text-sm">No professionals found.</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {sorted.map(r => {
+              const idx = cfg.findIndex(c => c.tier === r.reached)
+              const next = cfg.find(c => r.orders < c.min_orders) ?? null
+              const prevMin = idx >= 0 ? cfg[idx].min_orders : 0
+              const pct = next ? Math.max(3, Math.min(100, ((r.orders - prevMin) / Math.max(1, next.min_orders - prevMin)) * 100)) : 100
+              return (
+                <div key={r.id} className="flex items-center gap-3 px-4 py-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-black text-sm shrink-0"
+                    style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>{r.name[0]?.toUpperCase()}</div>
+                  <div className="min-w-0 w-40 shrink-0">
+                    <p className="text-[13px] font-bold text-slate-800 truncate">{r.name}</p>
+                    <p className="text-[11px] font-black" style={{ color: idx >= 0 ? (tierColor[idx] ?? '#334155') : '#94A3B8' }}>
+                      {idx >= 0 ? `🏆 ${cfg[idx].label || T_cap(r.reached)}` : 'No tier yet'}
+                    </p>
+                  </div>
+                  <div className="flex-1 min-w-0 hidden sm:block">
+                    <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${pct}%`, background: 'linear-gradient(90deg,#0891B2,#7C3AED)' }} />
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      {r.orders} order{r.orders === 1 ? '' : 's'}
+                      {next ? ` · ${next.min_orders - r.orders} more to ${next.label || T_cap(next.tier)}` : cfg.length ? ' · top tier 🎉' : ''}
+                    </p>
+                  </div>
+                  <p className="sm:hidden text-[12px] font-black text-slate-700">{r.orders}</p>
+                  <div className="text-right w-28 shrink-0">
+                    {r.tierBonus > 0
+                      ? <><p className="text-[13px] font-black text-emerald-600">{inr(r.tierBonus)}</p>
+                          <p className="text-[10px] font-bold" style={{ color: r.tierStatus === 'Settled' ? '#15803D' : '#0E7490' }}>{r.tierStatus}</p></>
+                      : <p className="text-[12px] text-slate-300">—</p>}
+                  </div>
+                  <div className="text-right w-24 shrink-0 hidden md:block">
+                    {r.manual > 0
+                      ? <><p className="text-[13px] font-black text-pink-600">{inr(r.manual)}</p><p className="text-[10px] text-slate-400">manual</p></>
+                      : <p className="text-[12px] text-slate-300">—</p>}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+      <p className="text-[11px] text-slate-400 mt-3">
+        Tier = orders completed in that month. Tier bonus is added to the professional&apos;s wallet the same day she reaches a tier;
+        on the 1st, last month&apos;s tier bonuses are marked settled and everyone&apos;s tier starts again from zero.
+      </p>
+    </div>
   )
 }
