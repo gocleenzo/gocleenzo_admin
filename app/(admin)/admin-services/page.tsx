@@ -1,20 +1,14 @@
 'use client'
-import { useEffect, useState } from 'react'
+// app/(admin)/admin-services/page.tsx
+// Services — card layout. Same data and saving as before (services +
+// service_pincodes), arranged more simply:
+//   • cards grouped by category, price & duration at a glance
+//   • Show / hide switch right on each card
+//   • warning when a service has no area (hidden from everyone)
+//   • one side panel to edit price, duration, BHK prices and areas
+// Extra-time price now lives on the 💳 Fees & charges page.
+import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-
-// ============================================================================
-// Admin Services page — table layout
-// ============================================================================
-// Columns match the ACTUAL services table schema exactly (confirmed via
-// information_schema.columns) — no pricing_type/duration_per_unit/
-// unit_label, those don't exist on this table.
-//
-// Click any row to open the edit drawer. For most services that's the
-// two fields requested — Original Price and Offer Price — plus Duration.
-// BHK-priced services (Full House Cleaning, Dusting & Wiping, Sweeping &
-// Mopping) get three price+duration pairs instead, since a single price
-// wouldn't make sense for those.
-// ============================================================================
 
 type Service = {
   id: string
@@ -24,7 +18,6 @@ type Service = {
   base_price: number | null
   original_price: number | null
   duration_minutes: number | null
-  cart_type: string | null   // ← new: 'tiered' | 'fixed' | 'hourly'
   price_1bhk: number | null
   price_2bhk: number | null
   price_3bhk: number | null
@@ -35,654 +28,468 @@ type Service = {
   price_60min: number | null
   price_90min: number | null
 }
+type Area = { pincode: string; name: string }
 
-function isBhkPriced(s: Service): boolean {
-  return s.price_1bhk != null || s.price_2bhk != null || s.price_3bhk != null
+const isBhk = (s: Service) => s.price_1bhk != null || s.price_2bhk != null || s.price_3bhk != null
+const inr = (n: number | null | undefined) => n == null ? '—' : '₹' + Number(n).toLocaleString('en-IN')
+const mins = (m: number | null | undefined) => {
+  if (m == null) return '—'
+  const h = Math.floor(m / 60), r = m % 60
+  return h === 0 ? `${r} min` : r === 0 ? `${h} hr` : `${h} hr ${r} min`
 }
+const offPct = (orig: number | null, offer: number | null) =>
+  orig && offer && orig > offer ? Math.round(((orig - offer) / orig) * 100) : 0
 
-// ═══════════════════════════════════════════════════════════════
-// Service Areas section — inside EditServiceModal. A service with
-// ZERO pincodes assigned is unavailable in EVERY area (opposite
-// default from worker_pincodes) — this section makes that state
-// visible and lets an admin manage which pincodes this specific
-// service is actually offered in.
-// ═══════════════════════════════════════════════════════════════
-function ServiceAreasSection({ serviceId, supabase }: { serviceId: string; supabase: any }) {
-  const [pincodes, setPincodes] = useState<{ id: string; pincode: string }[]>([])
-  const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<string | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  const [input, setInput] = useState('')
-  const [adding, setAdding] = useState(false)
-
-  async function load() {
-    setLoading(true); setErr(null)
-    try {
-      const { data, error } = await supabase
-        .from('service_pincodes')
-        .select('id, pincode')
-        .eq('service_id', serviceId)
-        .order('pincode', { ascending: true })
-      if (error) { setErr(error.message); setLoading(false); return }
-      setPincodes(data ?? [])
-    } catch (e: any) {
-      setErr(e?.message ?? 'Could not load service areas')
-    } finally {
-      setLoading(false)
-    }
-  }
-  useEffect(() => { load() }, [serviceId])
-
-  function normalizePincode(raw: string): string | null {
-    const trimmed = raw.trim()
-    if (!/^\d{6}$/.test(trimmed)) return null
-    return trimmed
-  }
-
-  async function addPincode() {
-    const clean = normalizePincode(input)
-    if (!clean) { setErr('Enter a valid 6-digit pincode'); return }
-    if (pincodes.some(p => p.pincode === clean)) {
-      setErr('This pincode is already enabled for this service')
-      return
-    }
-    setAdding(true); setErr(null)
-    try {
-      const { data, error } = await supabase
-        .from('service_pincodes')
-        .insert({ service_id: serviceId, pincode: clean })
-        .select('id, pincode')
-        .single()
-      if (error) { setErr(error.message); setAdding(false); return }
-      setPincodes(prev => [...prev, data].sort((a, b) => a.pincode.localeCompare(b.pincode)))
-      setInput('')
-    } catch (e: any) {
-      setErr(e?.message ?? 'Could not add pincode')
-    } finally {
-      setAdding(false)
-    }
-  }
-
-  async function removePincode(id: string) {
-    setBusy(id); setErr(null)
-    try {
-      const { error } = await supabase.from('service_pincodes').delete().eq('id', id)
-      if (error) { setErr(error.message); setBusy(null); return }
-      setPincodes(prev => prev.filter(p => p.id !== id))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  if (loading) return <div className="py-6 text-center text-slate-400 text-sm">Loading areas…</div>
-
-  return (
-    <div className="space-y-3">
-      <div className="rounded-xl px-3 py-2.5"
-        style={{
-          background: pincodes.length === 0 ? '#FEF2F2' : '#ECFEFF',
-          border: `1px solid ${pincodes.length === 0 ? '#FECACA' : '#CFFAFE'}`,
-        }}>
-        <p className="text-[11px] font-semibold" style={{ color: pincodes.length === 0 ? '#DC2626' : '#0891B2' }}>
-          {pincodes.length === 0
-            ? '⚠️ No pincodes enabled — this service is currently unavailable to every customer.'
-            : `📍 Available in ${pincodes.length} pincode${pincodes.length === 1 ? '' : 's'} — customers outside these areas won't see this service.`}
-        </p>
-      </div>
-
-      {err && (
-        <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
-          <p className="text-xs font-bold text-red-600">{err}</p>
-        </div>
-      )}
-
-      <div className="flex gap-2">
-        <input
-          value={input}
-          onChange={e => setInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
-          onKeyDown={e => { if (e.key === 'Enter') addPincode() }}
-          placeholder="e.g. 400056"
-          inputMode="numeric"
-          maxLength={6}
-          className="flex-1 px-4 py-2.5 rounded-xl text-sm font-mono font-bold text-slate-800 outline-none bg-slate-50 border border-slate-200 placeholder-slate-300 focus:border-cyan-400"
-        />
-        <button
-          onClick={addPincode}
-          disabled={adding || input.length !== 6}
-          className="px-4 py-2.5 rounded-xl text-sm font-black text-white disabled:opacity-40"
-          style={{ background: '#0891B2' }}
-        >
-          {adding ? '…' : '+ Add'}
-        </button>
-      </div>
-
-      {pincodes.length > 0 && (
-        <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 max-h-48 overflow-y-auto">
-          {pincodes.map(p => (
-            <div key={p.id} className="flex items-center justify-between px-3 py-2">
-              <span className="text-sm font-mono font-bold text-slate-800">{p.pincode}</span>
-              <button
-                disabled={busy === p.id}
-                onClick={() => removePincode(p.id)}
-                className="text-slate-400 hover:text-red-600 text-xs px-2 disabled:opacity-50"
-              >
-                {busy === p.id ? '…' : '✕ Remove'}
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
+const CAT_ICON: Record<string, string> = {
+  cleaning: '🧹', kitchen: '🍳', bathroom: '🚿', home: '🏠', laundry: '👕', sofa: '🛋️',
+  maid: '🧺', cook: '👩‍🍳', deep: '✨', car: '🚗', pest: '🐜',
 }
-
-// ═══════════════════════════════════════════════════════════════
-// Extra Time Offer settings — the "+20 min" add-on customers can buy
-// while a service is in progress. Stored in app_settings (row
-// 'global'), which is what the customer app, and the payment backup
-// step (complete_extra_time_payment_recovery) both read. Changing it
-// here affects NEW extra-time purchases only — bookings that already
-// bought extra time keep the price they paid.
-// ═══════════════════════════════════════════════════════════════
-function ExtraTimeSettingsCard({ supabase }: { supabase: any }) {
-  const [price, setPrice] = useState('')
-  const [minutes, setMinutes] = useState('')
-  const [saved, setSaved] = useState<{ price: number; minutes: number } | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
-  const [justSaved, setJustSaved] = useState(false)
-
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase
-        .from('app_settings')
-        .select('extra_time_price, extra_time_minutes')
-        .eq('id', 'global')
-        .maybeSingle()
-      if (error) {
-        setErr(error.message)
-      } else if (data) {
-        setPrice(String(data.extra_time_price ?? ''))
-        setMinutes(String(data.extra_time_minutes ?? ''))
-        setSaved({ price: data.extra_time_price, minutes: data.extra_time_minutes })
-      } else {
-        setErr('Settings row not found (app_settings, id = global)')
-      }
-      setLoading(false)
-    })()
-  }, [])
-
-  const priceNum = Number(price)
-  const minutesNum = Number(minutes)
-  const priceValid = price !== '' && Number.isInteger(priceNum) && priceNum >= 1 && priceNum <= 10000
-  const minutesValid = minutes !== '' && Number.isInteger(minutesNum) && minutesNum >= 5 && minutesNum <= 180
-  const changed = saved != null && (priceNum !== saved.price || minutesNum !== saved.minutes)
-
-  async function save() {
-    if (!priceValid || !minutesValid) return
-    setSaving(true); setErr(null); setJustSaved(false)
-    try {
-      // Saved through the admin server (app/api/settings/extra-time),
-      // which checks the admin login — the browser itself isn't allowed
-      // to change app_settings, by design.
-      const res = await fetch('/api/settings/extra-time', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ price: priceNum, minutes: minutesNum }),
-      })
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setErr(json?.error ?? `Not saved (error ${res.status})`)
-        return
-      }
-      setSaved({ price: json.extra_time_price, minutes: json.extra_time_minutes })
-      setJustSaved(true)
-    } catch (e: any) {
-      setErr(e?.message ?? 'Could not save')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-5 mb-5">
-      <div className="flex items-start gap-3 mb-4">
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
-          style={{ background: '#EDE9FE', border: '1px solid #DDD6FE' }}>⏱️</div>
-        <div>
-          <h2 className="text-[15px] font-black text-slate-900">Extra Time Offer</h2>
-          <p className="text-[11.5px] text-slate-400 font-medium">
-            The add-on customers can buy while a service is in progress.
-            {saved && <> Currently <b className="text-slate-600">+{saved.minutes} min for ₹{saved.price}</b>.</>}
-          </p>
-        </div>
-      </div>
-
-      {loading ? (
-        <div className="py-4 text-center text-slate-400 text-sm">Loading…</div>
-      ) : (
-        <>
-          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-3 items-end">
-            <div>
-              <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5 block">
-                Price (₹)
-              </label>
-              <input type="number" min={1} value={price}
-                onChange={e => { setPrice(e.target.value); setJustSaved(false) }}
-                className="w-full px-4 py-2.5 rounded-xl text-sm font-bold text-slate-800 outline-none bg-slate-50 border focus:border-cyan-400"
-                style={{ borderColor: price !== '' && !priceValid ? '#FCA5A5' : '#E2E8F0' }}/>
-            </div>
-            <div>
-              <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1.5 block">
-                Extra minutes
-              </label>
-              <input type="number" min={5} max={180} value={minutes}
-                onChange={e => { setMinutes(e.target.value); setJustSaved(false) }}
-                className="w-full px-4 py-2.5 rounded-xl text-sm font-bold text-slate-800 outline-none bg-slate-50 border focus:border-cyan-400"
-                style={{ borderColor: minutes !== '' && !minutesValid ? '#FCA5A5' : '#E2E8F0' }}/>
-            </div>
-            <button onClick={save}
-              disabled={saving || !priceValid || !minutesValid || !changed}
-              className="h-[42px] px-5 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
-              style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-              {saving ? '…' : 'Save'}
-            </button>
-          </div>
-
-          {(!priceValid && price !== '') && (
-            <p className="text-[11px] text-red-500 font-semibold mt-2">Price must be a whole number from ₹1 to ₹10,000.</p>
-          )}
-          {(!minutesValid && minutes !== '') && (
-            <p className="text-[11px] text-red-500 font-semibold mt-2">Minutes must be a whole number from 5 to 180.</p>
-          )}
-          {err && (
-            <div className="mt-3 rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
-              <p className="text-xs font-bold text-red-600">{err}</p>
-            </div>
-          )}
-          {justSaved && saved && (
-            <div className="mt-3 rounded-xl px-3 py-2.5 bg-emerald-50 border border-emerald-200">
-              <p className="text-xs font-bold text-emerald-700">
-                ✓ Saved — customers now see +{saved.minutes} min for ₹{saved.price}.
-                Bookings that already bought extra time keep the price they paid.
-              </p>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  )
+function catIcon(c: string) {
+  const k = Object.keys(CAT_ICON).find(x => c.toLowerCase().includes(x))
+  return k ? CAT_ICON[k] : '🧾'
 }
 
 export default function AdminServices() {
+  const supabase = createClient()
   const [services, setServices] = useState<Service[]>([])
+  const [pinCount, setPinCount] = useState<Record<string, number>>({})
+  const [areas, setAreas] = useState<Area[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [cat, setCat] = useState('all')
+  const [show, setShow] = useState<'all' | 'live' | 'hidden' | 'noarea'>('all')
   const [editing, setEditing] = useState<Service | null>(null)
-  const supabase = createClient()
+  const [toggling, setToggling] = useState<string | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
 
   async function load() {
-    const { data, error } = await supabase
-      .from('services')
-      .select('id,name,category,is_active,base_price,original_price,duration_minutes,price_1bhk,price_2bhk,price_3bhk,duration_1bhk,duration_2bhk,duration_3bhk,price_30min,price_60min,price_90min')
-      .order('category')
-      .order('name')
-    if (error) {
-      console.error('Services load error:', error)
-      setLoadError(error.message)
-    } else if (data) {
-      setServices(data as Service[])
-    }
+    const [{ data, error }, { data: pins }, { data: areaRows }] = await Promise.all([
+      supabase.from('services')
+        .select('id,name,category,is_active,base_price,original_price,duration_minutes,price_1bhk,price_2bhk,price_3bhk,duration_1bhk,duration_2bhk,duration_3bhk,price_30min,price_60min,price_90min')
+        .order('category').order('name'),
+      supabase.from('service_pincodes').select('service_id'),
+      supabase.from('service_areas').select('*'),
+    ]) as any[]
+    if (error) { setLoadError(error.message) } else { setServices(data ?? []); setLoadError(null) }
+    const c: Record<string, number> = {}
+    ;(pins ?? []).forEach((p: any) => { c[p.service_id] = (c[p.service_id] ?? 0) + 1 })
+    setPinCount(c)
+    setAreas((areaRows ?? []).map((a: any) => ({
+      pincode: String(a.pincode ?? '').replace(/\D/g, '').slice(-6),
+      name: a.area_name ?? a.name ?? a.area ?? a.locality ?? '',
+    })).filter((a: Area) => a.pincode.length === 6).sort((a: Area, b: Area) => a.pincode.localeCompare(b.pincode)))
     setLoading(false)
   }
-
   useEffect(() => { load() }, [])
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 2500); return () => clearTimeout(t) }, [toast])
 
-  const categories = ['all', ...Array.from(new Set(services.map(s => s.category || 'Uncategorised'))).sort()]
+  async function quickToggle(s: Service) {
+    setToggling(s.id)
+    const { error } = await supabase.from('services').update({ is_active: !s.is_active }).eq('id', s.id)
+    setToggling(null)
+    if (error) { setLoadError(error.message); return }
+    setServices(list => list.map(x => x.id === s.id ? { ...x, is_active: !s.is_active } : x))
+    setToast(`${s.name} is now ${!s.is_active ? 'shown to customers' : 'hidden'}`)
+  }
 
-  const filtered = services.filter(s => {
-    const matchSearch = s.name.toLowerCase().includes(search.toLowerCase()) ||
-      (s.category ?? '').toLowerCase().includes(search.toLowerCase())
-    const matchCat = categoryFilter === 'all' || (s.category || 'Uncategorised') === categoryFilter
-    return matchSearch && matchCat
-  })
+  const cats = useMemo(() => Array.from(new Set(services.map(s => s.category || 'Uncategorised'))).sort(), [services])
+  const q = search.trim().toLowerCase()
+  const visible = services.filter(s =>
+    (cat === 'all' || (s.category || 'Uncategorised') === cat) &&
+    (show === 'all' || (show === 'live' ? s.is_active : show === 'hidden' ? !s.is_active : !(pinCount[s.id] > 0))) &&
+    (!q || s.name.toLowerCase().includes(q) || (s.category ?? '').toLowerCase().includes(q)))
+  const grouped = cats
+    .map(c => ({ cat: c, list: visible.filter(s => (s.category || 'Uncategorised') === c) }))
+    .filter(g => g.list.length > 0)
+
+  const liveCount = services.filter(s => s.is_active).length
+  const noAreaCount = services.filter(s => !(pinCount[s.id] > 0)).length
 
   if (loading) return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
-      <div className="w-10 h-10 rounded-full border-4 border-t-transparent animate-spin border-slate-200"
-        style={{ borderTopColor: '#0891B2' }}/>
+      <div className="w-10 h-10 rounded-full border-4 border-slate-200 animate-spin" style={{ borderTopColor: '#0891B2' }} />
     </div>
   )
 
   return (
     <div className="min-h-screen px-4 md:px-8 py-7 bg-slate-50">
+      {/* header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
         <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl"
-            style={{ background: '#0891B214', border: '1px solid #0891B225' }}>🧾</div>
+          <div className="w-11 h-11 rounded-2xl flex items-center justify-center text-xl bg-white border border-slate-200">🧾</div>
           <div>
-            <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">Services</h1>
-            <p className="text-xs text-slate-400 font-medium">{services.length} services · edit price & duration</p>
+            <h1 className="text-2xl font-black text-slate-900 leading-tight">Services</h1>
+            <p className="text-xs text-slate-500">
+              <b className="text-emerald-600">{liveCount} live</b> · {services.length - liveCount} hidden
+              {noAreaCount > 0 && <> · <b className="text-red-600">{noAreaCount} with no area</b></>}
+            </p>
           </div>
         </div>
-        <input type="text" placeholder="Search service or category…" value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-72"/>
+        <div className="flex items-center gap-2">
+          <a href="/admin-fees" className="px-3 py-2.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-600 hover:text-cyan-700 whitespace-nowrap">💳 Fees &amp; extra time ›</a>
+          <input type="text" placeholder="Search services…" value={search} onChange={e => setSearch(e.target.value)}
+            className="px-4 py-2.5 rounded-xl text-sm text-slate-800 placeholder-slate-400 outline-none bg-white border border-slate-200 w-full md:w-64" />
+        </div>
       </div>
 
-      <ExtraTimeSettingsCard supabase={supabase} />
+      {loadError && <div className="mb-4 rounded-xl px-4 py-3 bg-red-50 border border-red-200 text-sm font-bold text-red-600 flex justify-between">{loadError}<button onClick={() => setLoadError(null)}>✕</button></div>}
 
-      {loadError && (
-        <div className="mb-4 rounded-xl px-4 py-3 bg-red-50 border border-red-200">
-          <p className="text-sm font-bold text-red-600">Could not load services: {loadError}</p>
+      {/* filters */}
+      <div className="flex flex-wrap items-center gap-2 mb-5">
+        <div className="flex gap-1.5 overflow-x-auto pb-1 flex-1 min-w-0">
+          {['all', ...cats].map(c => {
+            const n = c === 'all' ? services.length : services.filter(s => (s.category || 'Uncategorised') === c).length
+            const on = cat === c
+            return (
+              <button key={c} onClick={() => setCat(c)}
+                className="flex-shrink-0 px-3.5 py-2 rounded-2xl text-xs font-bold whitespace-nowrap border transition-all"
+                style={on ? { background: '#0F172A', color: '#fff', borderColor: '#0F172A' } : { background: '#fff', color: '#475569', borderColor: '#E2E8F0' }}>
+                {c === 'all' ? 'All' : `${catIcon(c)} ${c}`} <span className="opacity-60 ml-0.5">{n}</span>
+              </button>
+            )
+          })}
         </div>
-      )}
-
-      {/* Category filter pills */}
-      <div className="flex gap-2 overflow-x-auto pb-3 mb-1">
-        {categories.map(cat => (
-          <button key={cat} onClick={() => setCategoryFilter(cat)}
-            className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all"
-            style={{
-              background: categoryFilter === cat ? '#CFFAFE' : '#fff',
-              color:      categoryFilter === cat ? '#0891B2' : '#64748B',
-              border:     `1px solid ${categoryFilter === cat ? '#0891B2' : '#E2E8F0'}`,
-            }}>
-            {cat === 'all' ? `All (${services.length})` : `${cat} (${services.filter(s => (s.category || 'Uncategorised') === cat).length})`}
-          </button>
-        ))}
+        <div className="inline-flex p-1 rounded-xl bg-white border border-slate-200">
+          {([['all', 'All'], ['live', 'Live'], ['hidden', 'Hidden'], ['noarea', 'No area']] as const).map(([k, l]) => (
+            <button key={k} onClick={() => setShow(k)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold ${show === k ? 'bg-cyan-50 text-cyan-700' : 'text-slate-500'}`}>{l}</button>
+          ))}
+        </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/50">
-                {['Service', 'Category', 'Original Price', 'Offer Price', 'Duration', 'Status', ''].map(c => (
-                  <th key={c} className="text-left px-4 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap">
-                    {c}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(s => {
-                const bhk = isBhkPriced(s)
-                return (
-                  <tr key={s.id}
-                    onClick={() => setEditing(s)}
-                    className="border-b border-slate-50 hover:bg-slate-50/70 transition-colors cursor-pointer"
-                    style={{ opacity: s.is_active ? 1 : 0.55 }}>
-                    <td className="px-4 py-3.5">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm flex-shrink-0"
-                          style={{ background: '#ECFEFF', border: '1px solid #CFFAFE' }}>
-                          {bhk ? '🏠' : '🧹'}
-                        </div>
-                        <span className="font-bold text-[13.5px] text-slate-800">{s.name}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3.5 text-[12.5px] text-slate-500">{s.category || '—'}</td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      {bhk ? (
-                        <span className="text-[11.5px] text-slate-400">
-                          1B ₹{s.price_1bhk ?? '—'} · 2B ₹{s.price_2bhk ?? '—'} · 3B ₹{s.price_3bhk ?? '—'}
-                        </span>
-                      ) : s.original_price != null ? (
-                        <span className="text-[13px] text-slate-400 line-through">₹{s.original_price}</span>
-                      ) : (
-                        <span className="text-[13px] text-slate-300">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      {bhk ? (
-                        <span className="text-[11.5px] text-cyan-700 font-bold">tiered</span>
-                      ) : (
-                        <span className="text-[14px] font-black text-cyan-700">₹{s.base_price ?? '—'}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3.5 whitespace-nowrap">
-                      {bhk ? (
-                        <span className="text-[11.5px] text-slate-400">
-                          {s.duration_1bhk ?? '—'}/{s.duration_2bhk ?? '—'}/{s.duration_3bhk ?? '—'} min
-                        </span>
-                      ) : (
-                        <span className="text-[13px] font-semibold text-slate-700">{s.duration_minutes ?? '—'} min</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3.5">
-                      <span className="text-[11px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
-                        style={{
-                          background: s.is_active ? '#D1FAE5' : '#FEE2E2',
-                          color:      s.is_active ? '#059669' : '#DC2626',
-                        }}>
-                        {s.is_active ? '● Active' : '● Inactive'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3.5 text-right" onClick={e => e.stopPropagation()}>
-                      <button onClick={() => setEditing(s)}
-                        className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-cyan-50 text-cyan-700 border border-cyan-200 hover:bg-cyan-100 transition-all">
-                        Edit
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+      {grouped.length === 0 ? (
+        <div className="bg-white rounded-3xl border border-slate-200 p-16 text-center">
+          <p className="text-4xl mb-2">🔍</p>
+          <p className="text-slate-700 font-bold">No services here</p>
+          <button onClick={() => { setSearch(''); setCat('all'); setShow('all') }} className="mt-2 text-sm font-bold text-cyan-600 hover:underline">Show all</button>
         </div>
-
-        {filtered.length === 0 && !loadError && (
-          <div className="p-16 text-center">
-            <p className="text-4xl mb-3">🔍</p>
-            <p className="text-slate-700 font-bold">No services found</p>
-            {search && (
-              <p className="text-sm text-slate-400 mt-1">
-                <button onClick={() => setSearch('')} className="text-cyan-600 font-bold hover:underline">
-                  Clear search
-                </button>
-              </p>
-            )}
+      ) : grouped.map(g => (
+        <section key={g.cat} className="mb-7">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-lg">{catIcon(g.cat)}</span>
+            <h2 className="text-[15px] font-black text-slate-800">{g.cat}</h2>
+            <span className="text-[11px] font-bold text-slate-400">{g.list.length}</span>
           </div>
-        )}
-      </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
+            {g.list.map(s => (
+              <ServiceCard key={s.id} s={s} areas={pinCount[s.id] ?? 0} busy={toggling === s.id}
+                onOpen={() => setEditing(s)} onToggle={() => quickToggle(s)} />
+            ))}
+          </div>
+        </section>
+      ))}
 
       {editing && (
-        <EditServiceModal
-          service={editing}
+        <EditPanel service={editing} allAreas={areas}
           onClose={() => setEditing(null)}
-          onSaved={() => { setEditing(null); load() }}
-        />
+          onSaved={(msg) => { setEditing(null); setToast(msg); load() }}
+          onAreasChanged={(n) => setPinCount(c => ({ ...c, [editing.id]: n }))} />
       )}
+
+      {toast && <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[70] px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-bold shadow-xl">✓ {toast}</div>}
     </div>
   )
 }
 
-// ── Edit Modal (unchanged from before, still a drawer/modal, not a table) ──
-function EditServiceModal({ service, onClose, onSaved }: {
-  service: Service
-  onClose: () => void
-  onSaved: () => void
+function ServiceCard({ s, areas, busy, onOpen, onToggle }: {
+  s: Service; areas: number; busy: boolean; onOpen: () => void; onToggle: () => void
+}) {
+  const bhk = isBhk(s)
+  const off = offPct(s.original_price, s.base_price)
+  return (
+    <div onClick={onOpen}
+      className="group relative bg-white rounded-3xl border border-slate-200 p-4 cursor-pointer transition-all hover:border-cyan-300 hover:shadow-md"
+      style={{ opacity: s.is_active ? 1 : 0.6 }}>
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[14px] font-black text-slate-900 leading-snug">{s.name}</p>
+        <button onClick={e => { e.stopPropagation(); onToggle() }} disabled={busy}
+          title={s.is_active ? 'Shown to customers — click to hide' : 'Hidden — click to show'}
+          className="w-10 h-[22px] rounded-full relative shrink-0 transition-colors disabled:opacity-50"
+          style={{ background: s.is_active ? '#10B981' : '#CBD5E1' }}>
+          <span className="absolute top-[3px] w-4 h-4 rounded-full bg-white shadow transition-all" style={{ left: s.is_active ? 21 : 3 }} />
+        </button>
+      </div>
+
+      {bhk ? (
+        <div className="grid grid-cols-3 gap-1.5 mt-3">
+          {([['1 BHK', s.price_1bhk, s.duration_1bhk], ['2 BHK', s.price_2bhk, s.duration_2bhk], ['3 BHK', s.price_3bhk, s.duration_3bhk]] as const).map(([l, p, d]) => (
+            <div key={l} className="rounded-xl bg-slate-50 px-2 py-2 text-center">
+              <p className="text-[10px] font-bold text-slate-400">{l}</p>
+              <p className="text-[14px] font-black text-cyan-700 leading-tight">{inr(p)}</p>
+              <p className="text-[10px] text-slate-400">{mins(d)}</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex items-end gap-2 mt-3">
+          <p className="text-2xl font-black text-cyan-700 leading-none">{inr(s.base_price)}</p>
+          {s.original_price != null && s.original_price > (s.base_price ?? 0) && (
+            <p className="text-sm text-slate-400 line-through leading-none mb-0.5">{inr(s.original_price)}</p>
+          )}
+          {off > 0 && <span className="text-[10px] font-black px-1.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 mb-0.5">{off}% off</span>}
+          <span className="ml-auto text-[12px] font-bold text-slate-500 mb-0.5">⏱ {mins(s.duration_minutes)}</span>
+        </div>
+      )}
+
+      <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+        {areas === 0
+          ? <span className="text-[10px] font-black px-2 py-1 rounded-lg bg-red-50 text-red-600">⚠ No area · nobody can book</span>
+          : <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-slate-50 text-slate-500">📍 {areas} area{areas === 1 ? '' : 's'}</span>}
+        {!s.is_active && <span className="text-[10px] font-black px-2 py-1 rounded-lg bg-slate-100 text-slate-500">Hidden</span>}
+        <span className="ml-auto text-[11px] font-bold text-cyan-600 opacity-0 group-hover:opacity-100 transition-opacity">Edit ›</span>
+      </div>
+    </div>
+  )
+}
+
+function Num({ value, onChange, prefix, suffix, placeholder, big }: {
+  value: string; onChange: (v: string) => void; prefix?: string; suffix?: string; placeholder?: string; big?: boolean
+}) {
+  return (
+    <div className="flex items-center rounded-xl border border-slate-200 bg-white focus-within:border-cyan-400 overflow-hidden">
+      {prefix && <span className="pl-3 text-slate-400 font-bold">{prefix}</span>}
+      <input type="number" min={0} value={value} placeholder={placeholder}
+        onChange={e => onChange(e.target.value)}
+        className={`w-full px-2.5 py-2.5 outline-none bg-transparent font-black text-slate-900 ${big ? 'text-xl' : 'text-sm'}`} />
+      {suffix && <span className="pr-3 text-slate-400 text-xs font-bold">{suffix}</span>}
+    </div>
+  )
+}
+
+function EditPanel({ service, allAreas, onClose, onSaved, onAreasChanged }: {
+  service: Service; allAreas: Area[]
+  onClose: () => void; onSaved: (msg: string) => void; onAreasChanged: (n: number) => void
 }) {
   const supabase = createClient()
-  const bhk = isBhkPriced(service)
-
-  const [originalPrice, setOriginalPrice] = useState(String(service.original_price ?? ''))
-  const [offerPrice, setOfferPrice] = useState(String(service.base_price ?? ''))
-  const [duration, setDuration] = useState(String(service.duration_minutes ?? ''))
-
-  const [p1, setP1] = useState(String(service.price_1bhk ?? ''))
-  const [p2, setP2] = useState(String(service.price_2bhk ?? ''))
-  const [p3, setP3] = useState(String(service.price_3bhk ?? ''))
-  const [d1, setD1] = useState(String(service.duration_1bhk ?? ''))
-  const [d2, setD2] = useState(String(service.duration_2bhk ?? ''))
-  const [d3, setD3] = useState(String(service.duration_3bhk ?? ''))
-
-  const [isActive, setIsActive] = useState(service.is_active)
+  const bhk = isBhk(service)
+  const [orig, setOrig] = useState(String(service.original_price ?? ''))
+  const [offer, setOffer] = useState(String(service.base_price ?? ''))
+  const [dur, setDur] = useState(String(service.duration_minutes ?? ''))
+  const [tiers, setTiers] = useState([
+    { label: '1 BHK', p: String(service.price_1bhk ?? ''), d: String(service.duration_1bhk ?? '') },
+    { label: '2 BHK', p: String(service.price_2bhk ?? ''), d: String(service.duration_2bhk ?? '') },
+    { label: '3 BHK', p: String(service.price_3bhk ?? ''), d: String(service.duration_3bhk ?? '') },
+  ])
+  const [active, setActive] = useState(service.is_active)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const origN = orig === '' ? null : Number(orig)
+  const offerN = offer === '' ? null : Number(offer)
+  const off = offPct(origN, offerN)
+  const origLow = origN != null && offerN != null && origN <= offerN
+
   async function save() {
-    setSaving(true)
-    setError(null)
+    setSaving(true); setError(null)
     try {
-      const update: Record<string, any> = { is_active: isActive }
-
+      const update: Record<string, any> = { is_active: active }
       if (bhk) {
-        if (p1 !== '') update.price_1bhk = Number(p1)
-        if (p2 !== '') update.price_2bhk = Number(p2)
-        if (p3 !== '') update.price_3bhk = Number(p3)
-        if (d1 !== '') update.duration_1bhk = Number(d1)
-        if (d2 !== '') update.duration_2bhk = Number(d2)
-        if (d3 !== '') update.duration_3bhk = Number(d3)
+        const keys = [['price_1bhk', 'duration_1bhk'], ['price_2bhk', 'duration_2bhk'], ['price_3bhk', 'duration_3bhk']]
+        tiers.forEach((t, i) => {
+          if (t.p !== '') update[keys[i][0]] = Number(t.p)
+          if (t.d !== '') update[keys[i][1]] = Number(t.d)
+        })
       } else {
-        update.original_price = originalPrice === '' ? null : Number(originalPrice)
-        update.base_price = offerPrice === '' ? null : Number(offerPrice)
-        update.duration_minutes = duration === '' ? null : Number(duration)
+        if (offerN == null) { setError('Enter the offer price (what customers pay)'); setSaving(false); return }
+        update.original_price = origN
+        update.base_price = offerN
+        update.duration_minutes = dur === '' ? null : Number(dur)
       }
-
-      const { error: updateError } = await supabase
-        .from('services')
-        .update(update)
-        .eq('id', service.id)
-
-      if (updateError) { setError(updateError.message); setSaving(false); return }
-      onSaved()
-    } catch (e: any) {
-      setError(e?.message ?? 'Could not save changes.')
-      setSaving(false)
-    }
+      const { error: e } = await supabase.from('services').update(update).eq('id', service.id)
+      if (e) { setError(e.message); setSaving(false); return }
+      onSaved(`${service.name} saved`)
+    } catch (e: any) { setError(e?.message ?? 'Could not save'); setSaving(false) }
   }
 
   return (
     <>
-      <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm" onClick={onClose}/>
-      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-white rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
-          <div>
-            <h2 className="text-lg font-black text-slate-800">Edit Service</h2>
-            <p className="text-xs text-slate-400 mt-0.5">{service.name}</p>
+      <div className="fixed inset-0 z-40 bg-slate-900/30" onClick={onClose} />
+      <div className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-md bg-slate-50 flex flex-col shadow-2xl">
+        <div className="px-5 py-4 bg-white border-b border-slate-200 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold text-slate-400">{catIcon(service.category || '')} {service.category || 'Uncategorised'}</p>
+            <h2 className="text-lg font-black text-slate-900 leading-tight">{service.name}</h2>
           </div>
-          <button onClick={onClose}
-            className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all">✕</button>
+          <button onClick={onClose} className="w-9 h-9 rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200 shrink-0">✕</button>
         </div>
 
-        <div className="px-6 py-5 space-y-4">
-          {bhk ? (
-            <>
-              <div className="rounded-xl px-3 py-2.5 bg-cyan-50 border border-cyan-200">
-                <p className="text-[11px] text-cyan-700 font-semibold">
-                  📐 This service is priced per home size (BHK) — set each tier's
-                  price and duration below.
-                </p>
-              </div>
-              {[
-                { label: '1 BHK', price: p1, setPrice: setP1, dur: d1, setDur: setD1 },
-                { label: '2 BHK', price: p2, setPrice: setP2, dur: d2, setDur: setD2 },
-                { label: '3 BHK', price: p3, setPrice: setP3, dur: d3, setDur: setD3 },
-              ].map(tier => (
-                <div key={tier.label}>
-                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">{tier.label}</p>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-[10px] text-slate-400 mb-1 block">Price (₹)</label>
-                      <input type="number" min={0} value={tier.price}
-                        onChange={e => tier.setPrice(e.target.value)}
-                        className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-slate-400 mb-1 block">Duration (min)</label>
-                      <input type="number" min={0} value={tier.dur}
-                        onChange={e => tier.setDur(e.target.value)}
-                        className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                    </div>
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          {/* show / hide */}
+          <button onClick={() => setActive(a => !a)}
+            className="w-full flex items-center justify-between rounded-2xl px-4 py-3 border transition-all"
+            style={active ? { background: '#ECFDF5', borderColor: '#A7F3D0' } : { background: '#fff', borderColor: '#E2E8F0' }}>
+            <div className="text-left">
+              <p className="text-sm font-black" style={{ color: active ? '#047857' : '#334155' }}>{active ? '● Shown to customers' : '○ Hidden from customers'}</p>
+              <p className="text-[11px] text-slate-400">Tap to {active ? 'hide' : 'show'} this service in the app</p>
+            </div>
+            <span className="w-11 h-6 rounded-full relative shrink-0" style={{ background: active ? '#10B981' : '#CBD5E1' }}>
+              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: active ? 22 : 2 }} />
+            </span>
+          </button>
+
+          {/* price */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4">
+            <p className="text-[13px] font-black text-slate-800 mb-3">💰 {bhk ? 'Price by home size' : 'Price & time'}</p>
+            {bhk ? (
+              <div className="space-y-2">
+                <div className="grid grid-cols-[60px_1fr_1fr] gap-2 text-[10px] font-bold text-slate-400 px-1">
+                  <span /><span>Price</span><span>Time</span>
+                </div>
+                {tiers.map((t, i) => (
+                  <div key={t.label} className="grid grid-cols-[60px_1fr_1fr] gap-2 items-center">
+                    <span className="text-[12px] font-black text-slate-600">{t.label}</span>
+                    <Num value={t.p} prefix="₹" onChange={v => setTiers(x => x.map((y, j) => j === i ? { ...y, p: v } : y))} />
+                    <Num value={t.d} suffix="min" onChange={v => setTiers(x => x.map((y, j) => j === i ? { ...y, d: v } : y))} />
                   </div>
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-[11px] font-bold text-slate-500">Customer pays</span>
+                    <Num value={offer} onChange={setOffer} prefix="₹" big />
+                  </label>
+                  <label className="block">
+                    <span className="text-[11px] font-bold text-slate-500">Original (crossed out)</span>
+                    <Num value={orig} onChange={setOrig} prefix="₹" placeholder="optional" big />
+                  </label>
                 </div>
-              ))}
-            </>
-          ) : (
-            <>
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
-                  Original Price (₹)
-                </p>
-                <input type="number" min={0} placeholder="Crossed-out reference price (optional)"
-                  value={originalPrice} onChange={e => setOriginalPrice(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-                <p className="text-[11px] text-slate-400 mt-1.5">
-                  Shown with a strikethrough next to the offer price. Leave
-                  blank to hide the strikethrough entirely.
-                </p>
-              </div>
-
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
-                  Offer Price (₹) — what's actually charged
-                </p>
-                <input type="number" min={0} value={offerPrice}
-                  onChange={e => setOfferPrice(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-              </div>
-
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
-                  Duration (minutes)
-                </p>
-                <input type="number" min={0} value={duration}
-                  onChange={e => setDuration(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl text-sm text-slate-800 outline-none bg-slate-50 border border-slate-200"/>
-              </div>
-
-              {(service.price_30min != null || service.price_60min != null || service.price_90min != null) && (
-                <div className="rounded-xl px-3 py-2.5 bg-amber-50 border border-amber-200">
-                  <p className="text-[11px] text-amber-700 font-semibold">
-                    ℹ️ This service also has quantity-tier prices (30/60/90 min:
-                    ₹{service.price_30min ?? '—'} / ₹{service.price_60min ?? '—'} / ₹{service.price_90min ?? '—'}),
-                    used by the cart's quantity stepper in the customer app.
-                    Those aren't editable here yet — only the base Offer/Original
-                    Price and Duration above.
+                {origLow && <p className="text-[11px] font-bold text-amber-600">Original price should be higher than what the customer pays, or leave it empty.</p>}
+                <div>
+                  <span className="text-[11px] font-bold text-slate-500">Time needed</span>
+                  <div className="flex gap-1.5 mt-1 mb-2 flex-wrap">
+                    {[30, 60, 90, 120, 180, 240].map(m => (
+                      <button key={m} onClick={() => setDur(String(m))}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold border"
+                        style={dur === String(m) ? { background: '#ECFEFF', color: '#0E7490', borderColor: '#67E8F9' } : { background: '#fff', color: '#64748B', borderColor: '#E2E8F0' }}>
+                        {mins(m)}
+                      </button>
+                    ))}
+                  </div>
+                  <Num value={dur} onChange={setDur} suffix="min" />
+                </div>
+                {/* customer preview */}
+                <div className="rounded-xl bg-slate-50 px-3 py-2.5 flex items-center gap-2">
+                  <span className="text-[10px] font-bold text-slate-400">App shows:</span>
+                  <span className="text-[15px] font-black text-slate-900">{offerN != null ? inr(offerN) : '—'}</span>
+                  {origN != null && !origLow && <span className="text-[12px] text-slate-400 line-through">{inr(origN)}</span>}
+                  {off > 0 && <span className="text-[10px] font-black px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-700">{off}% off</span>}
+                  <span className="ml-auto text-[11px] text-slate-500">⏱ {mins(dur === '' ? null : Number(dur))}</span>
+                </div>
+                {(service.price_30min != null || service.price_60min != null || service.price_90min != null) && (
+                  <p className="text-[11px] text-slate-400">
+                    Quantity prices in the app cart (30 / 60 / 90 min): {inr(service.price_30min)} / {inr(service.price_60min)} / {inr(service.price_90min)} — not editable here.
                   </p>
-                </div>
-              )}
-            </>
-          )}
-
-          <div>
-            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2">
-              Service Areas
-            </p>
-            <ServiceAreasSection serviceId={service.id} supabase={supabase} />
+                )}
+              </div>
+            )}
           </div>
 
-          <div className="flex items-center justify-between px-4 py-3 rounded-xl bg-slate-50 border border-slate-200">
-            <div>
-              <p className="text-sm font-bold text-slate-700">Active</p>
-              <p className="text-[11px] text-slate-400">Inactive services are hidden from customers</p>
-            </div>
-            <button onClick={() => setIsActive(!isActive)}
-              className="relative w-11 h-6 rounded-full transition-all"
-              style={{ background: isActive ? '#0891B2' : '#CBD5E1' }}>
-              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
-                style={{ left: isActive ? '22px' : '2px' }}/>
-            </button>
-          </div>
+          {/* areas */}
+          <AreasBox serviceId={service.id} allAreas={allAreas} onCount={onAreasChanged} />
 
-          {error && (
-            <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200">
-              <p className="text-xs font-bold text-red-600">{error}</p>
-            </div>
-          )}
+          {error && <div className="rounded-xl px-3 py-2.5 bg-red-50 border border-red-200 text-xs font-bold text-red-600">{error}</div>}
+        </div>
 
+        <div className="p-4 bg-white border-t border-slate-200 flex gap-2">
+          <button onClick={onClose} className="px-4 h-11 rounded-xl text-sm font-bold text-slate-500">Cancel</button>
           <button onClick={save} disabled={saving}
-            className="w-full h-11 rounded-xl font-black text-sm text-white disabled:opacity-40 active:scale-[0.98] transition-all"
+            className="flex-1 h-11 rounded-xl font-black text-sm text-white disabled:opacity-40"
             style={{ background: 'linear-gradient(135deg,#0891B2,#4F46E5)' }}>
-            {saving ? '…' : '✓ Save Changes'}
+            {saving ? 'Saving…' : 'Save changes'}
           </button>
         </div>
       </div>
     </>
   )
-}   
+}
+
+// Areas save immediately (same as before) — the service is offered ONLY
+// in these pincodes; with none it is unavailable to every customer.
+function AreasBox({ serviceId, allAreas, onCount }: { serviceId: string; allAreas: Area[]; onCount: (n: number) => void }) {
+  const supabase = createClient()
+  const [rows, setRows] = useState<{ id: string; pincode: string }[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [input, setInput] = useState('')
+
+  async function load() {
+    setLoading(true)
+    const { data, error } = await supabase.from('service_pincodes').select('id, pincode').eq('service_id', serviceId).order('pincode')
+    if (error) setErr(error.message)
+    setRows(data ?? []); onCount((data ?? []).length); setLoading(false)
+  }
+  useEffect(() => { load() }, [serviceId])
+
+  const has = (p: string) => rows.some(r => r.pincode === p)
+
+  async function add(pins: string[]) {
+    const fresh = pins.filter(p => /^\d{6}$/.test(p) && !has(p))
+    if (fresh.length === 0) return
+    setBusy('add'); setErr(null)
+    const { error } = await supabase.from('service_pincodes').insert(fresh.map(p => ({ service_id: serviceId, pincode: p })))
+    setBusy(null)
+    if (error) { setErr(error.message); return }
+    setInput(''); load()
+  }
+  async function remove(pin: string) {
+    const r = rows.find(x => x.pincode === pin); if (!r) return
+    setBusy(pin); setErr(null)
+    const { error } = await supabase.from('service_pincodes').delete().eq('id', r.id)
+    setBusy(null)
+    if (error) { setErr(error.message); return }
+    load()
+  }
+
+  const extra = rows.filter(r => !allAreas.some(a => a.pincode === r.pincode))
+  const missing = allAreas.filter(a => !has(a.pincode)).map(a => a.pincode)
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4">
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-[13px] font-black text-slate-800">📍 Where it&apos;s offered</p>
+        {missing.length > 0 && !loading && (
+          <button onClick={() => add(missing)} disabled={busy === 'add'}
+            className="text-[11px] font-bold text-cyan-700 hover:underline disabled:opacity-50">+ Add all {missing.length} service areas</button>
+        )}
+      </div>
+      <p className="text-[11px] mb-3" style={{ color: rows.length === 0 ? '#DC2626' : '#64748B' }}>
+        {loading ? 'Loading…' : rows.length === 0
+          ? '⚠ No area selected — nobody can book this service.'
+          : `Customers in ${rows.length} pincode${rows.length === 1 ? '' : 's'} can book it. Tap to switch an area on or off — saved instantly.`}
+      </p>
+      {!loading && (
+        <div className="flex flex-wrap gap-1.5">
+          {allAreas.map(a => {
+            const on = has(a.pincode)
+            return (
+              <button key={a.pincode} disabled={busy === a.pincode || busy === 'add'}
+                onClick={() => on ? remove(a.pincode) : add([a.pincode])}
+                className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all disabled:opacity-50"
+                style={on ? { background: '#ECFEFF', color: '#0E7490', borderColor: '#67E8F9' } : { background: '#fff', color: '#94A3B8', borderColor: '#E2E8F0' }}>
+                {on ? '✓ ' : '+ '}{a.pincode}{a.name ? ` · ${a.name}` : ''}
+              </button>
+            )
+          })}
+          {extra.map(r => (
+            <button key={r.id} disabled={busy === r.pincode} onClick={() => remove(r.pincode)}
+              className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold border disabled:opacity-50"
+              style={{ background: '#ECFEFF', color: '#0E7490', borderColor: '#67E8F9' }}>✓ {r.pincode}</button>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2 mt-3">
+        <input value={input} onChange={e => setInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          onKeyDown={e => { if (e.key === 'Enter') add([input]) }}
+          placeholder="Other pincode" inputMode="numeric"
+          className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono outline-none focus:border-cyan-400" />
+        <button onClick={() => add([input])} disabled={input.length !== 6 || busy === 'add'}
+          className="px-3 py-2 rounded-xl text-xs font-black text-white disabled:opacity-40" style={{ background: '#0891B2' }}>Add</button>
+      </div>
+      {err && <p className="text-[11px] font-bold text-red-600 mt-2">{err}</p>}
+    </div>
+  )
+}
