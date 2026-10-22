@@ -1,0 +1,131 @@
+/* ═══════════════════════════════════════════════════════════════
+   Cleenzo admin — shared rules so every page fits phones and tablets.
+   Loaded once by app/(admin)/layout.tsx. Only applies inside the page
+   area (.cz-admin-main), never to the sidebar or menus.
+   ═══════════════════════════════════════════════════════════════ */
+
+.cz-admin-main {
+  overflow-wrap: break-word;
+  -webkit-text-size-adjust: 100%;
+}
+.cz-admin-main img,
+.cz-admin-main video,
+.cz-admin-main canvas,
+.cz-admin-main iframe {
+  max-width: 100%;
+}
+
+/* ── Phones + tablets (under 1024px) ───────────────────────────── */
+@media (max-width: 1023.98px) {
+  /* Pop-ups / dialogs never taller than the screen — they scroll. */
+  .cz-admin-main .fixed.inset-0 > div:not(.absolute),
+  .fixed.inset-0.z-50 > div:not(.absolute):not(aside) {
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Fixed side panels (w-72 / w-80 / w-96) can shrink to the screen. */
+  .cz-admin-main .w-72,
+  .cz-admin-main .w-80,
+  .cz-admin-main .w-96 { max-width: 100%; }
+}
+
+/* ── Phones (under 768px) ──────────────────────────────────────── */
+@media (max-width: 767.98px) {
+  /* Tables become a stack of compact cards: the first column (usually
+     the name) is big on top, the other details sit in 2 columns, and
+     the last column (usually the buttons) spans the full width. The
+     layout copies each column's heading onto its cells automatically. */
+  .cz-admin-main table,
+  .cz-admin-main tbody { display: block; width: 100%; }
+  .cz-admin-main table { border: 0; background: transparent; }
+  .cz-admin-main thead { display: none; }
+  .cz-admin-main tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px;
+    background: #fff;
+    border: 1px solid #E5E7EB;
+    border-radius: 16px;
+    padding: 10px 14px;
+    margin: 0 0 10px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+  }
+  .cz-admin-main td {
+    display: block;
+    min-width: 0;
+    padding: 6px 0 !important;
+    border: 0 !important;
+    text-align: left !important;
+    white-space: normal !important;
+  }
+  .cz-admin-main td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 1px;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: #6B7280;
+  }
+  .cz-admin-main td:first-child { grid-column: 1 / -1; font-weight: 800; font-size: 15px; }
+  .cz-admin-main td:last-child:not(:first-child) { grid-column: 1 / -1; }
+  .cz-admin-main td:last-child:not(:first-child) > button,
+  .cz-admin-main td:last-child:not(:first-child) > a { min-height: 40px; }
+  .cz-admin-main td[colspan] { grid-column: 1 / -1; }
+
+  /* Pop-ups (Phone Booking, edit forms…) open full screen. */
+  .cz-admin-main .fixed.inset-0,
+  .fixed.inset-0.z-50:not(.lg\:hidden) { padding: 0 !important; }
+  .cz-admin-main .fixed.inset-0 > div:not(.absolute),
+  .fixed.inset-0.z-50:not(.lg\:hidden) > div:not(.absolute) {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 100dvh;
+    max-height: 100dvh !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* iPhone zooms in when a field's text is under 16px — stop that. */
+  .cz-admin-main input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .cz-admin-main select,
+  .cz-admin-main textarea,
+  .fixed.inset-0 input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .fixed.inset-0 select,
+  .fixed.inset-0 textarea {
+    font-size: 16px;
+  }
+
+  /* Big page padding wastes space on a phone. */
+  .cz-admin-main .p-8  { padding: 1rem; }
+  .cz-admin-main .px-8 { padding-left: 1rem; padding-right: 1rem; }
+  .cz-admin-main .p-6  { padding: 1rem; }
+  .cz-admin-main .px-6 { padding-left: 1rem; padding-right: 1rem; }
+
+  /* Grids with 3+ fixed columns become 2 columns. */
+  .cz-admin-main .grid-cols-3,
+  .cz-admin-main .grid-cols-4,
+  .cz-admin-main .grid-cols-5,
+  .cz-admin-main .grid-cols-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* Page headers (title + buttons in one row) wrap instead of overflowing. */
+  .cz-admin-main .justify-between { flex-wrap: wrap; row-gap: 10px; }
+
+  /* Big headings scale down a little. */
+  .cz-admin-main .text-3xl { font-size: 1.5rem;  line-height: 2rem; }
+  .cz-admin-main .text-4xl { font-size: 1.75rem; line-height: 2.25rem; }
+}
+
+/* ── Small phones (under 400px) ────────────────────────────────── */
+@media (max-width: 399.98px) {
+  .cz-admin-main .p-5 { padding: 0.875rem; }
+  .cz-admin-main .px-5 { padding-left: 0.875rem; padding-right: 0.875rem; }
+}

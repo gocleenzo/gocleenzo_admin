@@ -23,6 +23,57 @@ export async function getFcmAccessToken(): Promise<string | null> {
   }
 }
 
+// NEW: an incoming in-app call to a professional (data.ring === '1') is
+// sent as a DATA-ONLY, high-priority push that expires after 40 seconds.
+// With no "notification" block, Android hands it straight to the worker
+// app, which rings full-screen like a phone call (see
+// cleenzo_worker/lib/calls/call_service.dart) instead of showing a
+// normal silent-ish tray notification. Everything else is unchanged.
+function buildMessage(
+  fcmToken: string,
+  title: string,
+  body: string,
+  data?: Record<string, string>
+) {
+  if (data?.ring === '1') {
+    return {
+      token: fcmToken,
+      data: { ...data, title, body },
+      android: { priority: 'high', ttl: '40s' },
+      apns: {
+        headers: { 'apns-priority': '10', 'apns-expiration': String(Math.floor(Date.now() / 1000) + 40) },
+        payload: { aps: { alert: { title, body }, sound: 'default' } },
+      },
+    }
+  }
+  return {
+    token: fcmToken,
+    notification: { title, body },
+    data: data ?? {},
+    android: {
+      priority: 'high',
+      notification: {
+        sound: 'default',
+        // REMOVED: click_action: 'FLUTTER_NOTIFICATION_CLICK'.
+        // This custom action requires a matching intent-filter
+        // in AndroidManifest.xml that was never actually added
+        // — without it, Android can fail to resolve ANY
+        // activity to launch when the notification is tapped,
+        // which silently does nothing (no crash, no error,
+        // just nothing happens — exactly the reported symptom).
+        // Removing it lets Android fall back to the app's
+        // default launcher intent, which
+        // getInitialMessage()/onMessageOpenedApp in
+        // notification_service.dart already correctly listen
+        // for — no manifest changes needed.
+      },
+    },
+    apns: {
+      payload: { aps: { sound: 'default', badge: 1 } },
+    },
+  }
+}
+
 // UPDATED return shape — { success, tokenInvalid }. Callers can tell
 // the difference between "FCM is temporarily down" and "this token is
 // dead/unregistered" (worth deleting from user_fcm_tokens).
@@ -48,34 +99,7 @@ export async function sendFcmNotification(
           'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          message: {
-            token: fcmToken,
-            notification: { title, body },
-            data: data ?? {},
-            android: {
-              priority: 'high',
-              notification: {
-                sound: 'default',
-                // REMOVED: click_action: 'FLUTTER_NOTIFICATION_CLICK'.
-                // This custom action requires a matching intent-filter
-                // in AndroidManifest.xml that was never actually added
-                // — without it, Android can fail to resolve ANY
-                // activity to launch when the notification is tapped,
-                // which silently does nothing (no crash, no error,
-                // just nothing happens — exactly the reported symptom).
-                // Removing it lets Android fall back to the app's
-                // default launcher intent, which
-                // getInitialMessage()/onMessageOpenedApp in
-                // notification_service.dart already correctly listen
-                // for — no manifest changes needed.
-              },
-            },
-            apns: {
-              payload: { aps: { sound: 'default', badge: 1 } },
-            },
-          },
-        }),
+        body: JSON.stringify({ message: buildMessage(fcmToken, title, body, data) }),
       }
     )
 
