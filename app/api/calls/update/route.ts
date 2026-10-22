@@ -13,7 +13,7 @@ import { callerPhone, last10, agoraPass, push, sb, UID, firstName, Role } from '
 
 export const dynamic = 'force-dynamic'
 
-const ACTIONS = ['status', 'answer', 'decline', 'cancel', 'missed', 'end'] as const
+const ACTIONS = ['status', 'answer', 'decline', 'cancel', 'missed', 'end', 'log'] as const
 
 export async function POST(req: NextRequest) {
   const phone = await callerPhone(req)
@@ -47,6 +47,15 @@ export async function POST(req: NextRequest) {
   const now = new Date().toISOString()
 
   if (action === 'status') return NextResponse.json({ status: call.status })
+
+  // Step-by-step log from each phone (joined, connected, errors…), kept on
+  // the call row so connection problems can be read back in Supabase.
+  if (action === 'log') {
+    const who = actingAsCallee ? calleeRole : callerRole
+    const ev = String(body?.event ?? '').slice(0, 300)
+    if (ev) await db.rpc('append_call_event', { p_call: call.id, p_who: who, p_ev: ev })
+    return NextResponse.json({ ok: true })
+  }
 
   if (action === 'answer') {
     if (!actingAsCallee) return NextResponse.json({ error: 'Not your call.' }, { status: 403 })
