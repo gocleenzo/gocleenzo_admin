@@ -112,8 +112,10 @@ export function windowProblem(b: BookingForCall): { error: string; opens_at?: st
 
 /** A 2-hour Agora pass for one channel + one person. */
 export function agoraPass(channel: string, uid: number) {
-  const appId = process.env.AGORA_APP_ID
-  const cert = process.env.AGORA_APP_CERTIFICATE
+  // .trim(): a space or line break copied into Vercel by mistake makes
+  // every call fail to connect, so it is removed here.
+  const appId = process.env.AGORA_APP_ID?.trim()
+  const cert = process.env.AGORA_APP_CERTIFICATE?.trim()
   if (!appId || !cert) throw new Error('Calling is not set up yet (AGORA_APP_ID / AGORA_APP_CERTIFICATE missing).')
   const ttl = 2 * 60 * 60
   const token = RtcTokenBuilder.buildTokenWithUid(appId, cert, channel, uid, RtcRole.PUBLISHER, ttl, ttl)
@@ -130,4 +132,23 @@ export async function push(origin: string, userId: string, title: string, body: 
       body: JSON.stringify({ user_id: userId, title, body, data }),
     })
   } catch { /* the app also polls, so a failed push is not fatal */ }
+}
+
+/** For /api/calls/check — says whether the Agora keys look right, without
+ *  revealing them. */
+export function agoraKeyCheck() {
+  const rawId = process.env.AGORA_APP_ID ?? ''
+  const rawCert = process.env.AGORA_APP_CERTIFICATE ?? ''
+  const id = rawId.trim(), cert = rawCert.trim()
+  const hex32 = (v: string) => /^[0-9a-f]{32}$/i.test(v)
+  return {
+    app_id_present: id.length > 0,
+    app_id_looks_right: hex32(id),
+    app_id_starts_with: id.slice(0, 4),
+    app_id_had_extra_spaces: rawId !== id,
+    certificate_present: cert.length > 0,
+    certificate_looks_right: hex32(cert),
+    certificate_had_extra_spaces: rawCert !== cert,
+    same_value_in_both: id.length > 0 && id === cert,
+  }
 }
