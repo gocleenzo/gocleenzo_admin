@@ -5,13 +5,13 @@
 // time window is open, logs the call, rings the other person (push), and
 // returns the caller's private Agora pass.
 import { NextRequest, NextResponse } from 'next/server'
-import { callerPhone, loadBooking, roleOf, windowProblem, agoraPass, push, sb, UID, firstName } from '@/lib/calls/server'
+import { caller, loadBooking, roleOf, windowProblem, agoraPass, push, sb, UID, firstName } from '@/lib/calls/server'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(req: NextRequest) {
-  const phone = await callerPhone(req)
-  if (!phone) return NextResponse.json({ error: 'Please log in again.' }, { status: 401 })
+  const me0 = await caller(req)
+  if (!me0) return NextResponse.json({ error: 'Please log in again.' }, { status: 401 })
 
   const body = await req.json().catch(() => ({}))
   const bookingId = String(body?.booking_id ?? '')
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
   const b = await loadBooking(bookingId)
   if (!b) return NextResponse.json({ error: 'Booking not found.' }, { status: 404 })
 
-  const role = roleOf(b, phone, body?.as)
+  const role = roleOf(b, me0, body?.as)
   if (!role) return NextResponse.json({ error: 'You are not part of this booking.' }, { status: 403 })
 
   const problem = windowProblem(b)

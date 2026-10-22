@@ -30,6 +30,46 @@ export const firstName = (n?: string | null) => (n ?? '').trim().split(/\s+/)[0]
 
 export function sb() { return createServiceClient() }
 
+export type Caller = { phone: string | null; userId: string | null }
+
+/** Who sent this request: their account id (Supabase login) and/or phone
+ *  number (last 10 digits). null when the login token is missing/invalid. */
+export async function caller(req: Request): Promise<Caller | null> {
+  const h = req.headers.get('authorization') ?? ''
+  const tok = h.startsWith('Bearer ') ? h.slice(7).trim() : ''
+  if (!tok) return null
+  // Supabase login first — the worker app's real account.
+  try {
+    const { data } = await sb().auth.getUser(tok)
+    const u = data.user
+    if (u) {
+      let phone = last10(u.phone)
+      if (phone.length !== 10) {
+        const { data: row } = await sb().from('users').select('phone').eq('id', u.id).maybeSingle()
+        phone = last10(row?.phone)
+      }
+      return { userId: u.id, phone: phone.length === 10 ? phone : null }
+    }
+  } catch { /* not a Supabase token */ }
+  // Firebase phone login — the customer app.
+  try {
+    const { payload } = await jwtVerify(tok, FIREBASE_KEYS, {
+      issuer: `https://securetoken.google.com/${FIREBASE_PROJECT}`,
+      audience: FIREBASE_PROJECT,
+    })
+    const p = last10(payload.phone_number as string | undefined)
+    if (p.length === 10) return { userId: null, phone: p }
+  } catch { /* invalid */ }
+  return null
+}
+
+/** Is this caller the given user (by account id, or by phone number)? */
+export function isPerson(c: Caller, user: { id: string; phone: string | null } | null | undefined): boolean {
+  if (!user) return false
+  if (c.userId && c.userId === user.id) return true
+  return !!c.phone && last10(user.phone) === c.phone
+}
+
 /** Phone number (last 10 digits) of whoever sent this request, or null. */
 export async function callerPhone(req: Request): Promise<string | null> {
   const h = req.headers.get('authorization') ?? ''
@@ -85,9 +125,9 @@ export async function loadBooking(bookingId: string): Promise<BookingForCall | n
 
 /** Which side of this booking the phone belongs to ('as' breaks a tie when
  *  the same number is both, e.g. while testing). */
-export function roleOf(b: BookingForCall, phone: string, as?: string): Role | null {
-  const isC = last10(b.customer?.phone) === phone
-  const isW = !!b.worker && last10(b.worker?.phone) === phone
+export function roleOf(b: BookingForCall, c: Caller, as?: string): Role | null {
+  const isC = isPerson(c, b.customer)
+  const isW = !!b.worker && isPerson(c, b.worker)
   if (isC && isW) return as === 'worker' ? 'worker' : 'customer'
   if (isC) return 'customer'
   if (isW) return 'worker'

@@ -9,15 +9,15 @@
 //   missed  – the caller gave up after ringing for a while
 //   end     – either side hangs up an answered call
 import { NextRequest, NextResponse } from 'next/server'
-import { callerPhone, last10, agoraPass, push, sb, UID, firstName, Role } from '@/lib/calls/server'
+import { caller as whoIs, isPerson, agoraPass, push, sb, UID, firstName, Role } from '@/lib/calls/server'
 
 export const dynamic = 'force-dynamic'
 
 const ACTIONS = ['status', 'answer', 'decline', 'cancel', 'missed', 'end', 'log'] as const
 
 export async function POST(req: NextRequest) {
-  const phone = await callerPhone(req)
-  if (!phone) return NextResponse.json({ error: 'Please log in again.' }, { status: 401 })
+  const me = await whoIs(req)
+  if (!me) return NextResponse.json({ error: 'Please log in again.' }, { status: 401 })
 
   const body = await req.json().catch(() => ({}))
   const callId = String(body?.call_id ?? '')
@@ -36,8 +36,8 @@ export async function POST(req: NextRequest) {
   const { data: people } = await db.from('users').select('id,full_name,phone').in('id', [call.caller_id, call.callee_id])
   const caller = (people ?? []).find((u: any) => u.id === call.caller_id)
   const callee = (people ?? []).find((u: any) => u.id === call.callee_id)
-  const isCaller = last10(caller?.phone) === phone
-  const isCallee = last10(callee?.phone) === phone
+  const isCaller = isPerson(me, caller as any)
+  const isCallee = isPerson(me, callee as any)
   if (!isCaller && !isCallee) return NextResponse.json({ error: 'Not your call.' }, { status: 403 })
 
   const callerRole = call.caller_role as Role
