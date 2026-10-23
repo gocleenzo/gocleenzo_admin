@@ -3716,7 +3716,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-1.5">
                   {areaBookings.map(b => {
                     const cfg         = STATUS[b.status] ?? STATUS.pending
                     const needsW      = !b.worker_id && ['pending','accepted'].includes(b.status)
@@ -3762,8 +3762,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                         <CelebrationBurst show={celebratingIds.has(b.id)}/>
                         <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: cfg.edge }}/>
 
-                        <div className="pl-3.5 pr-2.5 py-2">
-                          <div className="flex items-start justify-between gap-2 mb-0.5">
+                        <div className="pl-3.5 pr-2.5 py-1.5">
+                          <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
                                 <p className="font-black text-[14px] truncate max-w-[360px]" style={{ color: '#1E1B4B' }}>
@@ -3803,7 +3803,8 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             </span>
                           </div>
 
-                          <div className="flex items-center flex-wrap gap-x-3 gap-y-1 mb-1 text-[11.5px]">
+                          <div className="flex items-center justify-between gap-2 my-0.5">
+                          <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-[11.5px] min-w-0">
                             <span className="font-bold" style={{ color: '#3F3F46' }}>
                               🕐 {new Date(b.scheduled_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' })}
                               {' · '}
@@ -3820,9 +3821,6 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                             <span className="text-zinc-400 truncate max-w-[140px]" title={[b.flat_no, b.building, b.full_address, b.area].filter(Boolean).join(', ')}>
                               📍 {[b.flat_no, b.building].filter(Boolean).join(', ') || b.area}
                             </span>
-                          </div>
-
-                          <div className="flex items-center justify-between gap-2 mb-1">
                             {b.worker !== 'Unassigned' ? (
                               <div className="flex items-center gap-1.5">
                                 <div className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-black flex-shrink-0"
@@ -3852,21 +3850,22 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
                                 {isUrgentUnassigned(b.scheduled_at) ? '🔴' : '⏳'} Unassigned · {timeUntilLabel(b.scheduled_at)}
                               </span>
                             )}
-                            <span className={`text-[15px] font-black ${isCancelled ? 'line-through' : ''}`}
+                          </div>
+                            <span className={`flex-shrink-0 text-[15px] font-black ${isCancelled ? 'line-through' : ''}`}
                               style={{ color: isCancelled ? '#D4D4D8' : '#2F9BF0' }}>
                               ₹{b.final_amount.toLocaleString('en-IN')}
                             </span>
                           </div>
 
-                          <div className="pt-1.5" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
-                            <div className="flex items-center justify-center py-1">
+                          <div className="pt-0.5 flex items-center justify-between gap-2 flex-wrap" style={{ borderTop: '1px dashed #EDEBF7' }} onClick={e => e.stopPropagation()}>
+                            <div className="flex items-center">
                               {isLive && b.work_started_at
-                                ? <LiveTimer start={b.work_started_at} end={null} color="#6366F1" large/>
+                                ? <LiveTimer start={b.work_started_at} end={null} color="#6366F1"/>
                                 : isDone && totalSec > 0
-                                  ? <span className="font-mono font-black text-xl" style={{ color: '#10B981' }}>⏱ {durShort(totalSec)}</span>
-                                  : <span className="text-zinc-300 text-xs">—</span>}
+                                  ? <span className="font-mono font-black text-[13px]" style={{ color: '#10B981' }}>⏱ {durShort(totalSec)}</span>
+                                  : null}
                             </div>
-                            <div className="flex items-center justify-end gap-1 mt-1">
+                            <div className="flex items-center justify-end gap-1 flex-wrap">
                               <div className="flex items-center gap-1 mr-0.5">
                                 <a
                                   href={b.latitude && b.longitude
