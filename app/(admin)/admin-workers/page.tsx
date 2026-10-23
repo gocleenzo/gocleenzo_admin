@@ -1,6 +1,7 @@
 ﻿'use client'
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { loadStaffScope, workerInScope } from '@/app/(admin)/_lib/staff_scope'
 
 type AdminSession = { id: string; email: string; role: 'owner'|'assistant'; full_name?: string }
 
@@ -3522,7 +3523,7 @@ export default function AdminWorkers() {
       return items.length > 0 ? items.join(' + ') : (b.services?.name ?? 'Service')
     }
 
-    const list: Worker[] = (users ?? []).map((u: any) => {
+    const allList: Worker[] = (users ?? []).map((u: any) => {
       const w    = wMap[u.id] ?? {}
       const wb   = (bkng ?? []).filter((b: any) => b.worker_id === u.id)
       const comp = wb.filter((b: any) => b.status === 'completed')
@@ -3605,6 +3606,10 @@ export default function AdminWorkers() {
         ...wh,
       }
     }).sort((a, b) => b.totalRevenue - a.totalRevenue)
+
+    // Assistants only see the workers who cover their areas.
+    const staffScope = await loadStaffScope()
+    const list = staffScope.all ? allList : allList.filter(w => workerInScope(staffScope, w.id))
 
     setWorkers(list)
     try {

@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { loadStaffScope, pinInScope, workerInScope, staffAction } from '@/app/(admin)/_lib/staff_scope'
 
 /* ───────────────────────────── config ─────────────────────────────
    The "complaints" tab now reads from the SUPPORT QUERIES table.
@@ -11,7 +12,7 @@ import { createClient } from '@/lib/supabase/client'
    work fine against the view (harmless, gives us the joined names for
    free) — only the update calls needed to target the real table.      */
 const SUPPORT_TABLE = 'admin_support_queries'   // used for SELECT (read)
-const SUPPORT_WRITE_TABLE = 'support_queries'   // used for UPDATE (write) — the real table backing the view above
+// Status changes are saved through /api/staff/action (table support_queries).
 
 /* ───────────────────────────── types ───────────────────────────── */
 type Complaint = {
@@ -75,6 +76,8 @@ export default function AdminFeedback() {
 
   useEffect(() => {
     async function load() {
+      // Assistants only see complaints / reviews from their own areas.
+      const staffScope = await loadStaffScope()
       const [cRes, rRes, pRes] = await Promise.all([
         // Support queries — select everything, we map flexibly below.
         // Reading from the VIEW is fine and intentional — it gives us
@@ -90,7 +93,7 @@ export default function AdminFeedback() {
       ])
 
       if (pRes.data) {
-        setPros(pRes.data.map((u: any) => ({
+        setPros(pRes.data.filter((u: any) => workerInScope(staffScope, u.id)).map((u: any) => ({
           id: String(u.id),
           name: u.full_name || `Professional ${String(u.id).slice(0, 6)}`,
           phone: u.phone ?? '',
@@ -108,13 +111,23 @@ export default function AdminFeedback() {
         const bookingIds = Array.from(new Set(
           cRes.data.map((row: any) => row.booking_id).filter(Boolean).map(String)))
         const bookingWorker: Record<string, string> = {}
+        const bookingPin: Record<string, string> = {}
         if (bookingIds.length) {
           const { data: bks } = await supabase
-            .from('bookings').select('id, worker_id').in('id', bookingIds)
-          ;(bks ?? []).forEach((b: any) => { if (b.worker_id) bookingWorker[String(b.id)] = String(b.worker_id) })
+            .from('bookings').select('id, worker_id, addresses(pincode)').in('id', bookingIds)
+          ;(bks ?? []).forEach((b: any) => {
+            if (b.worker_id) bookingWorker[String(b.id)] = String(b.worker_id)
+            if (b.addresses?.pincode) bookingPin[String(b.id)] = String(b.addresses.pincode)
+          })
         }
+        // Same rule as the server: the booking is in your areas, or the
+        // professional involved covers your areas.
+        const rowInScope = (row: any) => staffScope.all ||
+          (row.booking_id && pinInScope(staffScope, bookingPin[String(row.booking_id)])) ||
+          workerInScope(staffScope, row.worker_id) ||
+          workerInScope(staffScope, row.user_id)
 
-        const mapped: Complaint[] = cRes.data.map((row: any) => ({
+        const mapped: Complaint[] = cRes.data.filter(rowInScope).map((row: any) => ({
           id:          String(row.id),
           title:       pick(row, ['subject', 'type', 'category', 'title', 'topic']) ?? 'Support query',
           description: pick(row, ['description', 'message', 'query', 'details', 'body', 'complaint', 'text']) ?? '',
@@ -136,7 +149,19 @@ export default function AdminFeedback() {
         setComplaints([])
       }
 
-      if (rRes.data) setReviews(rRes.data.map((r: any) => ({
+      let reviewRows: any[] = rRes.data ?? []
+      if (!staffScope.all && reviewRows.length) {
+        const rbIds = Array.from(new Set(reviewRows.map((r: any) => r.booking_id).filter(Boolean).map(String)))
+        const rPin: Record<string, string> = {}
+        if (rbIds.length) {
+          const { data: rb } = await supabase.from('bookings').select('id, addresses(pincode)').in('id', rbIds)
+          ;(rb ?? []).forEach((b: any) => { if (b.addresses?.pincode) rPin[String(b.id)] = String(b.addresses.pincode) })
+        }
+        reviewRows = reviewRows.filter((r: any) =>
+          (r.booking_id && pinInScope(staffScope, rPin[String(r.booking_id)])) ||
+          workerInScope(staffScope, r.worker_id))
+      }
+      if (rRes.data) setReviews(reviewRows.map((r: any) => ({
         id: r.id, booking_id: r.booking_id,
         service_rating: r.service_rating ?? 0, worker_rating: r.worker_rating ?? 0,
         comment: r.comment, status: r.status ?? 'published', created_at: r.created_at,
@@ -184,7 +209,8 @@ export default function AdminFeedback() {
     // UPDATE against a multi-table view like this. support_queries has
     // every column being written here (status), so this is a direct,
     // safe swap — no trigger or view change needed.
-    const { error } = await supabase.from(SUPPORT_WRITE_TABLE).update({ status }).eq('id', id)
+    // Saved through the server, which checks it is in your areas.
+    const { error } = await staffAction({ action: 'update_complaint', id, status })
     if (error) {
       console.error('status update failed:', error.message)
       setComplaints(prev) // revert on failure
@@ -192,7 +218,8 @@ export default function AdminFeedback() {
     }
   }
   async function updateReview(id: string, status: string) {
-    await supabase.from('reviews').update({ status }).eq('id', id)
+    const { error } = await staffAction({ action: 'update_review', id, status })
+    if (error) { alert('Could not update: ' + error.message); return }
     setReviews(r => r.map(x => x.id === id ? { ...x, status } : x))
   }
 

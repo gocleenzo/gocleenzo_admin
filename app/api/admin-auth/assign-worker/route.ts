@@ -1,7 +1,7 @@
 // app/api/admin-auth/assign-worker/route.ts
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
-import { verifyAdminSession } from '@/lib/adminAuth'
+import { requestScope, bookingAllowed, workerAllowed, OUTSIDE_AREA } from '@/lib/staffScope'
 
 function supabaseAdmin() {
   return createSupabaseClient(
@@ -12,13 +12,18 @@ function supabaseAdmin() {
 }
 
 export async function POST(req: NextRequest) {
-  const token = req.cookies.get('admin_session')?.value
-  const session = token ? await verifyAdminSession(token) : null
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const scope = await requestScope(req)
+  if (!scope) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const session = scope.session
 
   const { booking_id, worker_id } = await req.json()
   if (!booking_id || !worker_id) {
     return NextResponse.json({ error: 'booking_id and worker_id are required' }, { status: 400 })
+  }
+
+  // Assistants: only bookings in their areas, only workers who cover them.
+  if (!(await bookingAllowed(scope, booking_id)) || !workerAllowed(scope, worker_id)) {
+    return NextResponse.json({ error: OUTSIDE_AREA }, { status: 403 })
   }
 
   const supabase = supabaseAdmin()

@@ -26,6 +26,56 @@ export default function AdminAssistantsPage() {
 
   const [toggling, setToggling] = useState<string | null>(null)
 
+  // ── Areas each assistant may see ──
+  const [areaList, setAreaList] = useState<{ area_name: string; pincodes: string[] }[]>([])
+  const [assigned, setAssigned] = useState<Record<string, string[]>>({})
+  const [areasErr, setAreasErr] = useState<string | null>(null)
+  const [editAreasId, setEditAreasId] = useState<string | null>(null)
+  const [draftAreas, setDraftAreas] = useState<Set<string>>(new Set())
+  const [savingAreas, setSavingAreas] = useState(false)
+
+  async function loadAreas() {
+    try {
+      const res = await fetch('/api/staff/areas', { cache: 'no-store' })
+      const json = await res.json()
+      if (!res.ok) { setAreasErr(json?.error ?? 'Could not load areas'); return }
+      setAreasErr(null)
+      setAreaList(json.areas ?? [])
+      setAssigned(json.assigned ?? {})
+    } catch (e: any) {
+      setAreasErr(e?.message ?? 'Could not load areas')
+    }
+  }
+  useEffect(() => { loadAreas() }, [])
+
+  function openAreas(a: Assistant) {
+    setEditAreasId(a.id)
+    setDraftAreas(new Set(assigned[a.id] ?? []))
+  }
+  function tickArea(name: string) {
+    setDraftAreas(prev => {
+      const n = new Set(prev)
+      n.has(name) ? n.delete(name) : n.add(name)
+      return n
+    })
+  }
+  async function saveAreas(id: string) {
+    setSavingAreas(true)
+    try {
+      const res = await fetch('/api/staff/areas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_user_id: id, areas: Array.from(draftAreas) }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) { alert(json?.error ?? 'Could not save areas'); return }
+      setAssigned(p => ({ ...p, [id]: json.areas ?? Array.from(draftAreas) }))
+      setEditAreasId(null)
+    } finally {
+      setSavingAreas(false)
+    }
+  }
+
   async function load() {
     setLoading(true); setErr(null)
     try {
@@ -172,13 +222,34 @@ export default function AdminAssistantsPage() {
           <div className="py-10 text-center text-sm text-gray-400">No assistants yet — create one above.</div>
         ) : (
           <div className="divide-y divide-gray-100">
-            {assistants.map(a => (
-              <div key={a.id} className="flex items-center justify-between px-5 py-3.5 gap-3">
+            {areasErr && (
+              <div className="px-5 py-3 text-[12px] font-semibold text-amber-700 bg-amber-50">⚠️ Areas: {areasErr}</div>
+            )}
+            {assistants.map(a => {
+              const mine = assigned[a.id] ?? []
+              const editing = editAreasId === a.id
+              return (
+              <div key={a.id} className="px-5 py-3.5">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="min-w-0">
                   <p className="text-sm font-bold text-gray-900 truncate">{a.full_name}</p>
                   <p className="text-[12px] text-gray-400 truncate">{a.email}</p>
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {mine.length === 0 ? (
+                      <span className="text-[10px] font-black px-2 py-0.5 rounded-full" style={{ background: '#FEF3C7', color: '#B45309' }}>
+                        No areas yet — sees nothing
+                      </span>
+                    ) : mine.map(n => (
+                      <span key={n} className="text-[10px] font-black px-2 py-0.5 rounded-full" style={{ background: '#ECFEFF', color: '#0E7490' }}>📍 {n}</span>
+                    ))}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
+                  <button onClick={() => editing ? setEditAreasId(null) : openAreas(a)}
+                    className="text-[11px] font-black px-3 py-1.5 rounded-lg border"
+                    style={{ borderColor: '#67E8F9', color: '#0E7490' }}>
+                    {editing ? 'Close' : '📍 Areas'}
+                  </button>
                   <span className="text-[10px] font-black px-2 py-1 rounded-full"
                     style={{
                       background: a.is_active ? '#DCFCE7' : '#FEE2E2',
@@ -196,7 +267,43 @@ export default function AdminAssistantsPage() {
                   </button>
                 </div>
               </div>
-            ))}
+              {editing && (
+                <div className="mt-3 rounded-xl border border-cyan-100 bg-cyan-50/40 p-3">
+                  <p className="text-[11px] font-bold text-gray-500 mb-2">
+                    Tick the areas {a.full_name} can see. They will only see bookings, workers, complaints, slots and the live map for these areas.
+                  </p>
+                  {areaList.length === 0 ? (
+                    <p className="text-[12px] text-gray-400">No areas found. Add them on the Service Areas page first.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-72 overflow-y-auto">
+                      {areaList.map(ar => (
+                        <label key={ar.area_name}
+                          className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-white border cursor-pointer"
+                          style={{ borderColor: draftAreas.has(ar.area_name) ? '#0891B2' : '#E5E7EB' }}>
+                          <input type="checkbox" className="mt-0.5" checked={draftAreas.has(ar.area_name)}
+                            onChange={() => tickArea(ar.area_name)} />
+                          <span className="min-w-0">
+                            <span className="block text-[12px] font-black text-gray-800">{ar.area_name}</span>
+                            <span className="block text-[10px] text-gray-400 truncate">{(ar.pincodes ?? []).join(', ')}</span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex justify-end gap-2 mt-3">
+                    <button onClick={() => setEditAreasId(null)}
+                      className="text-[12px] font-bold px-3 py-2 rounded-lg text-gray-500">Cancel</button>
+                    <button onClick={() => saveAreas(a.id)} disabled={savingAreas}
+                      className="text-[12px] font-black px-4 py-2 rounded-lg text-white disabled:opacity-50"
+                      style={{ background: '#0891B2' }}>
+                      {savingAreas ? 'Saving…' : `Save ${draftAreas.size} area${draftAreas.size === 1 ? '' : 's'}`}
+                    </button>
+                  </div>
+                </div>
+              )}
+              </div>
+              )
+            })}
           </div>
         )}
       </div>

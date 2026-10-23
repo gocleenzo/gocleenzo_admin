@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { loadStaffScope, pinInScope } from '@/app/(admin)/_lib/staff_scope'
 
 // ============================================================================
 // Admin Slots page
@@ -171,7 +172,10 @@ export default function AdminSlotsPage() {
         setAreasLoading(false)
         return
       }
-      const rows = (data ?? []) as { pincode: string; area: string; parent_area: string | null }[]
+      // Assistants only get their own areas' pincodes to pick from.
+      const staffScope = await loadStaffScope()
+      const rows = ((data ?? []) as { pincode: string; area: string; parent_area: string | null }[])
+        .filter(r => pinInScope(staffScope, r.pincode))
       const seen = new Set<string>()
       const opts: AreaOption[] = []
       for (const r of rows) {

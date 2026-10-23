@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { loadStaffScope, workerInScope } from '@/app/(admin)/_lib/staff_scope'
 
 type KycSummary = {
   worker_id: string
@@ -60,7 +61,10 @@ export default function KycReview() {
     try {
       const res = await fetch('/api/kyc', { cache: 'no-store' })
       const json = await res.json()
-      setList(json.list ?? [])
+      // Assistants only see KYC of workers in their areas.
+      const staffScope = await loadStaffScope()
+      const all: KycSummary[] = json.list ?? []
+      setList(staffScope.all ? all : all.filter(k => workerInScope(staffScope, k.worker_id)))
     } catch { setList([]) } finally { setLoading(false) }
   }, [])
 

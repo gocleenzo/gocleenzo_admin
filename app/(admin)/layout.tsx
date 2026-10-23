@@ -4,6 +4,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import SosWatcher from './sos_watcher'
+import { loadStaffScope, pinInScope, workerInScope } from './_lib/staff_scope'
 import './admin-responsive.css'
 
 const NAV = [
@@ -231,7 +232,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     async function fetch() {
-      const { data } = await supabase.from('bookings').select('status')
+      const { data: rows } = await supabase.from('bookings').select('status, addresses(pincode)')
+      const sc = await loadStaffScope()
+      const data = rows?.filter((b: any) => pinInScope(sc, b.addresses?.pincode))
       if (data) {
         setLiveJobs(data.filter(b => b.status === 'in_progress').length)
         setPending(data.filter(b => b.status === 'pending').length)
@@ -249,14 +252,14 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     const todayStr = localDateStr(new Date())
     const liveStatuses = ['pending','accepted','otp_verified','in_progress']
 
-    const [{ data: statusRows }, { data: upcomingRows }, { data: workerRows }, { data: availRows }, { data: schedRows }, { data: activeRows }] =
+    const [{ data: statusAll }, { data: upcomingAll }, { data: workerAll }, { data: availRows }, { data: schedRows }, { data: activeRows }] =
       await Promise.all([
-        supabase.from('bookings').select('status'),
+        supabase.from('bookings').select('status, addresses(pincode)'),
         supabase.from('bookings')
           .select('id,status,final_amount,scheduled_at,worker_id,service_duration_minutes,booking_duration_minutes,extra_time_mins,worker:users!worker_id(full_name),services(name),addresses(pincode)')
           .in('status', liveStatuses)
           .order('scheduled_at', { ascending: true })
-          .limit(6),
+          .limit(300),
         supabase.from('users').select('id,full_name').eq('role','worker'),
         supabase.from('workers').select('user_id,is_available'),
         supabase.from('worker_schedule_dates')
@@ -265,6 +268,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         supabase.from('bookings').select('worker_id,scheduled_at,service_duration_minutes,booking_duration_minutes,extra_time_mins')
           .in('status', ['pending','accepted','in_progress']),
       ])
+
+    // Assistants: only their areas' bookings and workers.
+    const sc = await loadStaffScope()
+    const statusRows = statusAll?.filter((b: any) => pinInScope(sc, b.addresses?.pincode))
+    const upcomingRows = upcomingAll?.filter((b: any) => pinInScope(sc, b.addresses?.pincode)).slice(0, 6)
+    const workerRows = workerAll?.filter((w: any) => workerInScope(sc, w.id))
 
     if (statusRows) {
       setStatusCounts({
@@ -316,6 +325,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         for (const row of (pinRows ?? []) as any[]) {
           if (!pincodeWorkerMap[row.pincode]) pincodeWorkerMap[row.pincode] = new Set()
           pincodeWorkerMap[row.pincode].add(row.worker_id)
+        }
+        for (const k of Object.keys(pincodeWorkerMap)) {
+          pincodeWorkerMap[k] = new Set(Array.from(pincodeWorkerMap[k]).filter(id => workerInScope(sc, id)))
         }
         const entries = list.map(b => [b.id, b.pincode && pincodeWorkerMap[b.pincode]?.size ? pincodeWorkerMap[b.pincode] : null] as const)
         setZoneEligible(Object.fromEntries(entries))

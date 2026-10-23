@@ -6,6 +6,7 @@ import RecurringPackageBadge from './recurring_package_badge'
 import NextJobsSuggestions, { openNextJobSuggestions } from './next_jobs_suggestions'
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 import { fetchCompletedRevenue, getISTMonthStart } from '../_lib/revenue'
+import { loadStaffScope, pinInScope, workerInScope, staffRpc, staffUpdateBooking } from '@/app/(admin)/_lib/staff_scope'
 
 type BookedService = { serviceId: string | null; name: string; qty: number; unit_price: number }
 
@@ -755,7 +756,7 @@ function PhoneBookingModal({ services, workers, allBookings, onClose, onDone }: 
     setSubmitting(true)
     setError(null)
     try {
-      const { data, error: rpcError } = await supabase.rpc('admin_create_manual_booking', {
+      const { data, error: rpcError } = await staffRpc('admin_create_manual_booking', {
         p_customer_phone: normalizePhone(phone),
         p_customer_name: name.trim() || null,
         p_services: validLines.map(l => ({ service_id: l.serviceId, quantity: Math.max(1, l.quantity) })),
@@ -1154,7 +1155,7 @@ function EditManualBookingModal({ booking, services, workers, allBookings, onClo
     setSubmitting(true)
     setError(null)
     try {
-      const { data, error: rpcError } = await supabase.rpc('admin_edit_manual_booking', {
+      const { data, error: rpcError } = await staffRpc('admin_edit_manual_booking', {
         p_booking_id: booking.id,
         p_customer_phone: normalizePhone(phone),
         p_customer_name: name.trim() || null,
@@ -1405,7 +1406,7 @@ function BlockSlotModal({ workers, allBookings, onClose, onDone }: {
     setSubmitting(true)
     setError(null)
     try {
-      const { data, error: rpcError } = await supabase.rpc('admin_block_slot', {
+      const { data, error: rpcError } = await staffRpc('admin_block_slot', {
         p_worker_id: workerId,
         p_scheduled_at: scheduledIso,
         p_duration_minutes: durationMins,
@@ -1765,7 +1766,7 @@ function RecurringPhoneBookingModal({ services, workers, allBookings, onClose, o
       const overridesPayload = conflicts.map(day => ({
         day, time: timeSlotTo24h(dayOverrides[day]),
       }))
-      const { data, error: rpcError } = await supabase.rpc('admin_create_recurring_package', {
+      const { data, error: rpcError } = await staffRpc('admin_create_recurring_package', {
         p_customer_name: name.trim() || null,
         p_customer_phone: normalizePhone(phone),
         p_flat_no: flatNo.trim() || null,
@@ -2198,7 +2199,7 @@ function Drawer({
     setRescheduleError(null)
     try {
       const isoString = new Date(newDateTime).toISOString()
-      const { data, error } = await supabase.rpc('admin_reschedule_booking', {
+      const { data, error } = await staffRpc('admin_reschedule_booking', {
         p_booking_id: b.id,
         p_new_scheduled_at: isoString,
       })
@@ -2259,7 +2260,7 @@ function Drawer({
       }
     }
     if (status === 'cancelled') u.work_ended_at = now
-    await supabase.from('bookings').update(u).eq('id', b.id)
+    { const { error: upErr } = await staffUpdateBooking(b.id, u); if (upErr) { alert(upErr.message); setBusy(false); return } }
     if (status === 'in_progress') {
       await sendNotification(
         b.customer_id, '⚡ Work Started',
@@ -2819,7 +2820,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     }
     bookingsQuery = bookingsQuery.order('created_at', { ascending: false })
 
-    const [{ data: bd }, { data: wd }, { data: availData }, { data: activeJobs }, { data: schedDateRows }, { data: areaRows }] =
+    const [{ data: bdAll }, { data: wdAll }, { data: availData }, { data: activeJobs }, { data: schedDateRows }, { data: areaRows }] =
       await Promise.all([
         bookingsQuery,
         supabase.from('users').select('id,full_name,phone').eq('role','worker').eq('is_active', true).order('full_name'),
@@ -2830,6 +2831,15 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
           .gte('date', todayStr),
         supabase.from('service_areas').select('pincode,area,parent_area').eq('is_active', true),
       ])
+
+    // Assistants only see bookings at their areas' pincodes and the
+    // workers who cover them (owner sees everything). Every change is
+    // checked again on the server, so this is not the only guard.
+    const staffScope = await loadStaffScope()
+    const bd = staffScope.all ? bdAll
+      : (bdAll ?? []).filter((b: any) => pinInScope(staffScope, b.addresses?.pincode))
+    const wd = staffScope.all ? wdAll
+      : (wdAll ?? []).filter((w: any) => workerInScope(staffScope, w.id))
 
     const availMap: Record<string,boolean> = {}
     ;(availData ?? []).forEach((w: any) => { availMap[w.user_id] = w.is_available })
@@ -3100,7 +3110,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         (new Date(now).getTime() - new Date(bk.work_started_at).getTime()) / 1000)
     }
     if (status === 'cancelled') u.work_ended_at = now
-    await supabase.from('bookings').update(u).eq('id', bId)
+    { const { error: upErr } = await staffUpdateBooking(bId, u); if (upErr) { alert(upErr.message); return } }
     if (status === 'completed') {
       setCelebratingIds(prev => new Set(prev).add(bId))
       setTimeout(() => {
@@ -3282,10 +3292,7 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
     setRescheduling(true)
     try {
       for (const p of toMove) {
-        const { error } = await supabase
-          .from('bookings')
-          .update({ scheduled_at: p.newAt.toISOString() })
-          .eq('id', p.id)
+        const { error } = await staffUpdateBooking(p.id, { scheduled_at: p.newAt.toISOString() })
         if (error) {
           alert(`Stopped partway — could not reschedule one booking: ${error.message}`)
           break

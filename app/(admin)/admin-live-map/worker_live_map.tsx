@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { GoogleMap, useJsApiLoader } from '@react-google-maps/api'
 import { isWithinShift, type WeekSchedule } from '@/lib/shift'
 import { GOOGLE_MAPS_LOADER_OPTIONS } from '@/lib/googleMapsLoader'
+import { loadStaffScope, pinInScope, workerInScope } from '@/app/(admin)/_lib/staff_scope'
 
 type Worker = {
   user_id: string
@@ -158,8 +159,12 @@ export default function WorkerLiveMap() {
         const res = await fetch('/api/workers/live', { cache: 'no-store' })
         const json = await res.json()
         if (!active || !json.workers) return
+        // Assistants only see workers who cover their areas.
+        const staffScope = await loadStaffScope()
         const map = new Map<string, Worker>()
-        for (const w of json.workers as Worker[]) map.set(w.user_id, w)
+        for (const w of json.workers as Worker[]) {
+          if (workerInScope(staffScope, w.user_id)) map.set(w.user_id, w)
+        }
         setWorkers(map)
       } catch {
         /* keep last known */
@@ -183,8 +188,12 @@ export default function WorkerLiveMap() {
         const res = await fetch(`/api/bookings/today-map?date=${ordersDate}`, { cache: 'no-store' })
         const json = await res.json()
         if (!active || !json.orders) return
+        // Assistants only see orders in their areas.
+        const staffScope = await loadStaffScope()
         const map = new Map<string, Order>()
-        for (const o of json.orders as Order[]) map.set(o.id, o)
+        for (const o of json.orders as Order[]) {
+          if (pinInScope(staffScope, o.pincode)) map.set(o.id, o)
+        }
         setOrders(map)
       } catch {
         /* keep last known */
