@@ -7,6 +7,7 @@ import NextJobsSuggestions, { openNextJobSuggestions } from './next_jobs_suggest
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 import { fetchCompletedRevenue, getISTMonthStart } from '../_lib/revenue'
 import { loadStaffScope, pinInScope, workerInScope, staffRpc, staffUpdateBooking } from '@/app/(admin)/_lib/staff_scope'
+import { fetchAllRows } from '@/app/(admin)/_lib/fetch_all'
 
 type BookedService = { serviceId: string | null; name: string; qty: number; unit_price: number }
 
@@ -2793,6 +2794,9 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     })()
 
+    // Built as a function so fetchAllRows can ask for 1,000 at a time
+    // (Supabase stops at 1,000 rows per request).
+    const buildBookingsQuery = () => {
     let bookingsQuery = supabase.from('bookings').select(
       `id,status,final_amount,base_price,discount_amount,scheduled_at,created_at,
        otp,worker_id,payment_status,special_instructions,work_started_at,work_ended_at,booking_duration_minutes,
@@ -2818,11 +2822,12 @@ export default function BookingsDashboard({ scope }: { scope: 'month' | 'all' })
         .gte('scheduled_at', rangeStart.toISOString())
         .lt('scheduled_at', rangeEnd.toISOString())
     }
-    bookingsQuery = bookingsQuery.order('created_at', { ascending: false })
+    return bookingsQuery.order('created_at', { ascending: false }).order('id', { ascending: false })
+    }
 
     const [{ data: bdAll }, { data: wdAll }, { data: availData }, { data: activeJobs }, { data: schedDateRows }, { data: areaRows }] =
       await Promise.all([
-        bookingsQuery,
+        fetchAllRows(buildBookingsQuery),
         supabase.from('users').select('id,full_name,phone').eq('role','worker').eq('is_active', true).order('full_name'),
         supabase.from('workers').select('user_id,is_available'),
         supabase.from('bookings').select('worker_id').eq('status','in_progress'),

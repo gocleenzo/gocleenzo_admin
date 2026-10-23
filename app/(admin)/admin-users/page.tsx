@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { fetchAllRows } from '@/app/(admin)/_lib/fetch_all'
 import AddressMapPicker, { type PickedAddress } from '../../components/AddressMapPicker'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -364,33 +365,40 @@ export default function AdminUsers() {
   const [servicePins, setServicePins] = useState<Set<string>>(new Set())
   const supabase = createClient()
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  // silent = refresh in the background (live updates) without the
+  // full-page "Loading…" flash.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
 
     // NOTE: 'customer' is assumed to be the exact value stored in
     // users.role for regular app users (as opposed to 'worker' / 'admin').
     // If your role enum uses a different value, change it here.
     const [{ data: userRows }, { data: addrRows }, { data: bookingRows }, { data: areaRows }] = await Promise.all([
-      supabase.from('users')
+      // fetchAllRows: Supabase stops at 1,000 rows per request, so this
+      // keeps asking until every customer is loaded.
+      fetchAllRows(() => supabase.from('users')
         .select('id,full_name,phone,email,city,is_active,is_verified,created_at,is_deleted')
         .eq('role', 'customer')
         .eq('is_deleted', false)
-        .order('created_at', { ascending: false }),
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })),
       // ALL saved addresses (not just the default) — the area filter
       // needs every address, so a customer with two homes shows in both
       // areas. The default one still drives the Address column / Edit
       // Location exactly as before.
-      supabase.from('addresses')
+      fetchAllRows(() => supabase.from('addresses')
         .select('id,user_id,area,city,pincode,full_address,latitude,longitude,is_default,is_deleted')
-        .eq('is_deleted', false),
-      supabase.from('bookings')
+        .eq('is_deleted', false)
+        .order('id', { ascending: true })),
+      fetchAllRows(() => supabase.from('bookings')
         .select(
           `id,customer_id,status,final_amount,scheduled_at,created_at,
            services(name),
            worker:users!worker_id(full_name),
            booking_items(service_name,services(name))`
         )
-        .order('scheduled_at', { ascending: false }),
+        .order('scheduled_at', { ascending: false })
+        .order('id', { ascending: true })),
       // Your Service Coverage pincodes — used to split the area list into
       // "In service area" and "Outside service area".
       supabase.from('service_areas').select('pincode,is_active'),
@@ -476,9 +484,38 @@ export default function AdminUsers() {
 
     setCustomers(rows)
     setLoading(false)
+    setUpdatedAt(new Date())
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // ── LIVE: refresh by itself when a customer signs up, changes an
+  // address or books. Several changes close together = one refresh.
+  // A 60-second refresh also runs in case live updates are switched off
+  // for a table in Supabase.
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+  const [liveOn, setLiveOn] = useState(false)
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const soon = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => load(true), 3000)
+    }
+    const ch = supabase.channel(`users-live-${Date.now()}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, soon)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'addresses' }, soon)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, soon)
+      .subscribe((status: string) => setLiveOn(status === 'SUBSCRIBED'))
+    const poll = setInterval(() => {
+      if (document.visibilityState === 'visible') load(true)
+    }, 60000)
+    return () => {
+      if (timer) clearTimeout(timer)
+      clearInterval(poll)
+      supabase.removeChannel(ch)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load])
 
   // keep an open drawer in sync with fresh data
   useEffect(() => {
@@ -597,7 +634,15 @@ export default function AdminUsers() {
             style={{ background: '#0891B214', border: '1px solid #0891B225' }}>👥</div>
           <div>
             <h1 className="text-2xl font-black text-slate-900 leading-tight tracking-tight">Users</h1>
-            <p className="text-xs text-slate-400 font-medium">{customers.length} customers · {customers.filter(c => c.totalOrders > 0).length} with orders</p>
+            <p className="text-xs text-slate-400 font-medium flex items-center gap-1.5 flex-wrap">
+              <span>{customers.length} customers · {customers.filter(c => c.totalOrders > 0).length} with orders</span>
+              <span className="inline-flex items-center gap-1 text-[10px] font-black px-1.5 py-0.5 rounded-full"
+                style={liveOn ? { background: '#DCFCE7', color: '#15803D' } : { background: '#F1F5F9', color: '#64748B' }}
+                title={liveOn ? 'Updates by itself when customers sign up or book' : 'Refreshes every minute'}>
+                <span className={`w-1.5 h-1.5 rounded-full ${liveOn ? 'animate-pulse' : ''}`} style={{ background: liveOn ? '#16A34A' : '#94A3B8' }}/>
+                {liveOn ? 'LIVE' : 'Auto'}{updatedAt ? ` · ${updatedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : ''}
+              </span>
+            </p>
           </div>
         </div>
         <div className="flex flex-col sm:flex-row gap-2 w-full md:w-auto">
